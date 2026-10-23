@@ -135,8 +135,8 @@ function sheetjsCommit() {
 // Streaming JSON writer: the result for big sheets can exceed V8's max string
 // length, so big arrays are written element by element (same output as
 // JSON.stringify(value, replacer)).
-// Throws an error with code "TOO_BIG" once more than maxBytes (UTF-16 units, close
-// enough) would be written; the caller then replaces the file.
+// Throws an error with code "TOO_BIG" once more than maxBytes UTF-8 bytes would be
+// written; the caller then replaces the file.
 function writeJson(file, value, maxBytes = Infinity) {
   const fd = fs.openSync(file, "w")
   let pending = []
@@ -144,7 +144,7 @@ function writeJson(file, value, maxBytes = Infinity) {
   const emit = (s) => {
     pending.push(s)
     size += s.length
-    total += s.length
+    total += Buffer.byteLength(s, "utf8") // bytes on disk, not UTF-16 units
     if (total > maxBytes) throw Object.assign(new Error("too big"), { code: "TOO_BIG" })
     if (size > 1 << 22) { fs.writeSync(fd, pending.join("")); pending = []; size = 0 }
   }
