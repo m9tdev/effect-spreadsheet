@@ -215,8 +215,9 @@ describe("recordKeys: hostile inputs stay linear", () => {
       // minimums, and the order alternates (reference first, then keys
       // first), so neither side always runs right after the other's garbage.
       // Runs are separated by an event-loop turn, so a slow (quadratic) run
-      // fails here instead of tripping the hang watchdog; the only early exit
-      // is when the ratio is far off.
+      // fails here instead of tripping the hang watchdog. The only early exit
+      // is when the ratio is far off, and only from the second attempt on, so
+      // one slow first sample can't decide the result.
       for (let r = 0; r < 3; r++) {
         await new Promise((resolve) => setImmediate(resolve))
         if (r % 2 === 0) {
@@ -226,7 +227,7 @@ describe("recordKeys: hostile inputs stay linear", () => {
           keysMs = Math.min(keysMs, timed(() => allKeys(names)).ms)
           referenceMs = Math.min(referenceMs, timed(() => reference(names)).ms)
         }
-        if (keysMs / Math.max(referenceMs, 0.5) > 4 * MAX_RELATIVE) break
+        if (r >= 1 && keysMs / Math.max(referenceMs, 0.5) > 4 * MAX_RELATIVE) break
       }
       expect(
         keysMs / Math.max(referenceMs, 0.5),
