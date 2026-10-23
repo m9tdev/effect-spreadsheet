@@ -196,6 +196,21 @@ describe("xml tokenizer: split invariance and cost", () => {
 
 })
 
+describe("xml tokenizer: normalization (XML 1.0)", () => {
+  it("line ends in text and CDATA become LF (§2.11), however split; &#13; stays", () => {
+    const doc = "<a>x\r\ny\rz\n<![CDATA[p\r\nq\rr]]>&#13;</a>"
+    const expected = [["open", "a", []], ["text", "x\ny\nz\np\nq\nr\r"], ["close", "a"]]
+    expect(one(doc).events).toEqual(expected)
+    for (let cut = 0; cut <= doc.length; cut++) expect(tokenize([doc.slice(0, cut), doc.slice(cut)]).events).toEqual(expected)
+  })
+
+  it("literal tab, LF and CR in attribute values become spaces (§3.3.3); references stay", () => {
+    const { events } = one('<a v="1\t2\n3\r\n4\r5" w="&#9;&#10;&#13;"/>')
+    expect(events[0]).toEqual(["open", "a", [["v", "1 2 3 4 5"], ["w", "\t\n\r"]]])
+  })
+
+})
+
 describe("xml tokenizer: rejected input", () => {
   const malformed: Record<string, ReadonlyArray<string>> = {
     "a DTD": [`<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]><x>&a;</x>`],

@@ -18,6 +18,11 @@
  * (`maxXmlAttributes`), text, attribute values and the length of one tag,
  * comment or CDATA section (`maxStringLength`).
  *
+ * Normalized as XML 1.0 says: line ends in text and CDATA (§2.11: CRLF and
+ * a lone CR become LF), and literal whitespace in attribute values (§3.3.3:
+ * tab, LF and CR become a space); characters written as references are
+ * kept.
+ *
  * Cost: every character is examined a bounded number of times (the
  * `work` counter); a token split across many pieces is collected in parts
  * and joined once.
@@ -72,6 +77,12 @@ const TERMINATOR: Record<number, string> = {
 
 /** Extra room for markup beyond `maxStringLength` (tag name, attribute names, quotes). */
 const MARKUP_SLACK = 64 * 1024
+
+/** XML 1.0 §2.11: CRLF and a lone CR become LF. */
+const normalizeLineEnds = (s: string): string => (s.indexOf("\r") < 0 ? s : s.replace(/\r\n?/g, "\n"))
+
+/** XML 1.0 §3.3.3 (CDATA-type attributes): after §2.11, each literal tab, LF or CR becomes a space. */
+const normalizeAttribute = (s: string): string => (/[\t\n\r]/.test(s) ? s.replace(/\r\n|[\t\n\r]/g, " ") : s)
 
 const localName = (qname: string): string => {
   const colon = qname.indexOf(":")
@@ -199,7 +210,8 @@ export class XmlTokenizer {
       }
       return
     }
-    const value = this.decode(raw)
+    // line ends are normalized first (XML 1.0 §2.11), so &#13; survives
+    const value = this.decode(normalizeLineEnds(raw))
     if (value === undefined) return
     this.emit(this.handler.text(value))
   }
@@ -333,7 +345,7 @@ export class XmlTokenizer {
           this.fail(new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: content.length }))
           return
         }
-        if (content.length > 0) this.emit(this.handler.text(content))
+        if (content.length > 0) this.emit(this.handler.text(normalizeLineEnds(content)))
         return
       }
     }
@@ -401,7 +413,9 @@ export class XmlTokenizer {
         this.fail(new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: raw.length }))
         return
       }
-      const value = this.decode(raw)
+      // literal whitespace becomes a space (XML 1.0 §3.3.3) before references
+      // are decoded, so &#10; and &#9; survive
+      const value = this.decode(normalizeAttribute(raw))
       if (value === undefined) return
       attributes.push([name, value])
       p = close + 1
