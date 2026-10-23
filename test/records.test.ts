@@ -234,13 +234,18 @@ describe("toRecords", () => {
     // number of event-loop turns, not a wall-clock gap, so load doesn't
     // matter. Records come in batches of ~64 Ki keys (4 records here) with a
     // yield before each: ~19 turns for 64 records, ~330 for 1300; one big
-    // synchronous batch gives 2-3. The clock only has generous ceilings.
+    // synchronous batch gives 2-3. The longest stretch is bounded by the
+    // records emitted between two turns: 4 per batch here, at most 8 allowed
+    // (one oversized batch anywhere in the run fails it). The clock only has
+    // generous ceilings.
     let emitted = 0
-    const first = await countYields(() =>
-      Effect.runPromise(Effect.exit(Stream.runForEach(
-        Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null }),
-        () => Effect.sync(() => emitted++)
-      )))
+    const first = await countYields(
+      () =>
+        Effect.runPromise(Effect.exit(Stream.runForEach(
+          Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null }),
+          () => Effect.sync(() => emitted++)
+        ))),
+      () => emitted
     )
     // 1 048 576 fills / 16383 per record: 64 records, then maxRecordFields
     expect(first.value._tag).toBe("Failure")
@@ -248,15 +253,21 @@ describe("toRecords", () => {
     expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxRecordFields", max: 1_048_576 })
     expect(emitted).toBe(64)
     expect(first.yields).toBeGreaterThanOrEqual(64 / 8)
+    expect(first.maxPerTurn).toBeLessThanOrEqual(8)
     expect(first.ms).toBeLessThan(10_000)
     // with the fill budget raised, all 1300 records come out, still yielding
-    const all = await countYields(() =>
-      Effect.runPromise(Stream.runCount(
-        Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null, limits: { maxRecordFields: Infinity } })
-      ))
+    let all = 0
+    const run = await countYields(
+      () =>
+        Effect.runPromise(Stream.runForEach(
+          Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null, limits: { maxRecordFields: Infinity } }),
+          () => Effect.sync(() => all++)
+        )),
+      () => all
     )
-    expect(all.value).toBe(1300)
-    expect(all.yields).toBeGreaterThanOrEqual(1300 / 8)
+    expect(all).toBe(1300)
+    expect(run.yields).toBeGreaterThanOrEqual(1300 / 8)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(8)
   }, 60_000)
 
   it("record values are typed: cell values, plus the defval type", () => {

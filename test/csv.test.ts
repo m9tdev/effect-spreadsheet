@@ -369,11 +369,25 @@ describe("csv: streaming", () => {
 
   it("the event loop runs while a large input is parsed", async () => {
     // ~2.7 MB = ~42 pieces of 64 KiB, with a yield before each; counted in
-    // event-loop turns, which machine load doesn't change
-    const bytes = enc("abcdefgh,ijklmnop,qrstuvwx\n".repeat(100_000))
-    const { value: count, yields } = await countYields(() => Effect.runPromise(Stream.runCount(Csv.rows(bytes))))
+    // event-loop turns, which machine load doesn't change. The work per
+    // stretch is bounded by the rows one piece can give: each pull emits
+    // the rows of at most one 64 KiB piece (27-byte lines: at most
+    // ceil(65536 / 27) + 1). Rows per turn can't be used here, because Effect
+    // also yields on its own after 2048 operations.
+    const line = "abcdefgh,ijklmnop,qrstuvwx\n"
+    const bytes = enc(line.repeat(100_000))
+    let count = 0
+    let maxChunk = 0
+    const { yields } = await countYields(() =>
+      Effect.runPromise(Stream.runForEachArray(Csv.rows(bytes), (chunk) =>
+        Effect.sync(() => {
+          count += chunk.length
+          maxChunk = Math.max(maxChunk, chunk.length)
+        })))
+    )
     assert.strictEqual(count, 100_000)
     assert.isAtLeast(yields, 20)
+    assert.isAtMost(maxChunk, Math.ceil(65536 / line.length) + 1)
   })
 
   it.effect("the error of the input stream passes through", () =>
