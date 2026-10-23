@@ -25,6 +25,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      # tsconfig.build.json has types: [], so this also catches Node globals in src
+      - run: pnpm build
       # SheetJS, as a test-only oracle, pinned to the commit AGENTS.md names.
       - id: sheetjs-cache
         uses: actions/cache@v6
