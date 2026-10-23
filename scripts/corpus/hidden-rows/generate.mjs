@@ -4,7 +4,8 @@
 //
 // All content is made up. Document properties are set to empty values, and the SheetJS
 // writer's boilerplate (theme part, app name/version strings, marker streams) is stripped
-// (lib.mjs stripWriterBoilerplate); the parse result is unchanged.
+// (lib.mjs stripWriterBoilerplate); the parse result is unchanged. Zip bytes depend on the
+// zlib build (see generate.mjs); --check compares zips with lib.mjs zipDiff.
 //
 // Usage:
 //   node scripts/corpus/hidden-rows/generate.mjs           # (re)write test/corpus/hidden-rows/*.{xls,xml,slk,xlsb,xlsx} and renamed/

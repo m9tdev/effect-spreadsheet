@@ -88,7 +88,7 @@ export function zipEntries(buf) {
       }
       x += 4 + sz
     }
-    out.push({ name, method, csize, usize, lho })
+    out.push({ name, method, csize, usize, lho, crc: buf.readUInt32LE(p + 16) })
     p += 46 + nlen + xlen + clen
   }
   return out
@@ -568,17 +568,97 @@ function listFiles(dir, base = dir, out = []) {
  */
 const isZip = (b) => b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 3 && b[3] === 4
 
-/**
- * Same zip content: the same entries in the same order with the same uncompressed bytes.
- * Deflate output isn't stable across zlib builds (Node's bundled zlib vs a system zlib,
- * CPU-specific code paths), so regenerated zips may differ in their compressed bytes only.
- */
-export function sameZipContent(a, b) {
-  if (!isZip(a) || !isZip(b)) return false
-  const ea = zipEntries(a), eb = zipEntries(b)
-  if (!ea || !eb || ea.length !== eb.length) return false
-  return ea.every((e, i) => e.name === eb[i].name && Buffer.from(zipRead(a, e)).equals(Buffer.from(zipRead(b, eb[i]))))
+// Parse a (non-zip64) zip's structure for zipDiff: EOCD, central and local headers, and
+// the bytes outside the entries. Returns null when it can't (zip64, data descriptors, ...).
+function zipLayout(buf) {
+  if (!isZip(buf)) return null
+  let eocd = -1
+  for (let i = buf.length - 22, min = Math.max(0, buf.length - 22 - 0xffff); i >= min; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break }
+  }
+  if (eocd < 0) return null
+  const count = buf.readUInt16LE(eocd + 10), cdSize = buf.readUInt32LE(eocd + 12), cdOff = buf.readUInt32LE(eocd + 16)
+  const commentLen = buf.readUInt16LE(eocd + 20)
+  if (count === 0xffff || cdOff === 0xffffffff || cdOff + cdSize !== eocd) return null
+  const entries = []
+  let p = cdOff
+  // progress: p increases by >= 46 per entry, bounded by count
+  for (let n = 0; n < count; n++) {
+    if (p + 46 > eocd || buf.readUInt32LE(p) !== 0x02014b50) return null
+    const nlen = buf.readUInt16LE(p + 28), xlen = buf.readUInt16LE(p + 30), clen = buf.readUInt16LE(p + 32)
+    const lho = buf.readUInt32LE(p + 42)
+    if (lho + 30 > buf.length || buf.readUInt32LE(lho) !== 0x04034b50) return null
+    // within one zip, the local header's method and compressed size must agree with the central one
+    if (buf.readUInt16LE(lho + 8) !== buf.readUInt16LE(p + 10) || buf.readUInt32LE(lho + 18) !== buf.readUInt32LE(p + 20)) return null
+    const lnlen = buf.readUInt16LE(lho + 26), lxlen = buf.readUInt16LE(lho + 28)
+    const flags = buf.readUInt16LE(p + 8)
+    if (flags & 0x0008) return null // data descriptor: not used by our writer
+    entries.push({
+      // everything in the central header except method (10), csize (20) and offset (42)
+      central: Buffer.concat([buf.subarray(p + 4, p + 10), buf.subarray(p + 12, p + 20), buf.subarray(p + 24, p + 42), buf.subarray(p + 46, p + 46 + nlen + xlen + clen)]),
+      // everything in the local header except method (8) and csize (18)
+      local: Buffer.concat([buf.subarray(lho + 4, lho + 8), buf.subarray(lho + 10, lho + 18), buf.subarray(lho + 22, lho + 30 + lnlen + lxlen)]),
+      name: buf.toString("utf8", p + 46, p + 46 + nlen),
+      crcCentral: buf.readUInt32LE(p + 16), crcLocal: buf.readUInt32LE(lho + 14),
+      usizeCentral: buf.readUInt32LE(p + 24), usizeLocal: buf.readUInt32LE(lho + 22),
+      e: { name: buf.toString("utf8", p + 46, p + 46 + nlen), method: buf.readUInt16LE(p + 10), csize: buf.readUInt32LE(p + 20), usize: buf.readUInt32LE(p + 24), lho },
+      dataEnd: lho + 30 + lnlen + lxlen + buf.readUInt32LE(p + 20),
+      lho,
+    })
+    p += 46 + nlen + xlen + clen
+  }
+  if (p !== eocd) return null // junk at the end of the central directory
+  // local entries must sit back to back from offset 0 up to the central directory, in central order
+  let at = 0
+  for (const x of entries) { if (x.lho !== at) return null; at = x.dataEnd }
+  if (at !== cdOff) return null
+  return {
+    entries,
+    eocd: Buffer.concat([buf.subarray(eocd + 4, eocd + 12)]), // disk numbers and entry counts
+    comment: buf.subarray(eocd + 22, eocd + 22 + commentLen),
+    trailing: buf.subarray(Math.min(buf.length, eocd + 22 + commentLen)),
+    commentLenOk: eocd + 22 + commentLen <= buf.length,
+  }
 }
+
+/**
+ * Why two zips differ in more than their compressed bytes, or null when they don't.
+ * Deflate output isn't stable across zlib builds (Node's bundled zlib vs a system zlib,
+ * CPU-specific code paths), so a regenerated zip may legitimately differ in each entry's
+ * compression method, compressed size, compressed data and hence its offsets. Everything
+ * else must be equal: every other local and central header field (timestamps, CRC32, sizes,
+ * flags, attributes, names, extra fields, comments), the entry order, the archive comment
+ * and any trailing bytes. Each entry's CRC32 and uncompressed size are also checked against
+ * its uncompressed bytes.
+ */
+export function zipDiff(a, b) {
+  const la = zipLayout(a), lb = zipLayout(b)
+  if (!la || !lb) return "not a plain zip (zip64, data descriptor or bad layout)"
+  if (la.entries.length !== lb.entries.length) return `entry count ${la.entries.length} vs ${lb.entries.length}`
+  if (!la.eocd.equals(lb.eocd)) return "end-of-central-directory fields"
+  if (!la.commentLenOk || !lb.commentLenOk) return "archive comment runs past the end"
+  if (!la.comment.equals(lb.comment)) return "archive comment"
+  if (!la.trailing.equals(lb.trailing)) return "trailing bytes after the archive"
+  for (let i = 0; i < la.entries.length; i++) {
+    const x = la.entries[i], y = lb.entries[i]
+    if (x.name !== y.name) return `entry ${i}: name ${x.name} vs ${y.name}`
+    if (!x.central.equals(y.central)) return `${x.name}: central header fields`
+    if (!x.local.equals(y.local)) return `${x.name}: local header fields`
+    for (const [buf, z, label] of [[a, x, "first"], [b, y, "second"]]) {
+      let data
+      try { data = Buffer.from(zipRead(buf, z.e)) } catch (err) { return `${z.name}: unreadable in the ${label} zip (${err.message})` }
+      const c = crc32(data)
+      if (c !== z.crcCentral || c !== z.crcLocal) return `${z.name}: CRC32 doesn't match the data in the ${label} zip`
+      if (data.length !== z.usizeCentral || data.length !== z.usizeLocal) return `${z.name}: uncompressed size doesn't match the data in the ${label} zip`
+      z.data = data
+    }
+    if (!x.data.equals(y.data)) return `${x.name}: uncompressed bytes`
+  }
+  return null
+}
+
+/** Same zip apart from compressed bytes (see zipDiff). */
+export const sameZipContent = (a, b) => zipDiff(a, b) === null
 
 /**
  * Compare two directory trees both ways. `ignore` holds relative paths that may exist only
@@ -591,22 +671,25 @@ export function compareDirs(generated, committed, ignore = [], equal = null) {
   const skip = new Set(ignore)
   const missing = [...g].filter((f) => !c.has(f)).sort() // generated but not committed
   const extra = [...c].filter((f) => !g.has(f) && !skip.has(f)).sort() // committed but not generated (stale)
-  const differ = [], zipRecompressed = []
+  const differ = [], zipRecompressed = [], reasons = {}
   for (const f of [...g].filter((f) => c.has(f)).sort()) {
     const a = fs.readFileSync(path.join(generated, f)), b = fs.readFileSync(path.join(committed, f))
     if (a.equals(b)) continue
-    if (sameZipContent(a, b)) { zipRecompressed.push(f); continue }
+    const zd = isZip(a) && isZip(b) ? zipDiff(a, b) : "not zips"
+    if (zd === null) { zipRecompressed.push(f); continue }
     if (equal?.(f, a, b)) continue
     differ.push(f)
+    if (zd !== "not zips") reasons[f] = zd
   }
-  return { same: !missing.length && !extra.length && !differ.length, missing, extra, differ, zipRecompressed, files: g.size }
+  return { same: !missing.length && !extra.length && !differ.length, missing, extra, differ, zipRecompressed, reasons, files: g.size }
 }
 
 export function reportCompare(r, label) {
-  for (const f of r.differ) console.log(`DIFF    ${f}`)
+  for (const f of r.differ) console.log(`DIFF    ${f}${r.reasons?.[f] ? `  (${r.reasons[f]})` : ""}`)
   for (const f of r.missing) console.log(`MISSING ${f} (generated, not committed)`)
   for (const f of r.extra) console.log(`EXTRA   ${f} (committed, not generated: stale?)`)
-  const z = r.zipRecompressed?.length ? ` (${r.zipRecompressed.length} zips with identical content but different deflate bytes: another zlib build)` : ""
+  // zipDiff === null: only compression method/size/data (and so offsets) differ, which is what another zlib build does
+  const z = r.zipRecompressed?.length ? ` (${r.zipRecompressed.length} zips differ only in their compressed bytes: another zlib build)` : ""
   console.log(r.same ? `${label}: ${r.files} files identical, no missing or extra files${z}` : `${label}: ${r.differ.length} differ, ${r.missing.length} missing, ${r.extra.length} extra${z}`)
   return r.same
 }

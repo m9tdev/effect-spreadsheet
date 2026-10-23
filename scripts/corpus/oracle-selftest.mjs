@@ -13,8 +13,16 @@
 //   F. ORACLE_MAX_BYTES counts UTF-8 bytes, not UTF-16 string length: with a cap
 //      between the two sizes of generated/features.xlsx's expected JSON (it holds
 //      non-ASCII text, so bytes > chars), the result must be tooBig.
-//   G. the oracle output doesn't depend on the time zone: generated/dates.xlsx parsed
-//      under TZ=Pacific/Auckland gives the committed rows (dates as UTC ISO strings).
+//   G. the oracle output doesn't depend on the time zone. Two sub-checks on
+//      generated/dates.xlsx, both compared with the committed rows:
+//      G1 runs the oracle under TZ=Pacific/Auckland. Its children run with TZ=UTC, so this
+//         only fails when both safeguards (sheet_to_json UTC:true and the children's
+//         TZ=UTC) are removed.
+//      G2 runs just the JSON step (READ_OPTIONS + JSON_OPTIONS from oracle-options.mjs)
+//         in a child with TZ=Pacific/Auckland and no TZ=UTC override. This fails when
+//         UTC:true alone is dropped.
+//   H. a timeout is not a cached result: after a run where every parse times out
+//      (--timeout 0.001), a run without --force parses those files again.
 // Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B and E: they are skipped, not
 // failed, without it. Linux `ps` for the child lookup. Stale temp dirs from a SIGKILLed
 // run are removed at the next start.
@@ -126,7 +134,39 @@ async function timeZoneCase(name) {
   const dir = path.join(tmp, "expected")
   const doc = fs.readdirSync(dir).filter((f) => !f.includes(".stream.")).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))).find((d) => d.source === "generated" && d.path === "dates.xlsx")
   const committed = JSON.parse(fs.readFileSync(path.join(HERE, "..", "..", "test", "corpus", "expected", "generated", "dates.xlsx.json"), "utf8"))
-  check(`${name}: dates.xlsx rows under TZ=Pacific/Auckland equal the committed ones`, r.code === 0 && !!doc && JSON.stringify(doc.sheets.map((x) => x.rows)) === JSON.stringify(committed.sheets.map((x) => x.rows)), doc ? `first value ${JSON.stringify(doc.sheets[0].rows?.[0]?.[0])}` : "no result")
+  const want = JSON.stringify(committed.sheets.map((x) => x.rows))
+  check(`${name}1 time zone: oracle under TZ=Pacific/Auckland gives the committed dates.xlsx rows`, r.code === 0 && !!doc && JSON.stringify(doc.sheets.map((x) => x.rows)) === want, doc ? `first value ${JSON.stringify(doc.sheets[0].rows?.[0]?.[0])}` : "no result")
+  // G2: the JSON step alone, in a child that really runs in Pacific/Auckland (no TZ=UTC override).
+  const code = `
+    import fs from "node:fs"
+    import { createRequire } from "node:module"
+    const { READ_OPTIONS, JSON_OPTIONS } = await import(${JSON.stringify(new URL("./oracle-options.mjs", import.meta.url).href)})
+    const XLSX = createRequire(import.meta.url)(${JSON.stringify(SHEETJS_ENTRY)})
+    const wb = XLSX.read(fs.readFileSync(${JSON.stringify(path.join(HERE, "..", "..", "test", "corpus", "generated", "dates.xlsx"))}), { ...READ_OPTIONS })
+    process.stdout.write(JSON.stringify(wb.SheetNames.map((n) => XLSX.utils.sheet_to_json(wb.Sheets[n], { ...JSON_OPTIONS }))))
+  `
+  const env = { ...process.env, TZ: "Pacific/Auckland" }
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8" })
+  const got = JSON.parse(out)
+  check(`${name}2 time zone: sheet_to_json with JSON_OPTIONS in a TZ=Pacific/Auckland child gives the committed rows`, JSON.stringify(got) === want, `first value ${JSON.stringify(got[0]?.[0]?.[0])}`)
+}
+
+async function retryTimeoutCase(name) {
+  const args = ["--no-probe", "--jobs", "2"]
+  const dir = path.join(tmp, "expected")
+  const statuses = () => fs.readdirSync(dir).filter((f) => !f.includes(".stream.")).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))).filter((d) => d.source === "hidden-rows").map((d) => d.status)
+  const r = await startOracle({}, [...args, "--timeout", "0.001"]).exited
+  const first = statuses()
+  check(`${name}: a run with --timeout 0.001 times out`, r.code === 0 && first.length > 0 && first.every((s) => s === "timeout"), first.join(","))
+  // startOracle passes --force; run the oracle directly without it
+  const p = spawn(process.execPath, [ORACLE, "--source", "hidden-rows", ...args], { env: { ...process.env, CORPUS_CACHE_DIR: tmp }, stdio: ["ignore", "pipe", "pipe"] })
+  let out = ""
+  p.stdout.on("data", (d) => { out += d }); p.stderr.on("data", (d) => { out += d })
+  const code = await new Promise((res) => p.on("exit", (c) => res(c)))
+  const m = /oracle: (\d+) jobs, (\d+) to run/.exec(out)
+  check(`${name}: the next run without --force retries them`, code === 0 && !!m && +m[2] > 0 && +m[2] === +m[1], m ? `${m[2]} of ${m[1]} jobs to run` : out.slice(0, 120))
+  const second = statuses()
+  check(`${name}: and they are ok now`, second.length > 0 && second.every((s) => s === "ok"), second.join(","))
 }
 
 async function startupCase(name, body, args, expect) {
@@ -159,8 +199,10 @@ try {
   else skip("E tooBig results", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
   if (haveSheetJS) await maxBytesCase("F MAX_BYTES counts bytes")
   else skip("F MAX_BYTES counts bytes", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
-  if (haveSheetJS) await timeZoneCase("G time zone")
+  if (haveSheetJS) await timeZoneCase("G")
   else skip("G time zone", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  if (haveSheetJS) await retryTimeoutCase("H timeout retried")
+  else skip("H timeout retried", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })
 }

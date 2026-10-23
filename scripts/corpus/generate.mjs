@@ -4,8 +4,11 @@
 // Uses the SheetJS write side from ~/sheetjs (SHEETJS_DIR), test/script-only, plus
 // hand-built bytes where SheetJS can't express the case (its writers drop BIFF8 row
 // properties and iterate the whole declared range, so sparse/far/huge-dimension
-// files are built or patched by hand). Output is deterministic: zips are rebuilt
-// with fixed timestamps, document properties are fixed.
+// files are built or patched by hand). Output is deterministic for one Node/zlib build:
+// zips are rebuilt with fixed timestamps, and document properties are fixed. Another zlib
+// build deflates differently: writing then rewrites the zip bytes and churns the sha256
+// pins (README.json, hidden-rows/manifest.json, expected/*.json). --check accepts
+// compressed-byte differences only (lib.mjs zipDiff).
 //
 // Truncated / bit-flipped variants are NOT generated here: tests derive them from
 // these files at test time (see docs/corpus.md).

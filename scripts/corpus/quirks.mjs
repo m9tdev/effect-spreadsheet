@@ -34,12 +34,12 @@ export function csvFields(text) {
   rows.forEach((row, r) => row.forEach((x, c) => { if (x.f !== "" || x.any) m.set(`${r},${c}`, x.f) }))
   return m
 }
-const BOMS = { "utf-8": 3, "utf-16be": 2, "utf-16le": 2, "windows-1252": 0 }
-function decodeFixture(buf, enc) {
-  const skip = enc === "utf-8" && buf[0] === 0xef ? 3 : enc.startsWith("utf-16") ? BOMS[enc] : 0
-  return new TextDecoder(enc).decode(buf.subarray(skip))
+// TextDecoder strips a leading BOM itself for utf-8 and utf-16 (ignoreBOM is false by
+// default), so nothing is skipped here: a BOM-less file keeps its first character.
+export function decodeFixture(buf, enc) {
+  return new TextDecoder(enc).decode(buf)
 }
-const xmlText = (s) => s
+export const xmlText = (s) => s
   .replace(/<rPh\b[\s\S]*?<\/rPh>/g, "")
   .replace(/<t(?:\s[^>]*)?\/>/g, "")
   .replace(/[\s\S]*?<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g, "$1\u0000").split("\u0000").slice(0, -1).join("")
@@ -47,11 +47,26 @@ const xmlText = (s) => s
   .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d))
   .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&")
   .replace(/_x([0-9A-F]{4})_/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-function xlsxSharedStringCells(buf) {
-  const part = (n) => { const e = zipEntries(buf).find((x) => x.name === n); return e ? zipRead(buf, e).toString("utf8") : "" }
+const zipPart = (buf, n) => { const e = zipEntries(buf).find((x) => x.name === n); return e ? zipRead(buf, e).toString("utf8") : "" }
+const unxml = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&")
+
+/** The worksheet part of `sheet` (xl/workbook.xml name -> r:id -> workbook rels Target). */
+export function xlsxSheetPart(buf, sheet) {
+  const sheets = [...zipPart(buf, "xl/workbook.xml").matchAll(/<sheet\b([^>]*)\/?>/g)].map((m) => ({ name: unxml(/\bname="([^"]*)"/.exec(m[1])?.[1] ?? ""), rid: /\br:id="([^"]*)"/.exec(m[1])?.[1] }))
+  if (!sheets.length) return "xl/worksheets/sheet1.xml" // minimal workbook without a sheet list
+  const s = sheets.find((x) => x.name === sheet)
+  if (!s) throw new Error(`no sheet "${sheet}" in xl/workbook.xml`)
+  const rel = [...zipPart(buf, "xl/_rels/workbook.xml.rels").matchAll(/<Relationship\b([^>]*)\/?>/g)].map((m) => m[1]).find((a) => /\bId="([^"]*)"/.exec(a)?.[1] === s.rid)
+  const target = rel && /\bTarget="([^"]*)"/.exec(rel)?.[1]
+  if (!target) throw new Error(`no relationship ${s.rid} for sheet "${sheet}"`)
+  return target.startsWith("/") ? target.slice(1) : path.posix.normalize(`xl/${target}`)
+}
+
+function xlsxSharedStringCells(buf, sheet) {
+  const part = (n) => zipPart(buf, n)
   const sst = [...part("xl/sharedStrings.xml").matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => xmlText(m[1]))
   const m = new Map()
-  for (const c of part("xl/worksheets/sheet1.xml").matchAll(/<c r="([A-Z]+)(\d+)" t="s"><v>(\d+)<\/v><\/c>/g)) {
+  for (const c of part(xlsxSheetPart(buf, sheet)).matchAll(/<c r="([A-Z]+)(\d+)" t="s"><v>(\d+)<\/v><\/c>/g)) {
     const col = [...c[1]].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1
     m.set(`${+c[2] - 1},${col}`, sst[+c[3]])
   }
@@ -66,6 +81,12 @@ export function checkQuirk(q, doc, file) {
   if (q.field === "hiddenRows") { if (JSON.stringify(sh.hiddenRows) !== JSON.stringify(q.sheetjs)) bad(`sheetjs: hiddenRows ${JSON.stringify(sh.hiddenRows)}`) }
   else if (q.field === "ref") { if (sh.ref !== q.sheetjs) bad(`sheetjs: ref ${sh.ref}`) }
   else if (q.field === "dimension") { if (sh.ref !== q.sheetjs.ref) bad(`sheetjs: ref ${sh.ref}`) }
+  else if (q.field === "rows") {
+    // sheet_to_json rows (header:1, from the !ref's first row/col); Dates appear as ISO strings
+    const rowCells = new Map()
+    ;(sh.rows ?? []).forEach((row, r) => (row ?? []).forEach((v, c) => { if (v !== null) rowCells.set(`${r},${c}`, v) }))
+    if (!Array.isArray(q.sheetjs) || !sameCells(rowCells, q.sheetjs)) bad(`sheetjs: rows ${JSON.stringify(q.sheetjs?.map?.(([r, c]) => [r, c, rowCells.get(`${r},${c}`) ?? null]))}`)
+  }
   else if (q.field === "cells") { if (!Array.isArray(q.sheetjs) || !sameCells(oracleCells, q.sheetjs)) bad(`sheetjs: cells ${JSON.stringify(q.sheetjs?.map?.(([r, c]) => [r, c, oracleCells.get(`${r},${c}`) ?? null]))}`) }
   else bad(`unknown field ${q.field}`)
   // correct value vs the fixture bytes
@@ -78,8 +99,30 @@ export function checkQuirk(q, doc, file) {
     const got = csvFields(decodeFixture(buf, m.slice(4)))
     if (!sameCells(got, q.correct)) bad(`correct: decoded fields ${JSON.stringify(q.correct.map(([r, c]) => [r, c, got.get(`${r},${c}`) ?? null]))}`)
   } else if (m === "xlsx-shared-strings") {
-    const got = xlsxSharedStringCells(buf)
+    let got
+    try { got = xlsxSharedStringCells(buf, q.sheet) } catch (e) { bad(`correct: ${e.message}`) }
     if (!sameCells(got, q.correct)) bad(`correct: shared strings ${JSON.stringify(q.correct.map(([r, c]) => [r, c, got.get(`${r},${c}`) ?? null]))}`)
+  } else if (m === "xlsx-date1904-serial") {
+    // the serials in the sheet XML read in the workbook's own date system (date1904 => 1904-01-01 epoch)
+    const part = (n) => { const e = zipEntries(buf).find((x) => x.name === n); return e ? zipRead(buf, e).toString("utf8") : "" }
+    const d1904 = /<workbookPr\b[^>]*\bdate1904="(1|true)"/.test(part("xl/workbook.xml"))
+    if (!d1904) bad("correct: the workbook doesn't declare date1904")
+    const epoch = Date.UTC(1904, 0, 1)
+    const got = new Map()
+    let sheetPart
+    try { sheetPart = xlsxSheetPart(buf, q.sheet) } catch (e) { bad(`correct: ${e.message}`) }
+    for (const c of part(sheetPart).matchAll(/<c r="([A-Z]+)(\d+)"([^>]*)><v>([^<]+)<\/v><\/c>/g)) {
+      // only plain numeric cells are serials: skip typed cells (t="s", "str", "b", ...) and
+      // values that aren't finite numbers, which would make new Date() throw a RangeError
+      if (/\bt="/.test(c[3])) continue
+      const serial = Number(c[4])
+      if (!Number.isFinite(serial)) continue
+      const ms = epoch + Math.round(serial * 86400) * 1000
+      if (!Number.isFinite(new Date(ms).getTime())) continue
+      const col = [...c[1]].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1
+      got.set(`${+c[2] - 1},${col}`, new Date(ms).toISOString())
+    }
+    if (!sameCells(got, q.correct)) bad(`correct: 1904-system dates ${JSON.stringify(q.correct.map(([r, c]) => [r, c, got.get(`${r},${c}`) ?? null]))}`)
   } else if (m === "declared-dimension") {
     const rs = (sh.cells ?? []).map((x) => x.r), cs = (sh.cells ?? []).map((x) => x.c)
     const range = `${a1(Math.min(...rs), Math.min(...cs))}:${a1(Math.max(...rs), Math.max(...cs))}`

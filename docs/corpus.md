@@ -13,13 +13,13 @@ The scripts are plain Node ESM (Node ≥ 24), with no dependencies.
 
 ```sh
 node scripts/corpus/fetch.mjs          # SheetJS test_files -> test/corpus/.cache/sheetjs (pinned, idempotent; --timeout SEC, default 900)
-node scripts/corpus/generate.mjs       # our fixtures -> test/corpus/generated (deterministic)
+node scripts/corpus/generate.mjs       # our fixtures -> test/corpus/generated (deterministic for one zlib build; see below)
 node scripts/corpus/generate.mjs --check
 node scripts/corpus/hidden-rows/generate.mjs --check   # hidden-row fixtures regenerate identically (zips by content)
 node scripts/corpus/hidden-rows/manifest.mjs    # test/corpus/hidden-rows/manifest.json
 node scripts/corpus/manifest.mjs       # full manifest -> test/corpus/.cache/manifest.json (gitignored)
 node scripts/corpus/oracle.mjs         # expected output -> test/corpus/.cache/expected/<sha256>.json
-node --test scripts/corpus/*.test.mjs   # unit tests (BOF sniffing, quirk checks, expected.mjs cleanup), no SheetJS needed
+node --test scripts/corpus/*.test.mjs   # unit tests (BOF sniffing, zip checks, quirk checks, expected.mjs cleanup, result freshness), no SheetJS needed
 node scripts/corpus/oracle-selftest.mjs   # oracle process hygiene (orphans, startup deaths, tooBig docs), ~15 s
 node scripts/corpus/expected.mjs       # committed SheetJS expectations for generated + hidden-rows (after oracle --source generated/hidden-rows)
 node scripts/corpus/expected.mjs --check
@@ -28,7 +28,14 @@ node scripts/corpus/expected.mjs --check
 Oracle options: `--force`, `--jobs N` (default min(10, cores/2)), `--timeout SEC` (parse,
 default 60), `--probe-timeout SEC` (default 15), `--no-probe`, `--source sheetjs|generated|hidden-rows`,
 `--format xls,xlsb`, `--max-size BYTES`, `--limit N`, `--ready-timeout SEC` (default 30), `--verbose`. It skips files whose expected
-JSON already exists (same schema) unless you pass `--force`. A run report goes to
+JSON already exists (same schema) unless you pass `--force`. Cached `timeout` and `crash`
+results are the exception: they depend on machine load, so the next run retries them
+(`resultIsFresh` in `oracle-options.mjs`).
+
+**Full runs at 8 or more workers:** the biggest SheetJS corpus files need about half of the
+default 60 s on an idle machine. With 8 workers and the probes busy, `datetime_8192.xlsx` (63 MB)
+has hit the limit. For a full run, pass `--timeout 180`, or simply run again: only the
+timed-out files are retried. A run report goes to
 `test/corpus/.cache/oracle-report.json`. If you run with a filter (`--source`), the report only
 covers that run. Run without filters at the end: it reuses the cache and writes the full report.
 
@@ -40,6 +47,7 @@ covers that run. Run without filters at the end: it reuses the cache and writes 
 | `scripts/corpus/fetch.mjs` | yes | download + extract the SheetJS corpus |
 | `scripts/corpus/manifest.mjs` | yes | builds the full manifest `test/corpus/.cache/manifest.json` |
 | `scripts/corpus/oracle.mjs` | yes | SheetJS oracle (pooled child processes, timeouts) |
+| `scripts/corpus/oracle-options.mjs` | yes | the oracle's SheetJS read/JSON/probe options and caps (side-effect free, importable by tests) |
 | `scripts/corpus/oracle-selftest.mjs` | yes | oracle process-hygiene tests (orphaned children, startup deaths) |
 | `scripts/corpus/expected.mjs` | yes | exports committed expectations for our fixtures to `test/corpus/expected/` |
 | `scripts/corpus/generate.mjs` | yes | our edge-case fixtures |
@@ -216,6 +224,9 @@ startup deaths the oracle aborts with exit 2, instead of respawning forever (e.g
 - an `xlsx.js` that never finishes loading;
 - `tooBig` results under a tiny `ORACLE_MAX_CELLS`, which must keep `reason`, `options`,
   `workbook`, per-sheet counts and the SheetJS version.
+- `ORACLE_MAX_BYTES` counts UTF-8 bytes (F).
+- time-zone independence (G1, G2; see below).
+- a `timeout` result is retried by the next run without `--force` (H).
 
 Cases that need SheetJS are skipped, not failed, when it is missing. Temp dirs left by
 a SIGKILLed selftest are removed at the next start. The parent only writes the expected
@@ -233,9 +244,16 @@ XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: tr
 Why: `dense` keeps memory proportional to the cells that are present. `cellDates: false`
 keeps dates as serial numbers, plus `z`. `cellStyles: true` is **required** for SheetJS's
 xlsx reader to put hidden rows in `!rows`; without it the flag is silently dropped. In
-`rows`, `sheet_to_json` still turns date-formatted numbers into Dates. `UTC: true`, and
-children running with `TZ=UTC`, keep those (ISO strings in the JSON) independent of the
-machine's time zone. Schema 1 files had local-time Dates. We never
+`rows`, `sheet_to_json` still turns date-formatted numbers into Dates. `UTC: true` makes
+those (ISO strings in the JSON) independent of the machine's time zone. It is enough on
+its own: those Dates are the only time-zone-dependent output we found, and the
+expectations come out the same in three other zones without any `TZ` setting. The oracle
+children also run with `TZ=UTC`, as a safety net. Selftest G checks both safeguards.
+G1 runs the whole oracle under `TZ=Pacific/Auckland`. Since the children still get
+`TZ=UTC`, G1 only fails when both safeguards are gone. G2 runs just the JSON step
+(`READ_OPTIONS` and `JSON_OPTIONS` from `oracle-options.mjs`) in a child that really runs
+in Pacific/Auckland, so it fails as soon as `UTC: true` is dropped.
+Schema 1 files had local-time Dates. We never
 use `XLSX.stream.to_json` for expected output, because that is where the hang is (below).
 
 ```jsonc
@@ -367,13 +385,21 @@ themselves. This is a deliberate difference from SheetJS, which drops hidden row
 
 ## Generated fixtures (`test/corpus/generated/`)
 
-`generate.mjs` writes them. The output is deterministic (`--check` regenerates it into
-a temp dir and compares). A caveat for zips (xlsx, xlsb, ods): deflate output depends on the
+`generate.mjs` writes them. The output is deterministic on a given Node/zlib build (`--check`
+regenerates it into a temp dir and compares). Writing (not `--check`) with another zlib build
+rewrites the zip bytes. That churns every sha256 pinned for them: in `generated/README.json`,
+`hidden-rows/manifest.json` and the docs table, and the `sha256` fields of
+`test/corpus/expected/*`. So regenerate on purpose, and commit the churn only with a real
+fixture change. A caveat for zips (xlsx, xlsb, ods): deflate output depends on the
 zlib build. Node's bundled zlib and a system zlib, or different CPUs, can compress the same
-data differently. So `--check` compares zips by content: the same entries in the same order,
-with identical uncompressed bytes. It reports how many differ only in their deflate bytes.
-Every other file, and the committed `README.json` against the committed bytes, must match
-exactly. Zips are rebuilt with fixed timestamps, and document properties
+data differently. So `--check` lets zips differ only in what compression changes: each entry's
+method, compressed size, compressed data, and therefore the offsets (`zipDiff` in `lib.mjs`).
+Everything else must be equal: every other local and central header field (timestamps, CRC32,
+sizes, flags, attributes, names, extra fields, comments), the entry order, the archive comment
+and any trailing bytes. Each entry's CRC32 must also match its uncompressed bytes. `--check`
+reports how many zips differ only in compressed bytes; any other difference is a DIFF, with
+the reason. Every other file, and the committed `README.json` against the committed bytes,
+must match exactly. Zips are rebuilt with fixed timestamps, and document properties
 are fixed (author `effect-spreadsheet`, 2026-01-01). They are our own files (MIT). They
 are generated with SheetJS 0.20.3 at script time (never a dependency). Where the SheetJS
 writer can't express a case, they are built or patched by hand.
@@ -465,7 +491,8 @@ Value formats depend on `field`:
 - `ref`: an A1 range.
 - `cells`: an array of `[r, c, v]` triples. `v: null` means "no cell", e.g.
   `csv-empty-quoted-field-no-cell` has `sheetjs: [[5, 1, null]]`.
-- `dimension`: `{cells, declaredRows, declaredCols}`.
+- `rows`: the same triples, for `sheet_to_json` `rows` (Dates as ISO strings).
+- `dimension`: `sheetjs` is `{ref}` (SheetJS's `!ref`); `correct` is `{cells, declaredRows, declaredCols}` (the span of the cells and the declared size).
 
 Every value is checked; none is marked unchecked. `expected.mjs` (through `quirks.mjs`)
 checks each `sheetjs` value against the oracle result. It checks each `correct` value against
@@ -473,6 +500,8 @@ the fixture bytes:
 - `sylk-hidden-rows`: the `F;…M0…;R<n>` records.
 - `csv:<encoding>`: the bytes decoded with `TextDecoder` and split by a small RFC 4180 reader.
 - `xlsx-shared-strings`: the shared strings, with entities and `_xHHHH_` decoded.
+- `xlsx-date1904-serial`: the sheet's serials read on the 1904 epoch, after checking that
+  the workbook declares `date1904`.
 - `declared-dimension`: the sniffed declared range, plus the span of the cells.
 
 A mismatch fails the export. `expected.mjs` also stamps the ids into the affected expected
@@ -491,6 +520,10 @@ method.
 - **Astral character references** (`&#x1F363;`) are truncated to 16 bits (U+F363), and
   **`_x000D_`** is dropped (`generated/strings.xlsx`).
 - An explicit empty quoted CSV field (`""`) gives no cell (`generated/csv_quoted_newlines.csv`).
+- **`sheet_to_json` ignores `date1904`.** Its Dates use the 1900 epoch even when the workbook
+  declares `date1904`, so `generated/dates_1904.xlsx` has the same `rows` as `dates.xlsx`.
+  The cells' `w` text does use 1904 (`2030-01-03`). In the 1904 system, serial 46024.52 is
+  2030-01-03 12:30 and serial 0 is 1904-01-01.
 - **BIFF5 sheet names** lose non-Latin-1 characters on write. That is a property of
   `features.biff5.xls`, not a reader bug.
 - SheetJS ignores declared dimensions in xlml/SYLK (`ref` = the actual cells), but
