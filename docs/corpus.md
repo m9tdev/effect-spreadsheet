@@ -19,7 +19,7 @@ node scripts/corpus/hidden-rows/generate.mjs --check   # hidden-row fixtures are
 node scripts/corpus/hidden-rows/manifest.mjs    # test/corpus/hidden-rows/manifest.json
 node scripts/corpus/manifest.mjs       # full manifest -> test/corpus/.cache/manifest.json (gitignored)
 node scripts/corpus/oracle.mjs         # expected output -> test/corpus/.cache/expected/<sha256>.json
-node --test scripts/corpus/lib.test.mjs   # unit tests for lib.mjs (BOF/BIFF version sniffing)
+node --test scripts/corpus/lib.test.mjs scripts/corpus/quirks.test.mjs   # unit tests (BOF sniffing, quirk checks)
 node scripts/corpus/oracle-selftest.mjs   # oracle process hygiene (orphans, startup deaths, tooBig docs), ~15 s
 node scripts/corpus/expected.mjs       # committed SheetJS expectations for generated + hidden-rows (after oracle --source generated/hidden-rows)
 node scripts/corpus/expected.mjs --check
@@ -48,7 +48,7 @@ covers that run. Run without filters at the end: it reuses the cache and writes 
 | `test/corpus/generated/` | yes | our fixtures (~170 KB; size target ~200 KB), with `README.json` (name, sniffed format, size, sha256, description) |
 | `test/corpus/hidden-rows/` | yes | Synthetic hidden-row fixtures + `manifest.json` |
 | `test/corpus/expected/{generated,hidden-rows}/<file>.json` | yes | SheetJS expected output for our fixtures, so CI can compare without `~/sheetjs` (58 files, ~152 KiB, each ≤ 64 KiB) |
-| `test/corpus/sheetjs-quirks.json` | yes | machine-readable list of places where that SheetJS output is wrong or differs on purpose (`sheetjs` vs `correct` value) |
+| `test/corpus/sheetjs-quirks.json` | yes | list of places where that SheetJS output is wrong or differs on purpose; every `sheetjs` and `correct` value is checked (`scripts/corpus/quirks.mjs`) |
 | `test/corpus/.cache/` | **no** (gitignored) | `sheetjs/test_files` (fetched, 1.9 GB), `manifest.json` (full manifest), `expected/` (oracle output, ~1.3 GB), `oracle-report.json`; about **3.2 GB** in all (apparent size; plus 341 MB with `fetch --keep-zip`) |
 
 **Nothing committed lists third-party corpus files.** GitHub blocked `SheetJS/test_files`
@@ -450,11 +450,27 @@ user names, hostnames, e-mails, company names or paths.
 ## Known SheetJS quirks seen through the oracle (intended differences)
 
 The quirks that affect our committed fixtures are listed in `test/corpus/sheetjs-quirks.json`.
-Each entry has an `id`, `file`, `sheet`, `field` (`cells`, `hiddenRows` or `ref`), the
-`sheetjs` value and the `correct` value. Tests compare against the SheetJS expectation
-except at those places. `expected.mjs` stamps the ids into the affected expected files
-(`knownQuirks`). It also fails if a listed `sheetjs` value no longer matches the oracle,
-so the list can't go stale.
+Tests compare against the SheetJS expectation except at those places. Each entry has an `id`,
+`file`, `sheet`, `field`, the `sheetjs` value, the `correct` value, and a `correctCheck` method.
+Value formats depend on `field`:
+- `hiddenRows`: an array of row indices.
+- `ref`: an A1 range.
+- `cells`: an array of `[r, c, v]` triples. `v: null` means "no cell", e.g.
+  `csv-empty-quoted-field-no-cell` has `sheetjs: [[5, 1, null]]`.
+- `dimension`: `{cells, declaredRows, declaredCols}`.
+
+Every value is checked; none is marked unchecked. `expected.mjs` (through `quirks.mjs`)
+checks each `sheetjs` value against the oracle result. It checks each `correct` value against
+the fixture bytes:
+- `sylk-hidden-rows`: the `F;…M0…;R<n>` records.
+- `csv:<encoding>`: the bytes decoded with `TextDecoder` and split by a small RFC 4180 reader.
+- `xlsx-shared-strings`: the shared strings, with entities and `_xHHHH_` decoded.
+- `declared-dimension`: the sniffed declared range, plus the span of the cells.
+
+A mismatch fails the export. `expected.mjs` also stamps the ids into the affected expected
+files (`knownQuirks`). `node --test scripts/corpus/quirks.test.mjs` checks that every quirk
+passes, and that a wrong `sheetjs` or `correct` value fails for each field type and check
+method.
 
 - **xlsx hidden rows need `cellStyles:true`.** Otherwise `!rows` is empty.
 - **SYLK false hidden rows.** In `F;…;R<n>` without `M`, SheetJS keeps `Mval = 0` and

@@ -18,6 +18,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { parseFlags, HIDDEN_ROWS_DIR, CORPUS_DIR, EXPECTED_DIR, GENERATED_DIR, compareDirs, reportCompare, sha256 } from "./lib.mjs"
+import { checkQuirk, loadQuirks } from "./quirks.mjs"
 
 export const MAX_FILE_BYTES = 64 * 1024
 const OUT_ROOT = path.join(CORPUS_DIR, "expected")
@@ -47,7 +48,7 @@ const sources = [
 // One sheet cell per line would be nicer to diff, but compact keeps the committed set small.
 const stringify = (doc) => JSON.stringify(doc) + "\n"
 // Known SheetJS quirks (test/corpus/sheetjs-quirks.json): their ids go into the affected files as `knownQuirks`.
-const QUIRKS = JSON.parse(fs.readFileSync(path.join(CORPUS_DIR, "sheetjs-quirks.json"), "utf8")).quirks
+const QUIRKS = loadQuirks()
 const quirkIds = (key) => [...new Set(QUIRKS.filter((q) => q.file === key).map((q) => q.id))]
 for (const q of QUIRKS) {
   const [src, ...rest] = q.file.split("/")
@@ -65,18 +66,8 @@ for (const src of sources) {
     doc.source = src.name
     const known = quirkIds(`${src.name}/${rel}`)
     if (known.length) doc.knownQuirks = known
-    // Keep the quirk list honest: its `sheetjs` values must match what SheetJS produced.
-    for (const q of QUIRKS.filter((q) => q.file === `${src.name}/${rel}`)) {
-      const sh = doc.sheets?.find((x) => x.name === q.sheet)
-      const bad = (why) => { throw new Error(`sheetjs-quirks.json ${q.id} (${q.file}): ${why}`) }
-      if (!sh) bad(`no sheet ${q.sheet}`)
-      if (q.field === "hiddenRows" && JSON.stringify(sh.hiddenRows) !== JSON.stringify(q.sheetjs)) bad(`hiddenRows ${JSON.stringify(sh.hiddenRows)}`)
-      if (q.field === "ref" && sh.ref !== q.sheetjs) bad(`ref ${sh.ref}`)
-      if (q.field === "cells" && Array.isArray(q.sheetjs)) for (const [r, c, v] of q.sheetjs) {
-        const cell = sh.cells?.find((x) => x.r === r && x.c === c)
-        if (!cell || cell.v !== v) bad(`cell [${r},${c}] is ${JSON.stringify(cell?.v)}`)
-      }
-    }
+    // Keep the quirk list honest: `sheetjs` must match the oracle, `correct` the fixture bytes.
+    for (const q of QUIRKS.filter((q) => q.file === `${src.name}/${rel}`)) checkQuirk(q, doc, path.join(src.dir, rel))
     let text = stringify(doc)
     if (text.length > MAX_FILE_BYTES && doc.sheets) {
       for (const s of doc.sheets) if (s.rows) { s.rows = null; s.rowsOmitted = "size cap" }
