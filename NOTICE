@@ -1,11 +1,19 @@
 effect-spreadsheet
-Copyright 2026 m9tdev
+Copyright (c) 2026 m9tdev
+Licensed under the MIT License (see LICENSE).
 
-This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+Third-party material in the test corpus (test/corpus, scripts/corpus; not
+part of the npm package):
+- Fixtures written with the SheetJS 0.20.3 writer embed SheetJS boilerplate
+  parts (e.g. xl/theme/theme1.xml), Copyright (C) SheetJS LLC, licensed
+  under the Apache License, Version 2.0.
+- The SheetJS test_files corpus (https://test-files.sheetjs.com) is fetched
+  into the gitignored test/corpus/.cache. It is not distributed with this
+  repository.
 
-It includes or is derived from portions of SheetJS (https://sheetjs.com,
-https://git.sheetjs.com/sheetjs/sheetjs, commit d2f2e17),
-Copyright (C) SheetJS LLC, licensed under the Apache License, Version 2.0.
+A library file that is derived from SheetJS (Copyright (C) SheetJS LLC)
+stays under the Apache License, Version 2.0, keeps its SheetJS header and is
+listed below.
 
 Files derived from SheetJS:
 (none yet)

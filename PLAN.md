@@ -112,7 +112,8 @@ Spreadsheet.toRecords(rows, { header: "first-row" | number | string[] }) // like
 
 ## Licensing
 
-The project is licensed Apache-2.0, which is the same as SheetJS and keeps
-ported code simple. Files that port or closely follow SheetJS code keep a
-header naming the source file and the SheetJS copyright, and `NOTICE` lists
-them.
+The project is licensed MIT. SheetJS (Apache-2.0) is a reference: we learn
+from it but don't copy its code. If a file is ever derived from SheetJS, it
+stays Apache-2.0, keeps a header naming the SheetJS source file and
+copyright, and `NOTICE` lists it. Test fixtures written by the SheetJS writer
+carry SheetJS boilerplate; `NOTICE` notes that too.
