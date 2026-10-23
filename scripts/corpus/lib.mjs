@@ -411,6 +411,8 @@ function odsFeatures(s) {
   return f
 }
 
+// Max inflated size of one zip part we scan. The declared size (usize) is untrusted, so the
+// inflate itself is capped too (zipRead maxBytes); a part over the cap is skipped (partial).
 const PART_LIMIT = 64 * 1024 * 1024
 
 function sniffZip(buf) {
@@ -479,7 +481,9 @@ function sniffZip(buf) {
       for (const e of ents) {
         if (!/sheets?\/sheet\d*\.bin$/i.test(e.name)) continue
         if (e.usize > PART_LIMIT) { partial = true; continue }
-        const sf = xlsbSheetFeatures(zipRead(buf, e))
+        let part
+        try { part = zipRead(buf, e, PART_LIMIT) } catch { partial = true; continue } // inflates past the cap
+        const sf = xlsbSheetFeatures(part)
         hidden += sf.hidden
         if (sf.hugeDimension) features.hugeDimension ??= sf.hugeDimension
       }
@@ -487,7 +491,7 @@ function sniffZip(buf) {
       if (partial) features.partial = true
     } else {
       if (wbEnt && wbEnt.usize <= PART_LIMIT) {
-        const wb = zipRead(buf, wbEnt).toString("utf8")
+        const wb = zipRead(buf, wbEnt, PART_LIMIT).toString("utf8")
         const sheets = [...wb.matchAll(/<(?:\w+:)?sheet\b([^>]*?)\/?>/g)]
         features.sheets = sheets.length
         const h = sheets.filter((m) => /\bstate="hidden"/.test(m[1])).length
@@ -499,7 +503,8 @@ function sniffZip(buf) {
       for (const e of ents) {
         if (!/worksheets\/[^/]+\.xml$/i.test(e.name)) continue
         if (e.usize > PART_LIMIT) { partial = true; continue }
-        const s = zipRead(buf, e).toString("utf8")
+        let s
+        try { s = zipRead(buf, e, PART_LIMIT).toString("utf8") } catch { partial = true; continue } // inflates past the cap
         hidden += countMatches(s, /<(?:\w+:)?row\b[^>]*\bhidden="(?:1|true)"/g)
         const dm = /<(?:\w+:)?dimension\b[^>]*\bref="([^"]+)"/.exec(s)
         if (dm && /XFD|1048576/.test(dm[1])) maxDim = dm[1]
