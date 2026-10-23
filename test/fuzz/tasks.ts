@@ -7,9 +7,9 @@ import { parse } from "../../src/internal/xml/parse.ts"
 import type { XmlHandler } from "../../src/internal/xml/tokenizer.ts"
 import * as SpreadsheetLimits from "../../src/SpreadsheetLimits.ts"
 import type { LimitOverrides } from "../../src/SpreadsheetLimits.ts"
+import * as Workbook from "../../src/Workbook.ts"
 
 const ignore: XmlHandler = { open: () => undefined, close: () => undefined, text: () => undefined }
-import * as Workbook from "../../src/Workbook.ts"
 
 export type FuzzTask =
   | { readonly op: "read"; readonly bytes: Uint8Array; readonly limits?: LimitOverrides | undefined }
