@@ -142,13 +142,22 @@ async function timeZoneCase(name) {
     import { createRequire } from "node:module"
     const { READ_OPTIONS, JSON_OPTIONS } = await import(${JSON.stringify(new URL("./oracle-options.mjs", import.meta.url).href)})
     const XLSX = createRequire(import.meta.url)(${JSON.stringify(SHEETJS_ENTRY)})
+    // The zone must really apply: an unknown TZ (e.g. Bogus/Zone) silently gives offset 0,
+    // and then this check would pass without testing anything.
+    if (new Date(2026, 0, 2).getTimezoneOffset() === 0) { console.error("G2 child: TZ=" + process.env.TZ + " gives a UTC offset of 0"); process.exit(3) }
     const wb = XLSX.read(fs.readFileSync(${JSON.stringify(path.join(HERE, "..", "..", "test", "corpus", "generated", "dates.xlsx"))}), { ...READ_OPTIONS })
     process.stdout.write(JSON.stringify(wb.SheetNames.map((n) => XLSX.utils.sheet_to_json(wb.Sheets[n], { ...JSON_OPTIONS }))))
   `
-  const env = { ...process.env, TZ: "Pacific/Auckland" }
-  const out = execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8" })
-  const got = JSON.parse(out)
-  check(`${name}2 time zone: sheet_to_json with JSON_OPTIONS in a TZ=Pacific/Auckland child gives the committed rows`, JSON.stringify(got) === want, `first value ${JSON.stringify(got[0]?.[0]?.[0])}`)
+  const env = { ...process.env, TZ: process.env.ORACLE_SELFTEST_G2_TZ || "Pacific/Auckland" } // override only to prove the offset guard
+  const label = `${name}2 time zone: sheet_to_json with JSON_OPTIONS in a TZ=${env.TZ} child gives the committed rows`
+  let got
+  try {
+    got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))
+  } catch (err) {
+    // a failing child (or bad output) is a failed check, not a crash of the whole selftest
+    return check(label, false, (err.stderr?.toString().trim() || err.message).split("\n")[0])
+  }
+  check(label, JSON.stringify(got) === want, `first value ${JSON.stringify(got[0]?.[0]?.[0])}`)
 }
 
 async function retryTimeoutCase(name) {

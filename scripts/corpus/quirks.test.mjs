@@ -131,3 +131,19 @@ test("xlsxSheetPart: maps a sheet name to its part through the workbook rels", a
   doc.sheets[0].name = "Renamed"
   assert.throws(() => checkQuirk({ ...q, sheet: "Renamed" }, doc, fileFor(q)), /sheetjs-quirks.json .*correct: no sheet "Renamed"/)
 })
+
+test("date1904 check reads the quirk's sheet, also when it isn't the first one", async () => {
+  const { zip } = await import("./lib.mjs")
+  const os = await import("node:os")
+  const wb = '<workbook xmlns:r="r"><workbookPr date1904="1"/><sheets><sheet name="First" sheetId="1" r:id="rId1"/><sheet name="Dates" sheetId="2" r:id="rId2"/></sheets></workbook>'
+  const rels = '<Relationships><Relationship Id="rId1" Type="ws" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="ws" Target="worksheets/sheet2.xml"/></Relationships>'
+  const sheet = (v) => `<worksheet><sheetData><row r="1"><c r="A1"><v>${v}</v></c></row></sheetData></worksheet>`
+  const xlsx = zip([["xl/workbook.xml", wb], ["xl/_rels/workbook.xml.rels", rels], ["xl/worksheets/sheet1.xml", sheet(0)], ["xl/worksheets/sheet2.xml", sheet(1)]])
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "quirk-1904-2sheets-")), file = path.join(dir, "t.xlsx")
+  fs.writeFileSync(file, xlsx)
+  try {
+    const doc = { sheets: [{ name: "First", rows: [] }, { name: "Dates", rows: [["1900-01-01T00:00:00.000Z"]] }] }
+    const q = { id: "t", file: "x", sheet: "Dates", field: "rows", sheetjs: [[0, 0, "1900-01-01T00:00:00.000Z"]], correct: [[0, 0, "1904-01-02T00:00:00.000Z"]], correctCheck: "xlsx-date1904-serial" }
+    assert.doesNotThrow(() => checkQuirk(q, doc, file)) // serial 1 from sheet2.xml, not serial 0 from sheet1.xml
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
