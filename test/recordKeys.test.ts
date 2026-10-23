@@ -154,26 +154,40 @@ describe("recordKeys: lazy keys with make (spec examples 20-24)", () => {
 })
 
 describe("recordKeys: hostile inputs stay linear", () => {
-  const BUDGET_MS = 100
-  const hostile: ReadonlyArray<readonly [string, ReadonlyArray<string>]> = [
-    ["16384 × a", range(16384, () => "a")],
-    ["16384 × empty", range(16384, () => "")],
-    ["a_1 … a_8191 then 8192 × a", [...range(8191, (i) => `a_${i + 1}`), ...range(8192, () => "a")]],
-    ["a, a_1 … a_8191 then 8192 × a", ["a", ...range(8191, (i) => `a_${i + 1}`), ...range(8192, () => "a")]],
-    ["16384 × __EMPTY_k pre-filled, then 16384 empty", [...range(16384, (i) => (i === 0 ? "__EMPTY" : `__EMPTY_${i}`)), ...range(16384, () => "")]]
+  // Two checks per hostile header. The work counter is exact and doesn't
+  // depend on the machine: at most 3 `used` lookups per key. The wall clock
+  // catches quadratic work the counter can't see (say, a list scan inside a
+  // lookup): it runs the same header at 4x the size (65 536 columns) under a
+  // generous ceiling. Linear code takes ~10-50 ms there, even on a loaded
+  // machine well under a second; a quadratic version needs about 2 * 10^9
+  // steps, i.e. many seconds.
+  const CEILING_MS = 2000
+  const hostile: ReadonlyArray<readonly [string, (n: number) => ReadonlyArray<string>]> = [
+    ["n × a", (n) => range(n, () => "a")],
+    ["n × empty", (n) => range(n, () => "")],
+    ["a_1 … a_(n/2-1) then n/2 × a", (n) => [...range(n / 2 - 1, (i) => `a_${i + 1}`), ...range(n / 2, () => "a")]],
+    ["a, a_1 … a_(n/2-1) then n/2 × a", (n) => ["a", ...range(n / 2 - 1, (i) => `a_${i + 1}`), ...range(n / 2, () => "a")]],
+    ["n × __EMPTY_k pre-filled, then n empty", (n) => [...range(n, (i) => (i === 0 ? "__EMPTY" : `__EMPTY_${i}`)), ...range(n, () => "")]]
   ]
-  for (const [name, names] of hostile) {
-    it(`${name}: under ${BUDGET_MS} ms, at most 3 lookups per key`, () => {
-      recordKeys(names) // warm up the JIT so the budget measures the algorithm
-      const { ms, value } = timed(() => {
-        const keys = makeCounted(names.map((n, i) => [i, n] as const))
-        for (let i = 0; i < names.length; i++) keys.key(i)
-        return keys
-      })
-      expect(ms).toBeLessThan(BUDGET_MS)
+  const allKeys = (names: ReadonlyArray<string>) => {
+    const keys = makeCounted(names.map((n, i) => [i, n] as const))
+    for (let i = 0; i < names.length; i++) keys.key(i)
+    return keys
+  }
+  for (const [name, header] of hostile) {
+    it(`${name}, n = 16384: at most 3 lookups per key, all keys distinct`, () => {
+      const names = header(16384)
+      const value = allKeys(names)
       expect(value.probes()).toBeLessThanOrEqual(3 * names.length)
       const keys = names.map((_, i) => value.key(i))
       expect(new Set(keys).size).toBe(names.length)
+    })
+
+    it(`${name}, n = 65536: under ${CEILING_MS} ms`, () => {
+      const names = header(65536)
+      const { ms, value } = timed(() => allKeys(names))
+      expect(ms).toBeLessThan(CEILING_MS)
+      expect(value.probes()).toBeLessThanOrEqual(3 * names.length)
     })
   }
 
