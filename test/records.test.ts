@@ -7,6 +7,7 @@ import * as Spreadsheet from "../src/Spreadsheet.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import type { Row } from "../src/Workbook.ts"
 import { csvRows, enc } from "./helpers/run.ts"
+import { countYields } from "./helpers/yields.ts"
 
 const rowsOf = (text: string) => Effect.runPromise(csvRows(text, { inferTypes: true }))
 const recs = <D = never>(rows: Iterable<Row>, options: Spreadsheet.RecordsOptions<D>) =>
@@ -124,9 +125,11 @@ describe("toRecords", () => {
     const text = "a\n" + ",".repeat(16383) + "far\n" + "y\n".repeat(5000)
     expect(text.length).toBeLessThan(30_000)
     const rows = await Effect.runPromise(csvRows(text))
+    // The key count below is the cost check (it was 81.9M before the fix);
+    // the clock only has a generous ceiling against a gross blowup.
     const start = performance.now()
     const records = recs(rows, { header: "first-row", defval: null })
-    expect(performance.now() - start).toBeLessThan(1000)
+    expect(performance.now() - start).toBeLessThan(10_000)
     expect(records.length).toBe(5001)
     expect(records[0]).toEqual({ a: null, __EMPTY: "far" })
     expect(records[1]).toEqual({ a: "y" })
@@ -190,24 +193,16 @@ describe("toRecords", () => {
     }), 30_000)
 
   it("many rows that give no record (blank, before the header) finish fast and keep yielding", async () => {
+    // ~600 KB: the reader hands over ~10 pieces with a yield before each, and
+    // the records stream yields once more per piece it gets: ~20 turns. At
+    // least 12 needs both; either one alone gives about 10.
     const bytes = enc("\n".repeat(300_000) + "h\n" + "\n".repeat(300_000) + "v\n")
-    let last = performance.now()
-    let maxGap = 0
-    const timer = setInterval(() => {
-      const now = performance.now()
-      maxGap = Math.max(maxGap, now - last)
-      last = now
-    }, 5)
-    const start = performance.now()
-    const records = await Effect.runPromise(
-      Stream.runCollect(Spreadsheet.toRecords(Csv.rows(bytes), { header: 300_000 }))
+    const { value: records, yields, ms } = await countYields(() =>
+      Effect.runPromise(Stream.runCollect(Spreadsheet.toRecords(Csv.rows(bytes), { header: 300_000 })))
     )
-    const elapsed = performance.now() - start
-    await new Promise((r) => setTimeout(r, 30))
-    clearInterval(timer)
     expect(Array.from(records)).toEqual([{ h: "v" }])
-    expect(elapsed).toBeLessThan(3000)
-    expect(maxGap).toBeLessThan(250)
+    expect(yields).toBeGreaterThanOrEqual(12)
+    expect(ms).toBeLessThan(10_000)
   }, 30_000)
 
   it.effect("Empty cells count against maxCellsPerSheet", () =>
@@ -233,50 +228,49 @@ describe("toRecords", () => {
       assert.strictEqual(error._tag === "LimitExceeded" && error.limit, "maxCellsPerSheet")
     }))
 
-  it("B1': a 16384-column header times 1300 rows with defval stays fast, bounded and yielding", async () => {
+  it("B1': a 16384-column header times 1300 rows with defval stays bounded and yielding", async () => {
     const header = Array.from({ length: 16384 }, (_, i) => `c${i}`).join(",")
     const bytes = enc(header + "\n" + "y\n".repeat(1300))
     expect(bytes.length).toBeLessThan(110_000)
-    let last = performance.now()
-    let maxGap = 0
-    const timer = setInterval(() => {
-      const now = performance.now()
-      maxGap = Math.max(maxGap, now - last)
-      last = now
-    }, 5)
-    const start = performance.now()
+    // Cost: the fill budget stops it after 64 records. Responsiveness: the
+    // number of event-loop turns, not a wall-clock gap, so load doesn't
+    // matter. Records come in batches of ~64 Ki keys (4 records here) with a
+    // yield before each: ~19 turns for 64 records, ~330 for 1300; one big
+    // synchronous batch gives 2-3. The longest stretch is bounded by the
+    // records emitted between two turns: 4 per batch here, at most 8 allowed
+    // (one oversized batch anywhere in the run fails it). The clock only has
+    // generous ceilings.
     let emitted = 0
-    const exit = await Effect.runPromise(Effect.exit(Stream.runForEach(
-      Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null }),
-      () => Effect.sync(() => emitted++)
-    )))
-    const elapsed = performance.now() - start
-    // let the timer fire once more, so a block at the very end is measured too
-    await new Promise((r) => setTimeout(r, 30))
-    clearInterval(timer)
-    // 1 048 576 fills / 16384 per record = 64 records, then maxRecordFields
-    expect(exit._tag).toBe("Failure")
-    const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : undefined
+    const first = await countYields(
+      () =>
+        Effect.runPromise(Effect.exit(Stream.runForEach(
+          Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null }),
+          () => Effect.sync(() => emitted++)
+        ))),
+      () => emitted
+    )
+    // 1 048 576 fills / 16383 per record: 64 records, then maxRecordFields
+    expect(first.value._tag).toBe("Failure")
+    const error = first.value._tag === "Failure" ? Cause.squash(first.value.cause) : undefined
     expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxRecordFields", max: 1_048_576 })
     expect(emitted).toBe(64)
-    expect(elapsed).toBeLessThan(1500)
-    expect(maxGap).toBeLessThan(250)
+    expect(first.yields).toBeGreaterThanOrEqual(64 / 8)
+    expect(first.maxPerTurn).toBeLessThanOrEqual(8)
+    expect(first.ms).toBeLessThan(10_000)
     // with the fill budget raised, all 1300 records come out, still yielding
-    maxGap = 0
-    last = performance.now()
-    const timer2 = setInterval(() => {
-      const now = performance.now()
-      maxGap = Math.max(maxGap, now - last)
-      last = now
-    }, 5)
-    const count = await Effect.runPromise(Stream.runCount(
-      Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null, limits: { maxRecordFields: Infinity } })
-    ))
-    await new Promise((r) => setTimeout(r, 30))
-    clearInterval(timer2)
-    expect(count).toBe(1300)
-    expect(maxGap).toBeLessThan(250)
-  }, 30_000)
+    let all = 0
+    const run = await countYields(
+      () =>
+        Effect.runPromise(Stream.runForEach(
+          Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null, limits: { maxRecordFields: Infinity } }),
+          () => Effect.sync(() => all++)
+        )),
+      () => all
+    )
+    expect(all).toBe(1300)
+    expect(run.yields).toBeGreaterThanOrEqual(1300 / 8)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(8)
+  }, 60_000)
 
   it("record values are typed: cell values, plus the defval type", () => {
     const rows: Array<Row> = [{ index: 0, hidden: false, cells: [Cell.text(0, "a")] }]

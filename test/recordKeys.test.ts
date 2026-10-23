@@ -154,27 +154,77 @@ describe("recordKeys: lazy keys with make (spec examples 20-24)", () => {
 })
 
 describe("recordKeys: hostile inputs stay linear", () => {
-  const BUDGET_MS = 100
-  const hostile: ReadonlyArray<readonly [string, ReadonlyArray<string>]> = [
-    ["16384 × a", range(16384, () => "a")],
-    ["16384 × empty", range(16384, () => "")],
-    ["a_1 … a_8191 then 8192 × a", [...range(8191, (i) => `a_${i + 1}`), ...range(8192, () => "a")]],
-    ["a, a_1 … a_8191 then 8192 × a", ["a", ...range(8191, (i) => `a_${i + 1}`), ...range(8192, () => "a")]],
-    ["16384 × __EMPTY_k pre-filled, then 16384 empty", [...range(16384, (i) => (i === 0 ? "__EMPTY" : `__EMPTY_${i}`)), ...range(16384, () => "")]]
+  // Two checks per hostile header. The work counter is exact and doesn't
+  // depend on the machine: at most 3 `used` lookups per key. Timing catches
+  // quadratic work the counter can't see (say, a list scan inside a lookup).
+  // An absolute bound and a growth ratio (n vs 4n) both raced machine load:
+  // under load linear code reached ~1.4 s and a 4x growth of 10-15x, as a
+  // larger input suffers more from cache and GC pressure. So the time is
+  // compared with a linear reference doing the same kind of work on the same
+  // input (an entry array, a Set and two Maps of n fresh strings), measured
+  // in the same process, interleaved, best of 3: load slows both alike.
+  // Measured at 65 536 columns: linear code 1.0-1.8x the reference idle and
+  // 0.4-3.1x under load; a quadratic that scans a list on every 4th
+  // allocation 16-255x.
+  const N = 65536
+  const MAX_RELATIVE = 8
+  const hostile: ReadonlyArray<readonly [string, (n: number) => ReadonlyArray<string>]> = [
+    ["n × a", (n) => range(n, () => "a")],
+    ["n × empty", (n) => range(n, () => "")],
+    ["a_1 … a_(n/2-1) then n/2 × a", (n) => [...range(n / 2 - 1, (i) => `a_${i + 1}`), ...range(n / 2, () => "a")]],
+    ["a, a_1 … a_(n/2-1) then n/2 × a", (n) => ["a", ...range(n / 2 - 1, (i) => `a_${i + 1}`), ...range(n / 2, () => "a")]],
+    ["n × __EMPTY_k pre-filled, then n empty", (n) => [...range(n, (i) => (i === 0 ? "__EMPTY" : `__EMPTY_${i}`)), ...range(n, () => "")]]
   ]
-  for (const [name, names] of hostile) {
-    it(`${name}: under ${BUDGET_MS} ms, at most 3 lookups per key`, () => {
-      recordKeys(names) // warm up the JIT so the budget measures the algorithm
-      const { ms, value } = timed(() => {
-        const keys = makeCounted(names.map((n, i) => [i, n] as const))
-        for (let i = 0; i < names.length; i++) keys.key(i)
-        return keys
-      })
-      expect(ms).toBeLessThan(BUDGET_MS)
+  const allKeys = (names: ReadonlyArray<string>) => {
+    const keys = makeCounted(names.map((n, i) => [i, n] as const))
+    for (let i = 0; i < names.length; i++) keys.key(i)
+    return keys
+  }
+  /** Linear work of the same shape as `allKeys`, for comparison. */
+  const reference = (names: ReadonlyArray<string>): number => {
+    const entries = names.map((n, i) => [i, n] as const)
+    const used = new Set<string>()
+    const byColumn = new Map<number, string>()
+    const next = new Map<string, number>()
+    // progress: one entry per iteration
+    for (const [i, n] of entries) {
+      const key = `${n}_${i}`
+      if (!used.has(key)) used.add(key)
+      byColumn.set(i, key)
+      next.set(n, i)
+    }
+    return used.size + byColumn.size + next.size
+  }
+  for (const [name, header] of hostile) {
+    it(`${name}, n = 16384: at most 3 lookups per key, all keys distinct`, () => {
+      const names = header(16384)
+      const value = allKeys(names)
       expect(value.probes()).toBeLessThanOrEqual(3 * names.length)
       const keys = names.map((_, i) => value.key(i))
       expect(new Set(keys).size).toBe(names.length)
     })
+
+    it(`${name}, n = ${N}: at most ${MAX_RELATIVE}x the time of linear reference work`, async () => {
+      const names = header(N)
+      allKeys(names) // warm up the JIT
+      reference(names)
+      let keysMs = Infinity
+      let referenceMs = Infinity
+      // progress: r increases up to 3. Runs are separated by an event-loop
+      // turn, so a slow (quadratic) run fails here instead of tripping the
+      // hang watchdog; stop once the bound is met, or far off.
+      for (let r = 0; r < 3; r++) {
+        await new Promise((resolve) => setImmediate(resolve))
+        referenceMs = Math.min(referenceMs, timed(() => reference(names)).ms)
+        keysMs = Math.min(keysMs, timed(() => allKeys(names)).ms)
+        const relative = keysMs / Math.max(referenceMs, 0.5)
+        if (relative < MAX_RELATIVE || relative > 4 * MAX_RELATIVE) break
+      }
+      expect(
+        keysMs / Math.max(referenceMs, 0.5),
+        `keys ${keysMs.toFixed(1)} ms, reference ${referenceMs.toFixed(1)} ms`
+      ).toBeLessThan(MAX_RELATIVE)
+    }, 120_000)
   }
 
   it("the ladder case gives the expected keys", () => {

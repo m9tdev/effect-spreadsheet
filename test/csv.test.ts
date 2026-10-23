@@ -6,6 +6,7 @@ import * as Spreadsheet from "../src/Spreadsheet.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import { csvAoa, csvExit, csvRows, enc, failureOf, toAoa } from "./helpers/run.ts"
+import { countYields } from "./helpers/yields.ts"
 
 describe("csv: structure", () => {
   it("empty input gives no rows", async () => {
@@ -406,19 +407,26 @@ describe("csv: streaming", () => {
     }))
 
   it("the event loop runs while a large input is parsed", async () => {
-    const bytes = enc("abcdefgh,ijklmnop,qrstuvwx\n".repeat(100_000)) // ~2.7 MB
-    let ticks = 0
-    let running = true
-    const tick = () => {
-      if (!running) return
-      ticks++
-      setImmediate(tick)
-    }
-    setImmediate(tick)
-    const count = await Effect.runPromise(Stream.runCount(Csv.rows(bytes)))
-    running = false
+    // ~2.7 MB = ~42 pieces of 64 KiB, with a yield before each; counted in
+    // event-loop turns, which machine load doesn't change. The work per
+    // stretch is bounded by the rows one piece can give: each pull emits
+    // the rows of at most one 64 KiB piece (27-byte lines: at most
+    // ceil(65536 / 27) + 1). Rows per turn can't be used here, because Effect
+    // also yields on its own after 2048 operations.
+    const line = "abcdefgh,ijklmnop,qrstuvwx\n"
+    const bytes = enc(line.repeat(100_000))
+    let count = 0
+    let maxChunk = 0
+    const { yields } = await countYields(() =>
+      Effect.runPromise(Stream.runForEachArray(Csv.rows(bytes), (chunk) =>
+        Effect.sync(() => {
+          count += chunk.length
+          maxChunk = Math.max(maxChunk, chunk.length)
+        })))
+    )
     assert.strictEqual(count, 100_000)
-    assert.isAbove(ticks, 10)
+    assert.isAtLeast(yields, 20)
+    assert.isAtMost(maxChunk, Math.ceil(65536 / line.length) + 1)
   })
 
   it.effect("the error of the input stream passes through", () =>
