@@ -97,3 +97,19 @@ test("date1904 quirk: the correct value comes from the 1904 epoch, and needs dat
   // the same check on the 1900-system twin fails: it doesn't declare date1904
   assert.throws(() => checkQuirk({ ...q, file: "generated/dates.xlsx" }, JSON.parse(fs.readFileSync(path.join(CORPUS_DIR, "expected/generated/dates.xlsx.json"), "utf8")), path.join(CORPUS_DIR, "generated/dates.xlsx")), /date1904/)
 })
+
+test("date1904 check: typed and non-numeric cells are skipped, never a bare RangeError", async () => {
+  const { zip } = await import("./lib.mjs")
+  const os = await import("node:os")
+  const ws = '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>1</v></c><c r="C1"><v>NaN</v></c><c r="D1"><v>1e300</v></c><c r="E1" t="str"><v>x</v></c></row></sheetData></worksheet>'
+  const xlsx = zip([["xl/workbook.xml", '<workbook><workbookPr date1904="1"/></workbook>'], ["xl/worksheets/sheet1.xml", ws]])
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "quirk-1904-")), "t.xlsx")
+  fs.writeFileSync(file, xlsx)
+  try {
+    const doc = { sheets: [{ name: "S", rows: [[null, "1900-01-01T00:00:00.000Z"]] }] }
+    const q = { id: "t", file: "x", sheet: "S", field: "rows", sheetjs: [[0, 1, "1900-01-01T00:00:00.000Z"]], correct: [[0, 1, "1904-01-02T00:00:00.000Z"], [0, 0, null], [0, 2, null], [0, 3, null], [0, 4, null]], correctCheck: "xlsx-date1904-serial" }
+    assert.doesNotThrow(() => checkQuirk(q, doc, file))
+    // a wrong expectation fails with the quirk's own error
+    assert.throws(() => checkQuirk({ ...q, correct: [[0, 1, "2000-01-01T00:00:00.000Z"]] }, doc, file), /sheetjs-quirks.json t .*correct: 1904-system dates/)
+  } finally { fs.rmSync(path.dirname(file), { recursive: true, force: true }) }
+})

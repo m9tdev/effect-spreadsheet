@@ -93,9 +93,16 @@ export function checkQuirk(q, doc, file) {
     if (!d1904) bad("correct: the workbook doesn't declare date1904")
     const epoch = Date.UTC(1904, 0, 1)
     const got = new Map()
-    for (const c of part("xl/worksheets/sheet1.xml").matchAll(/<c r="([A-Z]+)(\d+)"[^>]*><v>([^<]+)<\/v><\/c>/g)) {
+    for (const c of part("xl/worksheets/sheet1.xml").matchAll(/<c r="([A-Z]+)(\d+)"([^>]*)><v>([^<]+)<\/v><\/c>/g)) {
+      // only plain numeric cells are serials: skip typed cells (t="s", "str", "b", ...) and
+      // values that aren't finite numbers, which would make new Date() throw a RangeError
+      if (/\bt="/.test(c[3])) continue
+      const serial = Number(c[4])
+      if (!Number.isFinite(serial)) continue
+      const ms = epoch + Math.round(serial * 86400) * 1000
+      if (!Number.isFinite(new Date(ms).getTime())) continue
       const col = [...c[1]].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1
-      got.set(`${+c[2] - 1},${col}`, new Date(epoch + Math.round(Number(c[3]) * 86400) * 1000).toISOString())
+      got.set(`${+c[2] - 1},${col}`, new Date(ms).toISOString())
     }
     if (!sameCells(got, q.correct)) bad(`correct: 1904-system dates ${JSON.stringify(q.correct.map(([r, c]) => [r, c, got.get(`${r},${c}`) ?? null]))}`)
   } else if (m === "declared-dimension") {
