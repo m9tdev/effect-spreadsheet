@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs"
+import { readdirSync, readFileSync, statSync } from "node:fs"
 import { Effect, Exit, Stream } from "effect"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
@@ -264,11 +264,14 @@ describe("xml bytes", () => {
     expect(decoder.end()).toBe("<")
   })
 
-  it("parses every XML part of the committed corpus workbooks", async () => {
+  it("parses every XML part of the committed corpus workbooks, hidden-row fixtures included, in linear work", async () => {
     let parts = 0
-    for (const dir of ["test/corpus/generated", "test/corpus/hidden-rows"]) {
-      for (const name of readdirSync(dir).filter((n) => /\.(xlsx|ods)$/.test(n))) {
-        const archive = open(new Uint8Array(readFileSync(`${dir}/${name}`)), { ...limits, maxCompressionRatio: 10_000 })
+    for (const dir of ["test/corpus/generated", "test/corpus/hidden-rows", "test/corpus/hidden-rows/renamed"]) {
+      for (const name of readdirSync(dir)) {
+        if (!statSync(`${dir}/${name}`).isFile()) continue
+        const bytes = new Uint8Array(readFileSync(`${dir}/${name}`))
+        if (!(bytes[0] === 0x50 && bytes[1] === 0x4B)) continue
+        const archive = open(bytes, { ...limits, maxCompressionRatio: 10_000 })
         if ("_tag" in archive) throw new Error(`${name}: ${archive._tag}`)
         for (const entry of archive.entries.filter((e) => /\.(xml|rels)$/.test(e.name))) {
           const handler: XmlHandler = { open: () => undefined, close: () => undefined, text: () => undefined }

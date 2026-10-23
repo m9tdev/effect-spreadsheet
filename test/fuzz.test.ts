@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 /**
  * Fuzz: random and mutated input must end in a value or a typed
  * SpreadsheetError, within a time budget. Each case runs in a worker thread
@@ -101,5 +102,60 @@ describe("fuzz: never a defect, never a hang", () => {
       await terminates({ op: "csv", chunks: [enc(text)] })
       await terminates({ op: "csv", chunks: [enc(text)], options: { strict: true } })
     }
+  })
+
+  it("zip + xml: truncations and bit flips of the corpus workbooks", async () => {
+    const workbooks = ["test/corpus/generated/features.xlsx", "test/corpus/generated/strings.xlsx", "test/corpus/hidden-rows/hidden-row.xlsx", "test/corpus/generated/features.ods"]
+      .map((p) => new Uint8Array(readFileSync(p)))
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...workbooks).chain((sample) =>
+          fc.tuple(
+            fc.constant(sample),
+            fc.integer({ min: 0, max: sample.length }),
+            fc.array(fc.tuple(fc.nat(), fc.integer({ min: 0, max: 7 })), { maxLength: 8 })
+          )
+        ),
+        async ([sample, length, flips]) => {
+          const bytes = sample.slice(0, length)
+          for (const [at, bit] of flips) if (bytes.length > 0) bytes[at % bytes.length]! ^= 1 << bit
+          await terminates({ op: "zip", bytes })
+          await terminates({ op: "read", bytes })
+        }
+      ),
+      { numRuns: 300 }
+    )
+  })
+
+  it("xml: random and mutated documents in random chunks", async () => {
+    const sheet = new TextEncoder().encode(
+      `<?xml version="1.0"?><worksheet xmlns="x"><sheetData><row r="1" hidden="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="inlineStr"><is><t>a &amp; b</t></is></c></row></sheetData><!-- c --><mergeCells><mergeCell ref="A1:B1"/></mergeCells></worksheet>`
+    )
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(
+          fc.uint8Array({ maxLength: 2048 }),
+          fc.tuple(fc.integer({ min: 0, max: sheet.length }), fc.array(fc.tuple(fc.nat(), fc.integer({ min: 0, max: 7 })), { maxLength: 6 }))
+            .map(([length, flips]) => {
+              const bytes = sheet.slice(0, length)
+              for (const [at, bit] of flips) if (bytes.length > 0) bytes[at % bytes.length]! ^= 1 << bit
+              return bytes
+            })
+        ),
+        fc.array(fc.nat(), { maxLength: 8 }),
+        async (bytes, cuts) => {
+          const points = [...new Set(cuts.map((c) => c % (bytes.length + 1)))].sort((a, b) => a - b)
+          const chunks: Array<Uint8Array> = []
+          let last = 0
+          for (const p of points) {
+            chunks.push(bytes.slice(last, p))
+            last = p
+          }
+          chunks.push(bytes.slice(last))
+          await terminates({ op: "xml", chunks, limits: { maxXmlDepth: 8, maxStringLength: 64 } })
+        }
+      ),
+      { numRuns: 500 }
+    )
   })
 })

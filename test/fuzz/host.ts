@@ -74,6 +74,6 @@ export class FuzzHost {
 }
 
 const describe = (task: FuzzTask): string => {
-  const bytes = task.op === "csv" ? task.chunks.reduce((n, c) => n + c.length, 0) : task.bytes.length
+  const bytes = task.op === "csv" || task.op === "xml" ? task.chunks.reduce((n, c) => n + c.length, 0) : task.bytes.length
   return `${task.op} of ${bytes} bytes`
 }

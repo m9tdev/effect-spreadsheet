@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs"
+import { readdirSync, readFileSync, statSync } from "node:fs"
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import { type Archive, open, RATIO_GRACE_BYTES } from "../src/internal/zip/archive.ts"
@@ -72,18 +72,24 @@ describe("zip archive: reading entries", () => {
     expect(concat(Array.from(chunks))).toEqual(random)
   })
 
-  it("reads every entry of the committed corpus workbooks (CRCs and sizes check out)", async () => {
-    const dirs = ["test/corpus/generated", "test/corpus/hidden-rows"]
+  it("reads every entry of the committed corpus workbooks, hidden-row fixtures and renamed copies included", async () => {
+    // every zip in these directories, whatever its extension (renamed/ holds
+    // workbooks saved under a misleading name)
+    const dirs = ["test/corpus/generated", "test/corpus/hidden-rows", "test/corpus/hidden-rows/renamed"]
     let files = 0
     for (const dir of dirs) {
-      for (const name of readdirSync(dir).filter((n) => /\.(xlsx|xlsb|ods)$/.test(n))) {
+      for (const name of readdirSync(dir)) {
+        if (!statSync(`${dir}/${name}`).isFile()) continue
         const bytes = new Uint8Array(readFileSync(`${dir}/${name}`))
+        if (!(bytes[0] === 0x50 && bytes[1] === 0x4B && bytes[2] === 0x03 && bytes[3] === 0x04)) continue
         // some fixtures are deliberately highly compressible
         const archive = openOk(bytes, { ...limits, maxCompressionRatio: 10_000 })
         for (const entry of archive.entries) {
           const exit = await Effect.runPromise(Effect.exit(archive.readAll(entry)))
           expect(Exit.isSuccess(exit), `${name}: ${entry.name}`).toBe(true)
         }
+        // work done: exactly the declared sizes, once
+        expect(archive.inflatedBytes()).toBe(archive.entries.reduce((n, e) => n + e.uncompressedSize, 0))
         files++
       }
     }
