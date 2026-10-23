@@ -28,10 +28,12 @@ const NON_DATA = /(^|\/)(README\.md|LICENSE|Makefile|package\.json|requirements\
 // stem documented in the test_files README (SHEETJS_STEMS). Anything else is "unclear":
 // other subdirectories, and names with an unknown `<prefix>_`.
 // `committable` is our conclusion (docs/corpus.md); we still commit none of them for now.
+// The repo is MIT only: files of Apache-2.0 origin (SheetJS originals, Apache POI, spout,
+// OpenOffice oo34xml) are never committable, so no Apache-2.0 material can come in later.
 const ORIGINS = [
-  { re: /^apachepoi_|^apache_spreadsheet\/|^apache_ExcelXML\//, origin: "apache-poi", license: "Apache-2.0", committable: true },
-  { re: /^spout-(xlsx|ods)_/, origin: "spout", license: "Apache-2.0", committable: true },
-  { re: /^oo34xml_/, origin: "openoffice", license: "Apache-2.0", committable: true },
+  { re: /^apachepoi_|^apache_spreadsheet\/|^apache_ExcelXML\//, origin: "apache-poi", license: "Apache-2.0", committable: false },
+  { re: /^spout-(xlsx|ods)_/, origin: "spout", license: "Apache-2.0", committable: false },
+  { re: /^oo34xml_/, origin: "openoffice", license: "Apache-2.0", committable: false },
   { re: /^openpyxl_/, origin: "openpyxl", license: "MIT", committable: true },
   { re: /^roo_|^Empact_roo\/|^roo-rb_roo-xls\//, origin: "roo", license: "MIT", committable: true },
   { re: /^spreadsheet-parsexlsx_|^doy_spreadsheet-parsexlsx\//, origin: "spreadsheet-parsexlsx", license: "MIT", committable: true },
@@ -56,7 +58,7 @@ const SHEETJS_STEMS = [
   "LO7322", "Attendance", "duration_112",
 ]
 const UNCLEAR = { origin: "unknown", license: "unclear", committable: false }
-const SHEETJS = { origin: "sheetjs", license: "Apache-2.0", committable: true }
+const SHEETJS = { origin: "sheetjs", license: "Apache-2.0", committable: false }
 
 function provenance(rel) {
   // External origin: check the full relative path and every component's basename-prefix.

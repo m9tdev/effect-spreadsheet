@@ -89,11 +89,11 @@ The download and extraction take about 10 s here.
 
 | origin | licence | files in manifest | committable? |
 | --- | --- | --- | --- |
-| SheetJS originals (root + 201*/biff* re-saves, known stems) | Apache-2.0 | 866 | yes (with NOTICE attribution) |
+| SheetJS originals (root + 201*/biff* re-saves, known stems) | Apache-2.0 | 866 | **no** (repo is MIT only) |
 | other SheetJS subdirectories, unknown prefixes | unclear | 126 | **no** |
-| Apache POI | Apache-2.0 | 4299 | yes (NOTICE) |
-| spout | Apache-2.0 | 118 | yes (NOTICE) |
-| OpenOffice (oo34xml) | Apache-2.0 | 36 | yes (NOTICE) |
+| Apache POI | Apache-2.0 | 4299 | **no** (repo is MIT only) |
+| spout | Apache-2.0 | 118 | **no** (repo is MIT only) |
+| OpenOffice (oo34xml) | Apache-2.0 | 36 | **no** (repo is MIT only) |
 | openpyxl | MIT | 121 | yes (copyright notice) |
 | roo | MIT | 747 | yes (copyright notice) |
 | Spreadsheet::ParseXLSX | MIT | 172 | yes (copyright notice) |
@@ -105,7 +105,9 @@ The download and extraction take about 10 s here.
 | PHPExcel | LGPL | 2 | **no** |
 | OpenOffice test docs (ootest) | unclear (README: "license terms are unclear") | 116 | **no** |
 
-Each entry of the (cached) full manifest has `origin`, `license` and `committable`.
+Each entry of the (cached) full manifest has `origin`, `license` and `committable`. The
+repository is plain MIT, so nothing of Apache-2.0 origin is committable. Only the MIT and
+BSD-3 origins could ever be committed, with their copyright notice.
 
 **Decision: we commit no SheetJS corpus files.** They are fetched (pinned) into
 `test/corpus/.cache`. Fetching is fast and reproducible. Committing ~1.9 GB makes
@@ -113,8 +115,8 @@ no sense. The README also says the third-party test sets may hold files their
 contributors had no right to release ("Requests for Removal"). The archive itself
 is no longer browsable upstream, so we don't publish its file listing either. If we
 ever need a specific file in git (e.g. for CI without network), pick it from a
-`committable: true` origin, preferably a SheetJS original, and add its attribution
-to `NOTICE`.
+`committable: true` origin (MIT or BSD-3), and keep its copyright notice with it. Better
+still, generate an equivalent fixture of our own.
 
 The CSV/JSON/XML files named `<book>.<ext>.<n>.csv` / `<book>.<ext>.xml` are Excel or
 SheetJS exports of the workbook next to them. They have `derived: true` in the manifest.
