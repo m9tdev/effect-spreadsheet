@@ -9,17 +9,15 @@ import { LimitExceeded } from "../SpreadsheetError.ts"
 import type { LimitOverrides } from "../SpreadsheetLimits.ts"
 import type { Row } from "../Workbook.ts"
 
-export type CellValue = string | number | boolean | Date
-
-export interface RecordsOptions {
+export interface RecordsOptions<D = never> {
   /**
    * - `"first-row"`: the first row is the header.
    * - a number: the row with that `index` is the header; earlier rows are skipped.
    * - an array: column `i` is named `header[i]`; columns past its end are dropped.
    */
   readonly header: "first-row" | number | ReadonlyArray<string>
-  /** Value for header columns the row has no cell in. Default: no key. */
-  readonly defval?: unknown
+  /** Value for header-named columns the row has no value in. Default: no key. */
+  readonly defval?: D
   /** Keep rows without any value (as `{}`, or filled with `defval`). Default `false`. */
   readonly blankRows?: boolean | undefined
   /**
@@ -61,10 +59,10 @@ export class RecordBuilder {
   private headerDone: boolean
   private fields = 0
 
-  private readonly options: RecordsOptions
+  private readonly options: RecordsOptions<unknown>
   private readonly maxFields: number
 
-  constructor(options: RecordsOptions, maxFields: number) {
+  constructor(options: RecordsOptions<unknown>, maxFields: number) {
     this.options = options
     this.maxFields = maxFields
     const header = options.header

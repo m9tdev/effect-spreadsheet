@@ -135,13 +135,21 @@ export const error = (column: number, value: string, meta?: Meta): ErrorCell =>
   withMeta({ _tag: "Error" as const, column, value }, meta)
 
 /**
+ * A cell value: what {@link value} gives for a non-empty cell.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export type Value = string | number | boolean | Date
+
+/**
  * The cell's value, `undefined` for `Empty`. Error cells give their code
  * (e.g. `"#N/A"`).
  *
  * @since 0.1.0
  * @category getters
  */
-export const value = (cell: Cell): string | number | boolean | Date | undefined =>
+export const value = (cell: Cell): Value | undefined =>
   cell._tag === "Empty" ? undefined : cell.value
 
 /**

@@ -1,4 +1,5 @@
-import { assert, describe, expect, it } from "@effect/vitest"
+import { assert, describe, expect, expectTypeOf, it } from "@effect/vitest"
+import type { LimitExceeded } from "../src/SpreadsheetError.ts"
 import { Effect, Stream } from "effect"
 import * as Cell from "../src/Cell.ts"
 import * as Csv from "../src/csv/index.ts"
@@ -8,7 +9,8 @@ import type { Row } from "../src/Workbook.ts"
 import { csvRows, enc } from "./helpers/run.ts"
 
 const rowsOf = (text: string) => Effect.runPromise(csvRows(text, { inferTypes: true }))
-const recs = (rows: Iterable<Row>, options: Spreadsheet.RecordsOptions) => Effect.runSync(Spreadsheet.toRecords(rows, options))
+const recs = <D = never>(rows: Iterable<Row>, options: Spreadsheet.RecordsOptions<D>) =>
+  Effect.runSync(Spreadsheet.toRecords(rows, options))
 
 describe("toRecords", () => {
   it("first-row header", async () => {
@@ -113,6 +115,19 @@ describe("toRecords", () => {
       ).pipe(Effect.provide(SpreadsheetLimits.layer({ maxCellsPerSheet: 11 })))
       assert.strictEqual(streamError._tag === "LimitExceeded" && streamError.limit, "maxCellsPerSheet")
     }))
+
+  it("record values are typed: cell values, plus the defval type", () => {
+    const rows: Array<Row> = [{ index: 0, hidden: false, cells: [Cell.text(0, "a")] }]
+    expectTypeOf(Spreadsheet.toRecords(rows, { header: "first-row" })).toEqualTypeOf<
+      Effect.Effect<Array<Record<string, Cell.Value>>, LimitExceeded>
+    >()
+    expectTypeOf(Spreadsheet.toRecords(rows, { header: "first-row", defval: null })).toEqualTypeOf<
+      Effect.Effect<Array<Record<string, Cell.Value | null>>, LimitExceeded>
+    >()
+    expectTypeOf(Spreadsheet.toRecords(Stream.fromIterable(rows), { header: "first-row", defval: "" })).toEqualTypeOf<
+      Stream.Stream<Record<string, Cell.Value>, LimitExceeded>
+    >()
+  })
 
   it.effect("works lazily on streams", () =>
     Effect.gen(function*() {

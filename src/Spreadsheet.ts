@@ -5,6 +5,7 @@
  * @since 0.1.0
  */
 import { Effect, Stream } from "effect"
+import type * as Cell from "./Cell.ts"
 import * as Csv from "./csv/index.ts"
 import { RecordBuilder, type RecordsOptions } from "./internal/records.ts"
 import { detect } from "./internal/sniff.ts"
@@ -124,12 +125,15 @@ export const readCsv: (
  * @category records
  */
 export const toRecords: {
-  <E, R>(
+  <E, R, D = never>(
     rows: Stream.Stream<Row, E, R>,
-    options: RecordsOptions
-  ): Stream.Stream<Record<string, unknown>, E | LimitExceeded, R>
-  (rows: Iterable<Row>, options: RecordsOptions): Effect.Effect<Array<Record<string, unknown>>, LimitExceeded>
-} = (<E, R>(rows: Stream.Stream<Row, E, R> | Iterable<Row>, options: RecordsOptions) => {
+    options: RecordsOptions<D>
+  ): Stream.Stream<Record<string, Cell.Value | D>, E | LimitExceeded, R>
+  <D = never>(
+    rows: Iterable<Row>,
+    options: RecordsOptions<D>
+  ): Effect.Effect<Array<Record<string, Cell.Value | D>>, LimitExceeded>
+} = (<E, R>(rows: Stream.Stream<Row, E, R> | Iterable<Row>, options: RecordsOptions<unknown>) => {
   if (Stream.isStream(rows)) {
     return Stream.unwrap(Effect.map(SpreadsheetLimits.resolve(options.limits), (limits) =>
       Stream.suspend(() => {
