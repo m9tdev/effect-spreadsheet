@@ -19,7 +19,7 @@ node scripts/corpus/hidden-rows/generate.mjs --check   # hidden-row fixtures are
 node scripts/corpus/hidden-rows/manifest.mjs    # test/corpus/hidden-rows/manifest.json
 node scripts/corpus/manifest.mjs       # full manifest -> test/corpus/.cache/manifest.json (gitignored)
 node scripts/corpus/oracle.mjs         # expected output -> test/corpus/.cache/expected/<sha256>.json
-node scripts/corpus/oracle-selftest.mjs   # oracle process hygiene (orphans, startup deaths), ~10 s
+node scripts/corpus/oracle-selftest.mjs   # oracle process hygiene (orphans, startup deaths, tooBig docs), ~15 s
 node scripts/corpus/expected.mjs       # committed SheetJS expectations for generated + hidden-rows (after oracle --source generated/hidden-rows)
 node scripts/corpus/expected.mjs --check
 ```
@@ -44,7 +44,7 @@ covers that run. Run without filters at the end: it reuses the cache and writes 
 | `scripts/corpus/generate.mjs` | yes | our edge-case fixtures |
 | `scripts/corpus/hidden-rows/*.mjs` | yes | hidden-row fixture generator (also writes `renamed/`); hidden-rows manifest; shared names |
 | `test/corpus/sources.json` | yes | pin of the external corpus: URL, archive sha256/size, file count (no per-file details) |
-| `test/corpus/generated/` | yes | our fixtures (~150 KB), with `README.json` (name, sniffed format, size, sha256, description) |
+| `test/corpus/generated/` | yes | our fixtures (~170 KB; size target ~200 KB), with `README.json` (name, sniffed format, size, sha256, description) |
 | `test/corpus/hidden-rows/` | yes | Synthetic hidden-row fixtures + `manifest.json` |
 | `test/corpus/expected/{generated,hidden-rows}/<file>.json` | yes | SheetJS expected output for our fixtures, so CI can compare without `~/sheetjs` (58 files, ~152 KiB, each ≤ 64 KiB) |
 | `test/corpus/sheetjs-quirks.json` | yes | machine-readable list of places where that SheetJS output is wrong or differs on purpose (`sheetjs` vs `correct` value) |
@@ -204,9 +204,20 @@ current job's hard deadline passes (job timeout + 10 s). The watchdog thread kee
 running while the main thread spins in a SheetJS loop. A child that dies or doesn't
 say `ready` within `--ready-timeout` counts as a startup death. After 3 consecutive
 startup deaths the oracle aborts with exit 2, instead of respawning forever (e.g. when
-`xlsx.js` throws). `oracle-selftest.mjs` checks all four cases in a temporary cache
-(`CORPUS_CACHE_DIR`): the parent SIGKILLed alone, the parent SIGTERMed, a throwing
-`xlsx.js`, and an `xlsx.js` that never finishes loading.
+`xlsx.js` throws). `oracle-selftest.mjs` checks these cases in a temporary cache
+(`CORPUS_CACHE_DIR`):
+- the parent SIGKILLed alone;
+- the parent SIGTERMed (its handler must exit 143, since the watchdogs alone would also
+  clean up);
+- a throwing `xlsx.js`;
+- an `xlsx.js` that never finishes loading;
+- `tooBig` results under a tiny `ORACLE_MAX_CELLS`, which must keep `reason`, `options`,
+  `workbook`, per-sheet counts and the SheetJS version.
+
+Cases that need SheetJS are skipped, not failed, when it is missing. Temp dirs left by
+a SIGKILLed selftest are removed at the next start. The parent only writes the expected
+file itself for `timeout` and `crash`; `ok`, `error` and `tooBig` documents come from the
+child.
 
 SheetJS calls:
 
