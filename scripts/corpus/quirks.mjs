@@ -66,6 +66,12 @@ export function checkQuirk(q, doc, file) {
   if (q.field === "hiddenRows") { if (JSON.stringify(sh.hiddenRows) !== JSON.stringify(q.sheetjs)) bad(`sheetjs: hiddenRows ${JSON.stringify(sh.hiddenRows)}`) }
   else if (q.field === "ref") { if (sh.ref !== q.sheetjs) bad(`sheetjs: ref ${sh.ref}`) }
   else if (q.field === "dimension") { if (sh.ref !== q.sheetjs.ref) bad(`sheetjs: ref ${sh.ref}`) }
+  else if (q.field === "rows") {
+    // sheet_to_json rows (header:1, from the !ref's first row/col); Dates appear as ISO strings
+    const rowCells = new Map()
+    ;(sh.rows ?? []).forEach((row, r) => (row ?? []).forEach((v, c) => { if (v !== null) rowCells.set(`${r},${c}`, v) }))
+    if (!Array.isArray(q.sheetjs) || !sameCells(rowCells, q.sheetjs)) bad(`sheetjs: rows ${JSON.stringify(q.sheetjs?.map?.(([r, c]) => [r, c, rowCells.get(`${r},${c}`) ?? null]))}`)
+  }
   else if (q.field === "cells") { if (!Array.isArray(q.sheetjs) || !sameCells(oracleCells, q.sheetjs)) bad(`sheetjs: cells ${JSON.stringify(q.sheetjs?.map?.(([r, c]) => [r, c, oracleCells.get(`${r},${c}`) ?? null]))}`) }
   else bad(`unknown field ${q.field}`)
   // correct value vs the fixture bytes
@@ -80,6 +86,18 @@ export function checkQuirk(q, doc, file) {
   } else if (m === "xlsx-shared-strings") {
     const got = xlsxSharedStringCells(buf)
     if (!sameCells(got, q.correct)) bad(`correct: shared strings ${JSON.stringify(q.correct.map(([r, c]) => [r, c, got.get(`${r},${c}`) ?? null]))}`)
+  } else if (m === "xlsx-date1904-serial") {
+    // the serials in the sheet XML read in the workbook's own date system (date1904 => 1904-01-01 epoch)
+    const part = (n) => { const e = zipEntries(buf).find((x) => x.name === n); return e ? zipRead(buf, e).toString("utf8") : "" }
+    const d1904 = /<workbookPr\b[^>]*\bdate1904="(1|true)"/.test(part("xl/workbook.xml"))
+    if (!d1904) bad("correct: the workbook doesn't declare date1904")
+    const epoch = Date.UTC(1904, 0, 1)
+    const got = new Map()
+    for (const c of part("xl/worksheets/sheet1.xml").matchAll(/<c r="([A-Z]+)(\d+)"[^>]*><v>([^<]+)<\/v><\/c>/g)) {
+      const col = [...c[1]].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1
+      got.set(`${+c[2] - 1},${col}`, new Date(epoch + Math.round(Number(c[3]) * 86400) * 1000).toISOString())
+    }
+    if (!sameCells(got, q.correct)) bad(`correct: 1904-system dates ${JSON.stringify(q.correct.map(([r, c]) => [r, c, got.get(`${r},${c}`) ?? null]))}`)
   } else if (m === "declared-dimension") {
     const rs = (sh.cells ?? []).map((x) => x.r), cs = (sh.cells ?? []).map((x) => x.c)
     const range = `${a1(Math.min(...rs), Math.min(...cs))}:${a1(Math.max(...rs), Math.max(...cs))}`

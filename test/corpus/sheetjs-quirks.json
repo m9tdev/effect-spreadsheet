@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Known places where the SheetJS oracle output (test/corpus/expected, .cache/expected) is wrong or differs on purpose from what effect-spreadsheet must return. Tests compare against SheetJS except at these locations, where they expect `correct`. r/c are 0-based. Value formats by `field` (the same for `sheetjs` and `correct` unless noted): hiddenRows = array of row indices; ref = A1 range string; cells = array of [r, c, v] where v null means 'no cell'; dimension = `sheetjs` {ref} (SheetJS's !ref) and `correct` {cells, declaredRows, declaredCols} (the span of the cells and the declared size). expected.mjs checks every `sheetjs` value against the oracle result and every `correct` value against the fixture bytes (the `correctCheck` method), fails on a mismatch, and copies the ids into each affected expected file as `knownQuirks`.",
+  "description": "Known places where the SheetJS oracle output (test/corpus/expected, .cache/expected) is wrong or differs on purpose from what effect-spreadsheet must return. Tests compare against SheetJS except at these locations, where they expect `correct`. r/c are 0-based. Value formats by `field` (the same for `sheetjs` and `correct` unless noted): hiddenRows = array of row indices; ref = A1 range string; cells = array of [r, c, v] where v null means 'no cell'; rows = the same triples for sheet_to_json `rows` (Dates as ISO strings); dimension = `sheetjs` {ref} (SheetJS's !ref) and `correct` {cells, declaredRows, declaredCols} (the span of the cells and the declared size). expected.mjs checks every `sheetjs` value against the oracle result and every `correct` value against the fixture bytes (the `correctCheck` method), fails on a mismatch, and copies the ids into each affected expected file as `knownQuirks`.",
   "quirks": [
     {
       "id": "sylk-row-format-without-m-hidden",
@@ -213,6 +213,38 @@
       },
       "note": "Informational, as above (B;Y1048576;X16384).",
       "correctCheck": "declared-dimension"
+    },
+    {
+      "id": "sheet-to-json-ignores-date1904",
+      "file": "generated/dates_1904.xlsx",
+      "sheet": "Dates",
+      "field": "rows",
+      "sheetjs": [
+        [
+          0,
+          0,
+          "2026-01-02T12:29:59.999Z"
+        ],
+        [
+          1,
+          0,
+          "1899-12-31T00:00:00.000Z"
+        ]
+      ],
+      "correct": [
+        [
+          0,
+          0,
+          "2030-01-03T12:30:00.000Z"
+        ],
+        [
+          1,
+          0,
+          "1904-01-01T00:00:00.000Z"
+        ]
+      ],
+      "correctCheck": "xlsx-date1904-serial",
+      "note": "sheet_to_json turns date-formatted serials into Dates with the 1900 epoch even when the workbook declares date1904 (workbook.date1904 is true and the cells' w text does use 1904: 1/3/30, 2030-01-03). The rows of dates_1904.xlsx are therefore identical to those of dates.xlsx; in the 1904 system serial 46024.52 is 2030-01-03 12:30 and serial 0 is 1904-01-01."
     }
   ]
 }

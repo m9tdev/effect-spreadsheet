@@ -476,6 +476,7 @@ Value formats depend on `field`:
 - `ref`: an A1 range.
 - `cells`: an array of `[r, c, v]` triples. `v: null` means "no cell", e.g.
   `csv-empty-quoted-field-no-cell` has `sheetjs: [[5, 1, null]]`.
+- `rows`: the same triples, for `sheet_to_json` `rows` (Dates as ISO strings).
 - `dimension`: `sheetjs` is `{ref}` (SheetJS's `!ref`); `correct` is `{cells, declaredRows, declaredCols}` (the span of the cells and the declared size).
 
 Every value is checked; none is marked unchecked. `expected.mjs` (through `quirks.mjs`)
@@ -484,6 +485,8 @@ the fixture bytes:
 - `sylk-hidden-rows`: the `F;…M0…;R<n>` records.
 - `csv:<encoding>`: the bytes decoded with `TextDecoder` and split by a small RFC 4180 reader.
 - `xlsx-shared-strings`: the shared strings, with entities and `_xHHHH_` decoded.
+- `xlsx-date1904-serial`: the sheet's serials read on the 1904 epoch, after checking that
+  the workbook declares `date1904`.
 - `declared-dimension`: the sniffed declared range, plus the span of the cells.
 
 A mismatch fails the export. `expected.mjs` also stamps the ids into the affected expected
@@ -502,6 +505,10 @@ method.
 - **Astral character references** (`&#x1F363;`) are truncated to 16 bits (U+F363), and
   **`_x000D_`** is dropped (`generated/strings.xlsx`).
 - An explicit empty quoted CSV field (`""`) gives no cell (`generated/csv_quoted_newlines.csv`).
+- **`sheet_to_json` ignores `date1904`.** Its Dates use the 1900 epoch even when the workbook
+  declares `date1904`, so `generated/dates_1904.xlsx` has the same `rows` as `dates.xlsx`.
+  The cells' `w` text does use 1904 (`2030-01-03`). In the 1904 system, serial 46024.52 is
+  2030-01-03 12:30 and serial 0 is 1904-01-01.
 - **BIFF5 sheet names** lose non-Latin-1 characters on write. That is a property of
   `features.biff5.xls`, not a reader bug.
 - SheetJS ignores declared dimensions in xlml/SYLK (`ref` = the actual cells), but
