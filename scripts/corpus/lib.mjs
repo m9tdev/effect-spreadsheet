@@ -19,7 +19,10 @@ export const CACHE_DIR = path.join(CORPUS_DIR, ".cache")
 export const SHEETJS_CACHE = path.join(CACHE_DIR, "sheetjs")
 export const GENERATED_DIR = path.join(CORPUS_DIR, "generated")
 export const HIDDEN_ROWS_DIR = path.join(CORPUS_DIR, "hidden-rows")
-export const MANIFEST_PATH = path.join(CORPUS_DIR, "manifest.json")
+// Full manifest (lists third-party SheetJS corpus files): gitignored cache only.
+export const MANIFEST_PATH = path.join(CACHE_DIR, "manifest.json")
+// Committed pin of the external corpus (URL + archive sha256), no per-file details.
+export const SOURCES_PATH = path.join(CORPUS_DIR, "sources.json")
 export const EXPECTED_DIR = path.join(CACHE_DIR, "expected")
 export const SHEETJS_DIR = process.env.SHEETJS_DIR ?? path.join(process.env.HOME ?? "", "sheetjs")
 

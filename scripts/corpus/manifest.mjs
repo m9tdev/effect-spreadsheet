@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Build test/corpus/manifest.json from the fetched SheetJS corpus and our
-// generated fixtures. Formats are sniffed from bytes (scripts/corpus/lib.mjs),
+// Build the full manifest test/corpus/.cache/manifest.json (gitignored: it lists
+// third-party SheetJS corpus files, which we don't publish) from the fetched
+// SheetJS corpus, our generated fixtures and the hidden-row fixtures. Formats are sniffed from bytes (scripts/corpus/lib.mjs),
 // never from the file extension.
 //
 // Usage: node scripts/corpus/manifest.mjs [--all-formats]

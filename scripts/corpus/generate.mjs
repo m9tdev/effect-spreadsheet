@@ -18,7 +18,7 @@ import os from "node:os"
 import path from "node:path"
 import { createRequire } from "node:module"
 import { crc32, deflateRawSync } from "node:zlib"
-import { GENERATED_DIR, SHEETJS_DIR, sha256, zipEntries, zipRead } from "./lib.mjs"
+import { GENERATED_DIR, SHEETJS_DIR, sha256, sniff, zipEntries, zipRead } from "./lib.mjs"
 
 const require = createRequire(import.meta.url)
 const XLSX = require(path.join(SHEETJS_DIR, "xlsx.js"))
@@ -419,7 +419,10 @@ for (const [name, hidden] of Object.entries(HR_CASES)) {
 }
 
 // ---- index
-const index = { generator: "scripts/corpus/generate.mjs", sheetjs: XLSX.version, files: written.map((w) => ({ name: w.name, size: w.size, sha256: sha256(fs.readFileSync(path.join(OUT, w.name))), desc: w.desc })) }
+const index = { generator: "scripts/corpus/generate.mjs", sheetjs: XLSX.version, files: written.map((w) => {
+  const buf = fs.readFileSync(path.join(OUT, w.name))
+  return { name: w.name, format: sniff(buf).format, size: w.size, sha256: sha256(buf), desc: w.desc }
+}) }
 fs.writeFileSync(path.join(OUT, "README.json"), JSON.stringify(index, null, 2) + "\n")
 const total = written.reduce((a, w) => a + w.size, 0)
 console.log(`generated ${written.length} files, ${(total / 1024).toFixed(1)} KiB total -> ${OUT}`)
