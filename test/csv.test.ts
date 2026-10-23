@@ -232,6 +232,11 @@ describe("csv: type inference", () => {
     ])
   })
 
+  it("negative zero is inferred as 0", async () => {
+    const rows = await Effect.runPromise(csvRows("-0,-0.0,-0e5,+0\n", { inferTypes: true }))
+    for (const cell of rows[0]!.cells) assert.isTrue(Object.is(Cell.value(cell), 0), String(Cell.value(cell)))
+  })
+
   it("keeps as text: leading zeros, long digit strings, separators, dates, formulas, padding", async () => {
     const values = ["007", "1234567890123456", "1,000", "$5", "50%", "2024-01-02", "=SUM(A1)", " 1", "1 ", "1e999", "-", "."]
     const rows = await Effect.runPromise(csvRows(values.map((v) => `"${v}"`).join(",") + "\n", { inferTypes: true }))

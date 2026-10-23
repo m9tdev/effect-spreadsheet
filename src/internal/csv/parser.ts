@@ -308,7 +308,8 @@ export const infer = (column: number, value: string): Cell.Cell => {
   if ((first >= 0x30 && first <= 0x39) || first === 0x2B || first === 0x2D || first === 0x2E) {
     if (NUMBER.test(value) && significantDigits(value) <= 15) {
       const n = Number(value)
-      if (Number.isFinite(n)) return Cell.number(column, n)
+      // `-0`, `-0.0`, `-0e5` are 0 (Excel has no negative zero)
+      if (Number.isFinite(n)) return Cell.number(column, n === 0 ? 0 : n)
     }
     return Cell.text(column, value)
   }
