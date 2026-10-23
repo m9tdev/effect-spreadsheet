@@ -27,10 +27,13 @@
 //         A child that fails or hangs (60 s timeout) is a failed check with its error line.
 //   H. a timeout is not a cached result: after a run where every parse times out
 //      (--timeout 0.001), a run without --force parses those files again.
-// Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B and E: they are skipped, not
-// failed, without it. Linux `ps` for the child lookup. Stale temp dirs from a SIGKILLed
-// run are removed at the next start.
-// Usage: node scripts/corpus/oracle-selftest.mjs   (ORACLE_SELFTEST_ONLY=G,H runs only those cases)
+// Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B, E, F, G and H: they are skipped,
+// not failed, without it (C and D use a fake SheetJS). Linux `ps` for the child lookup.
+// Stale temp dirs from a SIGKILLed run are removed at the next start.
+// Usage: node scripts/corpus/oracle-selftest.mjs
+//   ORACLE_SELFTEST_ONLY=G,H        run only these cases (A-H, G1, G2; unknown names exit 2)
+//   ORACLE_SELFTEST_G2_TIMEOUT_MS=N G2 child timeout in ms (positive integer, default 60000)
+//   ORACLE_SELFTEST_G2_TZ=Zone      G2's zone, only to show the offset-0 guard (e.g. Bogus/Zone)
 
 import { execFileSync, spawn } from "node:child_process"
 import fs from "node:fs"

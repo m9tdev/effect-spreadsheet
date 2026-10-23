@@ -252,7 +252,16 @@ children also run with `TZ=UTC`, as a safety net. Selftest G checks both safegua
 G1 runs the whole oracle under `TZ=Pacific/Auckland`. Since the children still get
 `TZ=UTC`, G1 only fails when both safeguards are gone. G2 runs just the JSON step
 (`READ_OPTIONS` and `JSON_OPTIONS` from `oracle-options.mjs`) in a child that really runs
-in Pacific/Auckland, so it fails as soon as `UTC: true` is dropped.
+in Pacific/Auckland, so it fails as soon as `UTC: true` is dropped. The G2 child exits 3
+when its zone gives a UTC offset of 0, because an unknown zone such as `Bogus/Zone` silently
+does. That keeps G2 from passing without testing anything. A failing or hanging (60 s) child
+is a failed check that shows its error line. The selftest reads three environment variables:
+- `ORACLE_SELFTEST_ONLY=G,H` runs only those cases (A–H, G1, G2). An unknown name exits 2, and
+  a run where no check ran fails.
+- `ORACLE_SELFTEST_G2_TIMEOUT_MS` sets the G2 child timeout (a positive integer; anything
+  else exits 2).
+- `ORACLE_SELFTEST_G2_TZ` sets G2's zone. It is only for showing the offset-0 guard.
+
 Schema 1 files had local-time Dates. We never
 use `XLSX.stream.to_json` for expected output, because that is where the hang is (below).
 
