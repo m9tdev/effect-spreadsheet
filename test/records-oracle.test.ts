@@ -28,6 +28,14 @@ const theirs = (text: string, options: Options) => {
   return xlsx!.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]!], o)
 }
 
+// Needs no oracle, so it runs even when SheetJS is absent.
+describe("toRecords docs examples", () => {
+  it("difference 5 lists the keys in JavaScript order, as the docs show", async () => {
+    const [record] = await ours("1.0,-0,1.50,1e21\na,b,c,d\n", { header: "first-row" })
+    expect(Object.keys(record!)).toEqual(["0", "1", "1.5", "1e+21"])
+  })
+})
+
 describe.skipIf(xlsx === undefined)("toRecords vs SheetJS oracle", () => {
   const DIFFERENT: Record<string, readonly [string, Options, unknown, unknown]> = {
     "1. __EMPTY numbering follows first use": [
@@ -62,11 +70,6 @@ describe.skipIf(xlsx === undefined)("toRecords vs SheetJS oracle", () => {
       [{ "1": "a", "1.0": "b", x: "c" }]
     ]
   }
-  it("difference 5 lists the keys in JavaScript order, as the docs show", async () => {
-    const [record] = await ours("1.0,-0,1.50,1e21\na,b,c,d\n", { header: "first-row" })
-    expect(Object.keys(record!)).toEqual(["0", "1", "1.5", "1e+21"])
-  })
-
   for (const [name, [text, options, expectedOurs, expectedTheirs]] of Object.entries(DIFFERENT)) {
     it(`intended difference ${name}`, async () => {
       expect(await ours(text, options)).toEqual(expectedOurs)
