@@ -57,6 +57,8 @@ export const readDirectory = (
   let count = view.getUint16(eocd + 10, true)
   let size: number | undefined = view.getUint32(eocd + 12, true)
   let start: number | undefined = view.getUint32(eocd + 16, true)
+  // The central directory ends before the (ZIP64) end-of-central-directory record.
+  let directoryLimit = eocd
   if (count === 0xFFFF || size === 0xFFFFFFFF || start === 0xFFFFFFFF) {
     const locator = eocd - 20
     if (locator < 0 || view.getUint32(locator, true) !== ZIP64_LOCATOR) {
@@ -70,11 +72,12 @@ export const readDirectory = (
     start = u64(view, at + 48)
     if (count64 === undefined) return malformed("bad ZIP64 entry count", at)
     count = count64
+    directoryLimit = at
   }
   if (count > limits.maxZipEntries) {
     return new LimitExceeded({ limit: "maxZipEntries", max: limits.maxZipEntries, actual: count })
   }
-  if (size === undefined || start === undefined || start + size > bytes.length) {
+  if (size === undefined || start === undefined || start + size > directoryLimit) {
     return malformed("central directory out of bounds", eocd)
   }
   const entries: Array<ZipEntry> = []
