@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 
 // Rule: effect and any @effect/* package used at runtime are peerDependencies
@@ -47,7 +47,7 @@ describe("package.json licence and files", () => {
 
   it("ships only the allowlisted paths", () => {
     expect(Array.isArray(pkg.files)).toBe(true)
-    const allowed = new Set(["dist", "src", "README.md", "LICENSE", "LICENSE-APACHE-2.0", "NOTICE"])
+    const allowed = new Set(["dist", "src", "README.md", "LICENSE"])
     for (const entry of pkg.files ?? []) expect(allowed.has(entry.replace(/^\.\/|\/$/g, "")), entry).toBe(true)
   })
 
@@ -56,6 +56,13 @@ describe("package.json licence and files", () => {
     const license = readFileSync(new URL("../LICENSE", import.meta.url), "utf8")
     expect(license).toMatch(/^MIT License/)
     expect(license).toContain("Permission is hereby granted, free of charge")
+  })
+
+  it("has no Apache-2.0 text or NOTICE, shipped or in the repo", () => {
+    for (const name of ["LICENSE-APACHE-2.0", "NOTICE"]) {
+      expect(pkg.files ?? [], name).not.toContain(name)
+      expect(existsSync(new URL(`../${name}`, import.meta.url)), name).toBe(false)
+    }
   })
 
   it("never ships test/, scripts/ or docs/", () => {

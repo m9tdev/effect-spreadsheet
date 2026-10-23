@@ -13,7 +13,7 @@
     "node": ">=24"
   },
   "sideEffects": false,
-  "files": ["dist", "src", "LICENSE", "LICENSE-APACHE-2.0", "NOTICE", "README.md"],
+  "files": ["dist", "src", "LICENSE", "README.md"],
   "exports": {
     "./package.json": "./package.json",
     ".": {
