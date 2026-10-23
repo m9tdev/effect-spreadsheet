@@ -48,6 +48,12 @@ describe.skipIf(xlsx === undefined)("toRecords vs SheetJS oracle", () => {
       { header: ["x", "", "y"] },
       [{ x: 1, __EMPTY: 2, y: 3 }],
       [{ x: 1, "": 2, y: 3 }]
+    ],
+    "5. numeric header cells are named from the parsed number": [
+      "1.0,-0,1.50,1e21\na,b,c,d\n",
+      { header: "first-row" },
+      [{ "1": "a", "0": "b", "1.5": "c", "1e+21": "d" }],
+      [{ "1.0": "a", "-0": "b", "1.50": "c", "1e21": "d" }]
     ]
   }
   for (const [name, [text, options, expectedOurs, expectedTheirs]] of Object.entries(DIFFERENT)) {
@@ -62,7 +68,8 @@ describe.skipIf(xlsx === undefined)("toRecords vs SheetJS oracle", () => {
     "repeated header-row names": ["a,a,b,a\n1,2,3,4\n", { header: "first-row" }],
     "TRUE/FALSE header cells": ["TRUE,FALSE,x\n1,2,3\n", { header: "first-row" }],
     "explicit names, extra columns dropped": ["1,2,3\n4,5\n", { header: ["x", "y"] }],
-    "defval with a dense header": ["a,b\n1\n,2\n", { header: "first-row", defval: null }]
+    "defval with a dense header": ["a,b\n1\n,2\n", { header: "first-row", defval: null }],
+    "plain integer header cells": ["1,2,x\na,b,c\n", { header: "first-row" }]
   }
   for (const [name, [text, options]] of Object.entries(SAME)) {
     it(`same records: ${name}`, async () => {
