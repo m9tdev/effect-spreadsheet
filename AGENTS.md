@@ -52,7 +52,9 @@ Read PLAN.md first. This is the project's rulebook.
 - If code is ever derived from SheetJS, that file stays Apache-2.0. It starts
   with
   `// Portions derived from SheetJS (<path in the SheetJS repo>), Copyright (C) SheetJS LLC, Apache-2.0.`
-  and `NOTICE` lists it.
+  `// Licensed under the Apache License, Version 2.0: see LICENSE-APACHE-2.0.`
+  and `NOTICE` lists it. `LICENSE-APACHE-2.0` (the full Apache-2.0 text)
+  ships in the npm package.
 - SheetJS is never a runtime or package dependency. It may only be loaded
   from `$SHEETJS_DIR` in tests/scripts as an oracle (skip those tests when
   it's absent).
