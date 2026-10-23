@@ -32,3 +32,34 @@ test("a hanging G2 child is a failed check after the timeout, not a hung selftes
     assert.match(r.stdout, /^FAIL G2 time zone: .* — .*ETIMEDOUT/m)
   } finally { fs.rmSync(fake, { recursive: true, force: true }) }
 })
+
+test("ORACLE_SELFTEST_ONLY: a value that selects no case is an error (exit 2), not a silent pass", () => {
+  for (const v of ["X", " ", ",", "G3", "a b", "A;B", "C,X"]) {
+    const r = spawnSync(process.execPath, [SELFTEST], { env: { ...process.env, ORACLE_SELFTEST_ONLY: v }, encoding: "utf8", timeout: 30_000 })
+    assert.equal(r.status, 2, `${JSON.stringify(v)}: ${r.stdout}${r.stderr}`)
+    assert.match(r.stderr, /unknown case/, JSON.stringify(v))
+    assert.doesNotMatch(r.stdout, /passed/, JSON.stringify(v))
+  }
+})
+
+test("ORACLE_SELFTEST_ONLY: a partial run says so; a run where nothing ran fails", () => {
+  const c = spawnSync(process.execPath, [SELFTEST], { env: { ...process.env, ORACLE_SELFTEST_ONLY: "c" }, encoding: "utf8", timeout: 60_000 })
+  assert.equal(c.status, 0, c.stdout + c.stderr)
+  assert.match(c.stdout, /^ok {3}C /m)
+  assert.match(c.stdout, /^oracle self-tests passed \(only: C\)$/m)
+  assert.doesNotMatch(c.stdout, /all oracle self-tests passed/)
+  // A needs SheetJS: without it, A is only skipped, so no check runs at all
+  const a = spawnSync(process.execPath, [SELFTEST], { env: { ...process.env, ORACLE_SELFTEST_ONLY: "A", SHEETJS_DIR: "/nonexistent-sheetjs" }, encoding: "utf8", timeout: 60_000 })
+  assert.equal(a.status, 1, a.stdout + a.stderr)
+  assert.match(a.stdout, /^no check ran \(only: A\)$/m)
+})
+
+test("ORACLE_SELFTEST_ONLY empty means the full run", () => {
+  // without SheetJS the full run is quick: C and D run, the rest is skipped
+  const r = spawnSync(process.execPath, [SELFTEST], { env: { ...process.env, ORACLE_SELFTEST_ONLY: "", SHEETJS_DIR: "/nonexistent-sheetjs" }, encoding: "utf8", timeout: 60_000 })
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  assert.match(r.stdout, /^ok {3}C /m)
+  assert.match(r.stdout, /^ok {3}D /m)
+  assert.match(r.stdout, /^skip H /m)
+  assert.match(r.stdout, /^all oracle self-tests passed$/m)
+})

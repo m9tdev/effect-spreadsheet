@@ -62,9 +62,9 @@ const childrenOf = (pid) => {
   try { return execFileSync("ps", ["-o", "pid=", "--ppid", String(pid)], { encoding: "utf8" }).split(/\s+/).filter(Boolean).map(Number) } catch { return [] }
 }
 
-let failed = 0
+let failed = 0, ran = 0
 const skip = (name, why) => console.log(`skip ${name}  — ${why}`)
-const check = (name, ok, detail = "") => { console.log(`${ok ? "ok  " : "FAIL"} ${name}${detail ? "  — " + detail : ""}`); if (!ok) failed++ }
+const check = (name, ok, detail = "") => { ran++; console.log(`${ok ? "ok  " : "FAIL"} ${name}${detail ? "  — " + detail : ""}`); if (!ok) failed++ }
 
 function startOracle(env, args) {
   const p = spawn(process.execPath, [ORACLE, "--source", "hidden-rows", "--force", ...args], { env: { ...process.env, CORPUS_CACHE_DIR: tmp, ...env }, stdio: ["ignore", "pipe", "pipe"] })
@@ -203,8 +203,20 @@ async function startupCase(name, body, args, expect) {
 }
 
 // ORACLE_SELFTEST_ONLY=G (or "A,C,G"; G1/G2 for one half of G) runs just those cases
-// (used by oracle-selftest.test.mjs).
-const ONLY = process.env.ORACLE_SELFTEST_ONLY ? new Set(process.env.ORACLE_SELFTEST_ONLY.split(",").map((x) => x.trim().toUpperCase())) : null
+// (used by oracle-selftest.test.mjs). Unset or empty: the full run. Any token that isn't a
+// case (X, G3, "a b", "A;B", an empty token as in "," or " ") is an error (exit 2), so a
+// typo can't select nothing and pass.
+const CASES = ["A", "B", "C", "D", "E", "F", "G", "G1", "G2", "H"]
+const onlyEnv = process.env.ORACLE_SELFTEST_ONLY ?? ""
+const ONLY = onlyEnv === "" ? null : new Set(onlyEnv.split(",").map((x) => x.trim().toUpperCase()))
+if (ONLY) {
+  const bad = [...ONLY].filter((x) => !CASES.includes(x))
+  if (bad.length) {
+    console.error(`oracle-selftest: ORACLE_SELFTEST_ONLY=${JSON.stringify(onlyEnv)}: unknown case ${bad.map((x) => JSON.stringify(x)).join(", ")} (cases: ${CASES.join(", ")}, comma-separated)`)
+    fs.rmSync(tmp, { recursive: true, force: true })
+    process.exit(2)
+  }
+}
 const wanted = (letter) => !ONLY || ONLY.has(letter)
 const needSheetJS = async (letter, name, fn) => {
   if (!wanted(letter) && letter !== "G") return
@@ -224,5 +236,10 @@ try {
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })
 }
-console.log(failed ? `${failed} check(s) failed` : "all oracle self-tests passed")
+const only = ONLY ? ` (only: ${[...ONLY].join(",")})` : ""
+if (ran === 0) {
+  console.log(`no check ran${only}`)
+  process.exit(1)
+}
+console.log(failed ? `${failed} check(s) failed${only}` : ONLY ? `oracle self-tests passed${only}` : "all oracle self-tests passed")
 process.exit(failed ? 1 : 0)
