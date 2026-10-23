@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SHEETJS_SHA: d2f2e179636be22f3af3c306df7783ea10a2c7e3
+
 jobs:
   check-and-test:
     runs-on: ubuntu-latest
@@ -22,5 +25,20 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
-      # The SheetJS oracle tests skip here (no ~/sheetjs).
+      # SheetJS, as a test-only oracle, pinned to the commit AGENTS.md names.
+      - id: sheetjs-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/sheetjs
+          key: sheetjs-${{ env.SHEETJS_SHA }}
+      - if: steps.sheetjs-cache.outputs.cache-hit != 'true'
+        working-directory: ${{ runner.temp }}
+        run: |
+          git init sheetjs
+          git -C sheetjs fetch --depth 1 https://git.sheetjs.com/sheetjs/sheetjs.git "$SHEETJS_SHA"
+          git -C sheetjs checkout FETCH_HEAD
       - run: pnpm test
+        env:
+          SHEETJS_PATH: ${{ runner.temp }}/sheetjs/xlsx.mjs
+          # fail instead of skipping the oracle tests if SheetJS is missing
+          REQUIRE_ORACLE: "1"
