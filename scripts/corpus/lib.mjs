@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url"
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 export const CORPUS_DIR = path.join(REPO_ROOT, "test", "corpus")
-export const CACHE_DIR = path.join(CORPUS_DIR, ".cache")
+// CORPUS_CACHE_DIR overrides the cache root (used by oracle-selftest.mjs to stay out of the real cache).
+export const CACHE_DIR = process.env.CORPUS_CACHE_DIR ? path.resolve(process.env.CORPUS_CACHE_DIR) : path.join(CORPUS_DIR, ".cache")
 export const SHEETJS_CACHE = path.join(CACHE_DIR, "sheetjs")
 export const GENERATED_DIR = path.join(CORPUS_DIR, "generated")
 export const HIDDEN_ROWS_DIR = path.join(CORPUS_DIR, "hidden-rows")

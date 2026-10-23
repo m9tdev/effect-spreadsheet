@@ -17,6 +17,7 @@
 // Writes a run report to test/corpus/.cache/oracle-report.json.
 
 import { fork } from "node:child_process"
+import { Worker } from "node:worker_threads"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -57,11 +58,31 @@ const SRC_ROOT = { sheetjs: path.join(SHEETJS_CACHE, "test_files"), generated: G
 
 // ------------------------------------------------------------------ child
 
+// Watchdog thread for each child. It runs even while the child's main thread is
+// stuck in a SheetJS loop, and SIGKILLs the child when (a) the parent goes away
+// (ppid changes, e.g. the parent was SIGKILLed alone) or (b) the hard deadline of
+// the current job passes (job timeout + grace; the parent normally kills first).
+const WATCHDOG = `
+const { parentPort, workerData } = require("node:worker_threads")
+const ppid = workerData.ppid
+let deadline = null
+parentPort.on("message", (m) => { deadline = m.deadline })
+setInterval(() => {
+  if (process.ppid !== ppid || (deadline !== null && Date.now() > deadline)) process.kill(process.pid, "SIGKILL")
+}, 250)
+`
+const HARD_GRACE_MS = 10_000
+
 if (process.argv[2] === "--child") {
+  const watchdog = new Worker(WATCHDOG, { eval: true, workerData: { ppid: process.ppid } })
+  watchdog.unref()
+  // If the IPC channel closes while we're idle, leave at once.
+  process.on("disconnect", () => process.exit(0))
   const require = createRequire(import.meta.url)
   const XLSX = require(path.join(SHEETJS_DIR, "xlsx.js"))
   const meta = { oracle: "sheetjs", sheetjsVersion: XLSX.version, sheetjsCommit: sheetjsCommit() }
   process.on("message", async (job) => {
+    watchdog.postMessage({ deadline: Date.now() + job.timeout + HARD_GRACE_MS })
     const t0 = performance.now()
     let out
     try {
@@ -78,6 +99,7 @@ if (process.argv[2] === "--child") {
       out = { status: "error", error: `could not serialize result: ${String(e?.message ?? e).slice(0, 500)}` }
       fs.writeFileSync(job.out, JSON.stringify({ ...head, ...out }) + "\n")
     }
+    watchdog.postMessage({ deadline: null })
     process.send({ id: job.id, status: out.status, ms, error: out.error })
   })
   process.send({ ready: true })
@@ -224,6 +246,15 @@ async function probe(XLSX, job) {
 
 // ------------------------------------------------------------------ parent
 
+// Live children, SIGKILLed when the parent exits or is interrupted.
+const live = new Set()
+const killAll = () => { for (const c of live) { try { c.kill("SIGKILL") } catch {} } live.clear() }
+process.on("exit", killAll)
+for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
+  process.on(sig, () => { killAll(); process.exit(code) })
+}
+const MAX_STARTUP_DEATHS = 3
+
 if (process.argv[2] !== "--child") await main()
 
 async function main() {
@@ -262,7 +293,13 @@ async function main() {
   todo.sort((a, b) => b.size - a.size)
   console.log(`oracle: ${jobs.length} jobs, ${todo.length} to run, ${args.jobs} workers, timeout ${args.timeout / 1000}s (probe ${args.probeTimeout / 1000}s)`)
   const t0 = Date.now()
-  const results = await runPool(todo, args.jobs)
+  let results
+  try {
+    results = await runPool(todo, args.jobs, args.readyTimeout)
+  } catch (e) {
+    console.error(String(e.message ?? e))
+    process.exit(2)
+  }
   // Report covers all jobs (fresh + cached).
   const report = { schema: SCHEMA, generatedAt: new Date().toISOString(), wallMs: Date.now() - t0, options: { read: READ_OPTIONS, json: JSON_OPTIONS, probe: PROBE_VARIANTS, timeoutMs: args.timeout, probeTimeoutMs: args.probeTimeout }, counts: {}, notOk: [], probes: [] }
   for (const j of jobs) {
@@ -311,7 +348,7 @@ function upToDate(out) {
 }
 
 function parseArgs(argv) {
-  const a = { verbose: false, force: false, jobs: Math.max(1, Math.min(10, Math.floor(os.availableParallelism() / 2))), timeout: 60_000, probeTimeout: 15_000, probe: true, source: null, format: null, maxSize: 0, limit: 0 }
+  const a = { verbose: false, force: false, jobs: Math.max(1, Math.min(10, Math.floor(os.availableParallelism() / 2))), timeout: 60_000, probeTimeout: 15_000, readyTimeout: 30_000, probe: true, source: null, format: null, maxSize: 0, limit: 0 }
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i], v = argv[i + 1]
     if (k === "--force") a.force = true
@@ -320,6 +357,7 @@ function parseArgs(argv) {
     else if (k === "--jobs") { a.jobs = +v; i++ }
     else if (k === "--timeout") { a.timeout = +v * 1000; i++ }
     else if (k === "--probe-timeout") { a.probeTimeout = +v * 1000; i++ }
+    else if (k === "--ready-timeout") { a.readyTimeout = +v * 1000; i++ }
     else if (k === "--source") { a.source = v; i++ }
     else if (k === "--format") { a.format = v; i++ }
     else if (k === "--max-size") { a.maxSize = +v; i++ }
@@ -329,12 +367,12 @@ function parseArgs(argv) {
   return a
 }
 
-function runPool(jobs, n) {
+function runPool(jobs, n, readyTimeout) {
   const results = new Map()
   if (!jobs.length) return Promise.resolve(results)
-  let next = 0, done = 0, active = 0
+  let next = 0, done = 0, active = 0, startupDeaths = 0, aborted = false
   const self = fileURLToPath(import.meta.url)
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const progress = () => { if (done % 200 === 0 || done === jobs.length) console.log(`  ${done}/${jobs.length}`) }
     const finish = (job, r) => {
       results.set(job, r)
@@ -346,28 +384,37 @@ function runPool(jobs, n) {
       done++
       progress()
     }
+    const abort = (why) => {
+      if (aborted) return
+      aborted = true
+      killAll()
+      reject(new Error(why))
+    }
     const spawnWorker = () => {
+      if (aborted) return
       if (next >= jobs.length) { if (active === 0) resolve(results); return }
       active++
       const child = fork(self, ["--child"], { execArgv: ["--max-old-space-size=4096", "--stack-size=4000"], stdio: ["ignore", "ignore", "pipe", "ipc"] })
+      live.add(child)
       let stderr = ""
       child.stderr.on("data", (d) => { stderr = (stderr + d).slice(-2000) })
-      let cur = null, timer = null, started = 0, dead = false
+      let cur = null, timer = null, started = 0, ready = false
+      // A child that never says ready (stuck or slow while loading xlsx.js) is killed and counts as a startup death.
+      const readyTimer = setTimeout(() => { stderr += `\n(no ready within ${readyTimeout / 1000}s)`; child.kill("SIGKILL") }, readyTimeout)
       const give = () => {
-        if (next >= jobs.length) { dead = true; child.kill(); return }
+        if (aborted || next >= jobs.length) { child.kill(); return }
         cur = jobs[next++]
         cur.id = next
         started = Date.now()
         timer = setTimeout(() => {
           const j = cur; cur = null
-          dead = true
           child.kill("SIGKILL")
           finish(j, { status: "timeout", ms: Date.now() - started, error: `no result within ${j.timeout / 1000}s` })
         }, cur.timeout)
         child.send(cur)
       }
       child.on("message", (m) => {
-        if (m.ready) return give()
+        if (m.ready) { ready = true; startupDeaths = 0; clearTimeout(readyTimer); return give() }
         if (!cur || m.id !== cur.id) return
         clearTimeout(timer)
         const j = cur; cur = null
@@ -376,9 +423,15 @@ function runPool(jobs, n) {
       })
       child.on("exit", (code, sig) => {
         clearTimeout(timer)
+        clearTimeout(readyTimer)
+        live.delete(child)
         active--
+        if (!ready) {
+          // Died (or was killed) before it could take a job: don't respawn forever.
+          if (++startupDeaths >= MAX_STARTUP_DEATHS) return abort(`oracle: ${startupDeaths} consecutive children died at startup (last: exit ${code ?? sig}): ${stderr.trim().slice(-800)}`)
+        }
         if (cur) { finish(cur, { status: "crash", ms: Date.now() - started, error: `child exited ${code ?? sig}: ${stderr.slice(-500)}` }); cur = null }
-        if (dead || cur === null) spawnWorker()
+        spawnWorker()
       })
     }
     for (let i = 0; i < Math.min(n, jobs.length); i++) spawnWorker()

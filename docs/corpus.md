@@ -15,11 +15,12 @@ node scripts/corpus/hidden-rows/generate.mjs --check   # hidden-row fixtures are
 node scripts/corpus/hidden-rows/manifest.mjs    # test/corpus/hidden-rows/manifest.json
 node scripts/corpus/manifest.mjs       # full manifest -> test/corpus/.cache/manifest.json (gitignored)
 node scripts/corpus/oracle.mjs         # expected output -> test/corpus/.cache/expected/<sha256>.json
+node scripts/corpus/oracle-selftest.mjs   # oracle process hygiene (orphans, startup deaths), ~10 s
 ```
 
 Oracle options: `--force`, `--jobs N` (default min(10, cores/2)), `--timeout SEC` (parse,
 default 60), `--probe-timeout SEC` (default 15), `--no-probe`, `--source sheetjs|generated|hidden-rows`,
-`--format xls,xlsb`, `--max-size BYTES`, `--limit N`, `--verbose`. It skips files whose expected
+`--format xls,xlsb`, `--max-size BYTES`, `--limit N`, `--ready-timeout SEC` (default 30), `--verbose`. It skips files whose expected
 JSON already exists (same schema) unless you pass `--force`. A run report goes to
 `test/corpus/.cache/oracle-report.json`. If you run with a filter (`--source`), the report only
 covers that run. Run without filters at the end: it reuses the cache and writes the full report.
@@ -176,6 +177,17 @@ processes (`--max-old-space-size=4096`), with a timeout per file. A timeout kill
 the child (SIGKILL) and gets recorded. SheetJS **mutates the options object you give
 `XLSX.read`**, so a long-lived worker must pass a fresh copy each time. Before this
 was fixed, most files failed with `x.charCodeAt is not a function`.
+
+Process hygiene: the parent tracks its live children and SIGKILLs them on exit,
+SIGINT, SIGTERM and SIGHUP. Each child runs a watchdog `worker_thread` that SIGKILLs
+its own process when its parent pid changes (the parent was killed alone) or when the
+current job's hard deadline passes (job timeout + 10 s). The watchdog thread keeps
+running while the main thread spins in a SheetJS loop. A child that dies or doesn't
+say `ready` within `--ready-timeout` counts as a startup death. After 3 consecutive
+startup deaths the oracle aborts with exit 2, instead of respawning forever (e.g. when
+`xlsx.js` throws). `oracle-selftest.mjs` checks all four cases in a temporary cache
+(`CORPUS_CACHE_DIR`): the parent SIGKILLed alone, the parent SIGTERMed, a throwing
+`xlsx.js`, and an `xlsx.js` that never finishes loading.
 
 SheetJS calls:
 
