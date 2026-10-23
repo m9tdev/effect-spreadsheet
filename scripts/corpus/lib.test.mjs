@@ -1,0 +1,49 @@
+// Tests for scripts/corpus/lib.mjs helpers. Run: node --test scripts/corpus/lib.test.mjs
+import assert from "node:assert/strict"
+import fs from "node:fs"
+import path from "node:path"
+import test from "node:test"
+import { GENERATED_DIR, biffVersion, sniff } from "./lib.mjs"
+
+const bof = (type, vers, size, dt = 0x0005) => {
+  const b = Buffer.alloc(4 + Math.max(size, 4) + 4)
+  b.writeUInt16LE(type, 0); b.writeUInt16LE(size, 2); b.writeUInt16LE(vers, 4); b.writeUInt16LE(dt, 6)
+  return b
+}
+
+test("biffVersion: BIFF8 BOF per [MS-XLS] 2.4.21 (0x0809, vers 0x0600, 16 bytes)", () => {
+  assert.equal(biffVersion(bof(0x0809, 0x0600, 16)), 8)
+  assert.equal(biffVersion(bof(0x0809, 0x0600, 16, 0x0010)), 8) // worksheet substream
+})
+
+test("biffVersion: BIFF5 (0x0809, vers 0x0500, 8 bytes)", () => {
+  assert.equal(biffVersion(bof(0x0809, 0x0500, 8)), 5)
+})
+
+test("biffVersion: other vers under 0x0809 go by record size", () => {
+  assert.equal(biffVersion(bof(0x0809, 0x1234, 16)), 8)
+  assert.equal(biffVersion(bof(0x0809, 0x1234, 8)), 5)
+})
+
+test("biffVersion: BIFF2/3/4 BOF record types", () => {
+  assert.equal(biffVersion(bof(0x0009, 0x0002, 4)), 2)
+  assert.equal(biffVersion(bof(0x0209, 0x0003, 6)), 3)
+  assert.equal(biffVersion(bof(0x0409, 0x0004, 6)), 4)
+})
+
+test("biffVersion: not a BOF", () => {
+  assert.equal(biffVersion(Buffer.alloc(4)), null) // too short
+  assert.equal(biffVersion(bof(0x0208, 0x0600, 16)), null) // ROW, not BOF
+  assert.equal(biffVersion(bof(0x0809, 0x0600, 2)), null) // record too small for vers + dt
+  assert.equal(biffVersion(bof(0x0809, 0x0600, 21)), null) // longer than any BOF
+  assert.equal(biffVersion(Buffer.from("PK\x03\x04 not biff")), null)
+})
+
+test("biffVersion via sniff on the generated xls fixtures", () => {
+  const expect = { "basic.biff2.xls": 2, "basic.biff3.xls": 3, "basic.biff4.xls": 4, "features.biff5.xls": 5, "hidden_rows.biff5.xls": 5, "features.xls": 8, "hidden_rows.xls": 8, "sparse_far.xls": 8, "huge_dimension.xls": 8 }
+  for (const [name, biff] of Object.entries(expect)) {
+    const s = sniff(fs.readFileSync(path.join(GENERATED_DIR, name)))
+    assert.equal(s.format, "xls", name)
+    assert.equal(s.features.biff, biff, name)
+  }
+})

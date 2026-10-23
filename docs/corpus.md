@@ -19,6 +19,7 @@ node scripts/corpus/hidden-rows/generate.mjs --check   # hidden-row fixtures are
 node scripts/corpus/hidden-rows/manifest.mjs    # test/corpus/hidden-rows/manifest.json
 node scripts/corpus/manifest.mjs       # full manifest -> test/corpus/.cache/manifest.json (gitignored)
 node scripts/corpus/oracle.mjs         # expected output -> test/corpus/.cache/expected/<sha256>.json
+node --test scripts/corpus/lib.test.mjs   # unit tests for lib.mjs (BOF/BIFF version sniffing)
 node scripts/corpus/oracle-selftest.mjs   # oracle process hygiene (orphans, startup deaths, tooBig docs), ~15 s
 node scripts/corpus/expected.mjs       # committed SheetJS expectations for generated + hidden-rows (after oracle --source generated/hidden-rows)
 node scripts/corpus/expected.mjs --check

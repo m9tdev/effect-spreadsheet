@@ -178,24 +178,33 @@ export function cfbOpen(buf) {
 
 // ---------------------------------------------------------------- BIFF
 
-const BOF_IDS = new Set([0x0009, 0x0209, 0x0409, 0x0809])
+// BOF ("beginning of file") record, the first record of every BIFF substream.
+//
+// BIFF8: [MS-XLS] 2.4.21 BOF. The record type is 0x0809 and the record is 16 bytes:
+//   vers (2 bytes)     MUST be 0x0600 (BIFF8)
+//   dt (2 bytes)       substream type: 0x0005 workbook globals, 0x0010 worksheet or
+//                      dialog sheet, 0x0020 chart sheet, 0x0040 macro sheet
+//   rupBuild, rupYear (2 bytes each), then 8 bytes of flags
+// Earlier versions are outside [MS-XLS]. Their BOF records use other record types and are
+// shorter: BIFF2 0x0009, BIFF3 0x0209 and BIFF4 0x0409 (vers + dt, 4-6 bytes). BIFF5 uses
+// 0x0809 with vers 0x0500 and an 8-byte record.
+const BOF_BIFF8_OR_5 = 0x0809
+const BOF_OLDER = new Map([[0x0009, 2], [0x0209, 3], [0x0409, 4]])
+const VERS_BIFF8 = 0x0600, VERS_BIFF5 = 0x0500
+const BOF_BIFF8_SIZE = 16
 
-/** BIFF version from a BOF record at offset 0, or null. */
+/** BIFF version (2, 3, 4, 5 or 8) from a BOF record at offset 0, or null if there isn't one. */
 export function biffVersion(buf) {
   if (buf.length < 8) return null
-  const id = buf.readUInt16LE(0), len = buf.readUInt16LE(2)
-  if (!BOF_IDS.has(id) || len < 4 || len > 20) return null
-  if (id === 0x0009) return 2
-  if (id === 0x0209) return 3
-  if (id === 0x0409) return 4
-  const v = buf.readUInt16LE(4)
-  if (v === 0x0600) return 8
-  if (v === 0x0500) return 5
-  if (v === 0x0400) return 4
-  if (v === 0x0300) return 3
-  if (v === 0x0200 || v === 0x0007) return 2
-  // BIFF8 files sometimes carry odd versions; len 16 => BIFF8, 8 => BIFF5
-  return len >= 16 ? 8 : 5
+  const type = buf.readUInt16LE(0), size = buf.readUInt16LE(2)
+  if (size < 4 || size > 20) return null // vers + dt at least; no BOF is longer than 20 bytes
+  if (BOF_OLDER.has(type)) return BOF_OLDER.get(type)
+  if (type !== BOF_BIFF8_OR_5) return null
+  const vers = buf.readUInt16LE(4)
+  if (vers === VERS_BIFF8) return 8
+  if (vers === VERS_BIFF5) return 5
+  // Any other vers: go by the record size, 16 bytes in BIFF8 and 8 in BIFF5.
+  return size >= BOF_BIFF8_SIZE ? 8 : 5
 }
 
 /** Scan BIFF records for cheap features. Bounded: offset advances by 4 + len each step. */
