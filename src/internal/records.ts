@@ -43,13 +43,15 @@ const set = (record: Record<string, unknown>, key: string, value: unknown): void
 }
 
 /**
- * A header cell as a record-key name: text as is, numbers and booleans as
- * `String(v)`, a Date as ISO text, an error cell its code; Empty gives no
- * name (the column is then named `__EMPTY…` like any unnamed column).
+ * A header cell as a record-key name: text as is, numbers as `String(v)`,
+ * booleans as a spreadsheet shows them (`TRUE`/`FALSE`), a Date as ISO
+ * text, an error cell its code; Empty gives no name (the column is then
+ * named `__EMPTY…` like any unnamed column).
  */
 const headerName = (cell: Cell.Cell): string | undefined => {
   const v = Cell.value(cell)
-  return v === undefined ? undefined : v instanceof Date ? v.toISOString() : String(v)
+  if (v === undefined) return undefined
+  return v instanceof Date ? v.toISOString() : typeof v === "boolean" ? (v ? "TRUE" : "FALSE") : String(v)
 }
 
 /**

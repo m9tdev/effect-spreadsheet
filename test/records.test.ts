@@ -79,13 +79,19 @@ describe("toRecords", () => {
     assert.deepStrictEqual(recs(rows, { header: ["x", "x", "", "x_1"] }), [{ x: 1, x_1: 2, __EMPTY: 3, x_1_1: 4 }])
   })
 
+  it("a TRUE/FALSE header with inferTypes keeps the keys TRUE and FALSE", async () => {
+    const rows = await rowsOf("TRUE,FALSE,x\n1,2,3\n")
+    assert.strictEqual(rows[0]!.cells[0]!._tag, "Boolean")
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [{ TRUE: 1, FALSE: 2, x: 3 }])
+  })
+
   it("header cells of every type become names; an Empty header cell is unnamed", () => {
     const rows: Array<Row> = [
       { index: 0, hidden: false, cells: [Cell.boolean(0, true), Cell.error(1, "#N/A"), Cell.empty(2), Cell.number(3, 1.5)] },
       { index: 1, hidden: false, cells: [Cell.text(0, "a"), Cell.text(1, "b"), Cell.text(2, "c"), Cell.text(3, "d")] }
     ]
     assert.deepStrictEqual(recs(rows, { header: "first-row", defval: null }), [
-      { true: "a", "#N/A": "b", "1.5": "d", __EMPTY: "c" }
+      { TRUE: "a", "#N/A": "b", "1.5": "d", __EMPTY: "c" }
     ])
   })
 
