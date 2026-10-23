@@ -165,3 +165,11 @@ test("zipDiff: archive comment length past the end of the file", async () => {
   const c = Buffer.from(base); c.writeUInt16LE(10, offsets(c).eocd + 20) // claims 10 bytes; none follow
   assert.match(zipDiff(base, c), /archive comment runs past the end/)
 })
+
+test("zipDiff: an uncompressed size that doesn't match the data", async () => {
+  const { zipDiff, base, offsets } = await zipFixtures()
+  // the same wrong size in both zips' headers (fields equal), so only the data check catches it
+  const a = Buffer.from(base), b = Buffer.from(base)
+  for (const z of [a, b]) { const o = offsets(z); z.writeUInt32LE(5 + 1, o.local[1] + 22); z.writeUInt32LE(5 + 1, o.central[1] + 24) } // b.txt is 5 bytes
+  assert.match(zipDiff(a, b), /uncompressed size doesn't match/)
+})

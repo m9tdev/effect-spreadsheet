@@ -600,6 +600,7 @@ function zipLayout(buf) {
       local: Buffer.concat([buf.subarray(lho + 4, lho + 8), buf.subarray(lho + 10, lho + 18), buf.subarray(lho + 22, lho + 30 + lnlen + lxlen)]),
       name: buf.toString("utf8", p + 46, p + 46 + nlen),
       crcCentral: buf.readUInt32LE(p + 16), crcLocal: buf.readUInt32LE(lho + 14),
+      usizeCentral: buf.readUInt32LE(p + 24), usizeLocal: buf.readUInt32LE(lho + 22),
       e: { name: buf.toString("utf8", p + 46, p + 46 + nlen), method: buf.readUInt16LE(p + 10), csize: buf.readUInt32LE(p + 20), usize: buf.readUInt32LE(p + 24), lho },
       dataEnd: lho + 30 + lnlen + lxlen + buf.readUInt32LE(p + 20),
       lho,
@@ -627,7 +628,8 @@ function zipLayout(buf) {
  * compression method, compressed size, compressed data and hence its offsets. Everything
  * else must be equal: every other local and central header field (timestamps, CRC32, sizes,
  * flags, attributes, names, extra fields, comments), the entry order, the archive comment
- * and any trailing bytes. Each entry's CRC32 is also checked against its uncompressed bytes.
+ * and any trailing bytes. Each entry's CRC32 and uncompressed size are also checked against
+ * its uncompressed bytes.
  */
 export function zipDiff(a, b) {
   const la = zipLayout(a), lb = zipLayout(b)
@@ -647,6 +649,7 @@ export function zipDiff(a, b) {
       try { data = Buffer.from(zipRead(buf, z.e)) } catch (err) { return `${z.name}: unreadable in the ${label} zip (${err.message})` }
       const c = crc32(data)
       if (c !== z.crcCentral || c !== z.crcLocal) return `${z.name}: CRC32 doesn't match the data in the ${label} zip`
+      if (data.length !== z.usizeCentral || data.length !== z.usizeLocal) return `${z.name}: uncompressed size doesn't match the data in the ${label} zip`
       z.data = data
     }
     if (!x.data.equals(y.data)) return `${x.name}: uncompressed bytes`
