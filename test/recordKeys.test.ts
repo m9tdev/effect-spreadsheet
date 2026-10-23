@@ -156,15 +156,18 @@ describe("recordKeys: lazy keys with make (spec examples 20-24)", () => {
 describe("recordKeys: hostile inputs stay linear", () => {
   // Two checks per hostile header. The work counter is exact and doesn't
   // depend on the machine: at most 3 `used` lookups per key. Timing catches
-  // quadratic work the counter can't see (say, a list scan inside a lookup):
-  // it compares the same header at 65 536 and 262 144 columns in one process,
-  // best of 3 each, and requires the 4x larger input to take less than 10x as
-  // long. Linear code grows about 4-6x (31-48 ms vs 186-237 ms here), a
-  // quadratic version about 16x (e.g. 1.7 s vs 27 s); load slows both sizes
-  // alike, so the ratio holds where an absolute bound didn't.
-  const SMALL = 65536
-  const LARGE = 4 * SMALL
-  const MAX_RATIO = 10
+  // quadratic work the counter can't see (say, a list scan inside a lookup).
+  // An absolute bound and a growth ratio (n vs 4n) both raced machine load:
+  // under load linear code reached ~1.4 s and a 4x growth of 10-15x, as a
+  // larger input suffers more from cache and GC pressure. So the time is
+  // compared with a linear reference doing the same kind of work on the same
+  // input (an entry array, a Set and two Maps of n fresh strings), measured
+  // in the same process, interleaved, best of 3: load slows both alike.
+  // Measured at 65 536 columns: linear code 1.0-1.8x the reference idle and
+  // 0.4-3.1x under load; a quadratic that scans a list on every 4th
+  // allocation 16-255x.
+  const N = 65536
+  const MAX_RELATIVE = 8
   const hostile: ReadonlyArray<readonly [string, (n: number) => ReadonlyArray<string>]> = [
     ["n × a", (n) => range(n, () => "a")],
     ["n × empty", (n) => range(n, () => "")],
@@ -177,6 +180,21 @@ describe("recordKeys: hostile inputs stay linear", () => {
     for (let i = 0; i < names.length; i++) keys.key(i)
     return keys
   }
+  /** Linear work of the same shape as `allKeys`, for comparison. */
+  const reference = (names: ReadonlyArray<string>): number => {
+    const entries = names.map((n, i) => [i, n] as const)
+    const used = new Set<string>()
+    const byColumn = new Map<number, string>()
+    const next = new Map<string, number>()
+    // progress: one entry per iteration
+    for (const [i, n] of entries) {
+      const key = `${n}_${i}`
+      if (!used.has(key)) used.add(key)
+      byColumn.set(i, key)
+      next.set(n, i)
+    }
+    return used.size + byColumn.size + next.size
+  }
   for (const [name, header] of hostile) {
     it(`${name}, n = 16384: at most 3 lookups per key, all keys distinct`, () => {
       const names = header(16384)
@@ -186,26 +204,26 @@ describe("recordKeys: hostile inputs stay linear", () => {
       expect(new Set(keys).size).toBe(names.length)
     })
 
-    it(`${name}: ${LARGE} columns take less than ${MAX_RATIO}x the time of ${SMALL}`, async () => {
-      const small = header(SMALL)
-      const large = header(LARGE)
-      allKeys(small) // warm up the JIT
-      // Runs are separated by an event-loop turn, so a slow (quadratic) run
-      // fails here instead of tripping the hang watchdog.
-      const best = async (names: ReadonlyArray<string>, runs: number, stop?: (ms: number) => boolean) => {
-        let min = Infinity
-        // progress: r increases up to `runs`
-        for (let r = 0; r < runs; r++) {
-          await new Promise((resolve) => setImmediate(resolve))
-          min = Math.min(min, timed(() => allKeys(names)).ms)
-          if (stop?.(min)) break
-        }
-        return min
+    it(`${name}, n = ${N}: at most ${MAX_RELATIVE}x the time of linear reference work`, async () => {
+      const names = header(N)
+      allKeys(names) // warm up the JIT
+      reference(names)
+      let keysMs = Infinity
+      let referenceMs = Infinity
+      // progress: r increases up to 3. Runs are separated by an event-loop
+      // turn, so a slow (quadratic) run fails here instead of tripping the
+      // hang watchdog; stop once the bound is met, or far off.
+      for (let r = 0; r < 3; r++) {
+        await new Promise((resolve) => setImmediate(resolve))
+        referenceMs = Math.min(referenceMs, timed(() => reference(names)).ms)
+        keysMs = Math.min(keysMs, timed(() => allKeys(names)).ms)
+        const relative = keysMs / Math.max(referenceMs, 0.5)
+        if (relative < MAX_RELATIVE || relative > 4 * MAX_RELATIVE) break
       }
-      const smallMs = Math.max(await best(small, 3), 1)
-      // stop as soon as the ratio is met; retry once if it isn't
-      const largeMs = await best(large, 2, (ms) => ms < MAX_RATIO * smallMs)
-      expect(largeMs / smallMs, `${SMALL}: ${smallMs.toFixed(1)} ms, ${LARGE}: ${largeMs.toFixed(1)} ms`).toBeLessThan(MAX_RATIO)
+      expect(
+        keysMs / Math.max(referenceMs, 0.5),
+        `keys ${keysMs.toFixed(1)} ms, reference ${referenceMs.toFixed(1)} ms`
+      ).toBeLessThan(MAX_RELATIVE)
     }, 120_000)
   }
 
