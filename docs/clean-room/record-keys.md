@@ -7,9 +7,9 @@ the repo's tests (`test/records.test.ts`), the doc comment of
 `Spreadsheet.toRecords` in `src/Spreadsheet.ts`, and the MIT-licensed docs and
 tests listed under "Sources".
 
-The new module must not carry a SheetJS attribution header and must not be
-listed in `NOTICE`. Whoever integrates it handles deleting the old `unique()` code
-and updating `NOTICE`/`LICENSE-APACHE-2.0` (other files may still need them).
+The new module carries no third-party attribution header. It has replaced the
+old key-naming code, and the repo is plain MIT with no `NOTICE` or
+`LICENSE-APACHE-2.0`.
 
 ## 1. Purpose
 
