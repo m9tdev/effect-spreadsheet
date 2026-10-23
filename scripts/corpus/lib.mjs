@@ -29,6 +29,7 @@ export const SOURCES_PATH = path.join(CORPUS_DIR, "sources.json")
 export const EXPECTED_DIR = path.join(CACHE_DIR, "expected")
 // Shared convention with the test oracle: SHEETJS_DIR is the SheetJS repo dir,
 // default ~/sheetjs. Each side picks its own entry file in it (here: SHEETJS_ENTRY, xlsx.js).
+// An empty SHEETJS_DIR counts as unset (`||`, not `??`), so `SHEETJS_DIR= cmd` uses the default.
 export const SHEETJS_DIR = process.env.SHEETJS_DIR || path.join(os.homedir(), "sheetjs")
 export const SHEETJS_ENTRY = path.join(SHEETJS_DIR, "xlsx.js")
 
