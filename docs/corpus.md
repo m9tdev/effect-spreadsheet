@@ -38,7 +38,7 @@ covers that run. Run without filters at the end: it reuses the cache and writes 
 | `test/corpus/sources.json` | yes | pin of the external corpus: URL, archive sha256/size, file count (no per-file details) |
 | `test/corpus/generated/` | yes | our fixtures (~150 KB), with `README.json` (name, sniffed format, size, sha256, description) |
 | `test/corpus/hidden-rows/` | yes | Synthetic hidden-row fixtures + `manifest.json` |
-| `test/corpus/.cache/` | **no** (gitignored) | `sheetjs/test_files` (fetched), `manifest.json` (full manifest), `expected/` (oracle output), `oracle-report.json` |
+| `test/corpus/.cache/` | **no** (gitignored) | `sheetjs/test_files` (fetched, 1.9 GB), `manifest.json` (full manifest), `expected/` (oracle output, ~1.3 GB), `oracle-report.json`; about **3.2 GB** in all (apparent size; plus 341 MB with `fetch --keep-zip`) |
 
 **Nothing committed lists third-party corpus files.** GitHub blocked `SheetJS/test_files`
 for `private_information`, and we may not redistribute much of it, so file names, paths
@@ -207,7 +207,7 @@ use `XLSX.stream.to_json` for expected output, because that is where the hang is
   "schema": 1, "oracle": "sheetjs", "sheetjsVersion": "0.20.3", "sheetjsCommit": "d2f2e179636b",
   "sha256": "…", "path": "AutoFilter.xlsx", "source": "sheetjs", "format": "xlsx", "kind": "parse",
   "ms": 12,
-  "status": "ok",                      // "ok" | "error" | "timeout" | "crash"
+  "status": "ok",                      // "ok" | "tooBig" | "error" | "timeout" | "crash"
   "error": "…",                        // only if not ok
   "options": { "read": {…}, "json": {…}, "rowsMaxArea": 2000000 },
   "workbook": {
@@ -231,6 +231,13 @@ use `XLSX.stream.to_json` for expected output, because that is where the hang is
   } ]
 }
 ```
+
+**Caps.** A workbook with more than 5,000,000 cells (`MAX_CELLS`), or an expected file that
+would exceed 128 MiB (`MAX_BYTES`), gets `status: "tooBig"` with a `reason`, the
+`workbook` block, and per-sheet counts only (`name`, `ref`, `cellCount`, `hiddenRowCount`).
+Before the caps, the cache held about 32 GB of expected JSON. One shared-strings bomb from
+a third-party set alone produced 25 GB. With the caps it's about 1.3 GB, and the largest
+file is about 116 MB.
 
 Non-finite numbers are written as `{"$num":"NaN"}`. Big results are written in a
 streaming way, because some sheets exceed V8's maximum string length.
@@ -266,8 +273,11 @@ fills `!rows`. That happens always for xls/xlsb/xlml/SYLK, and for xlsx only wit
 
 ### Results (2026-10-23, `oracle.mjs --jobs 8 --force`, 460 s wall)
 
-**Parse** (one job per unique sha256): 4673 jobs, **0 timeouts, 0 crashes**, and 27
-errors. All of them are inputs that are meant to fail:
+**Parse** (one job per unique sha256, 60 s limit each): 4673 jobs. 4627 are ok and 19
+are `tooBig` (counts only: the large-strings, calendar-stress and datetime_8192 sets and
+the million-row files). None hit the parse timeout and none crashed. That "0 timeouts" is
+only for the parse step: every timeout of the run is in the stream probe below (211 probe
+runs, by design). There are 27 errors. All of them are inputs that are meant to fail:
 - 18 password-protected xls (SheetJS's own `password_*` set and third-party ones)
 - 1 truncated BIFF record
 - 6 corrupt or unusual zips (missing parts, bad sizes, an encrypted ods)

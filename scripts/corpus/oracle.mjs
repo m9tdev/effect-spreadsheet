@@ -41,6 +41,9 @@ export const READ_OPTIONS = {
 // sheet_to_json options for `rows` (only computed when the !ref area is small enough).
 export const JSON_OPTIONS = { header: 1, raw: true, defval: null, blankrows: true }
 export const ROWS_MAX_AREA = 2_000_000
+// Caps per expected file: above these the file holds status "tooBig" and counts only.
+export const MAX_CELLS = 5_000_000
+export const MAX_BYTES = 128 * 1024 * 1024
 // A typical SheetJS-based reader: XLSX.read(buffer) then stream.to_json with these options.
 export const PROBE_OPTIONS = { raw: true, skipHidden: true, UTC: true, header: "A" }
 // Probe variants:
@@ -94,9 +97,11 @@ if (process.argv[2] === "--child") {
     const head = { schema: SCHEMA, ...meta, sha256: job.sha256, path: job.path, source: job.source, format: job.format, kind: job.kind, ms }
     if (job.variant) head.variant = job.variant
     try {
-      writeJson(job.out, { ...head, ...out })
+      writeJson(job.out, { ...head, ...out }, MAX_BYTES)
     } catch (e) {
-      out = { status: "error", error: `could not serialize result: ${String(e?.message ?? e).slice(0, 500)}` }
+      out = e?.code === "TOO_BIG"
+        ? tooBig(out, `expected JSON over ${MAX_BYTES} bytes`)
+        : { status: "error", error: `could not serialize result: ${String(e?.message ?? e).slice(0, 500)}` }
       fs.writeFileSync(job.out, JSON.stringify({ ...head, ...out }) + "\n")
     }
     watchdog.postMessage({ deadline: null })
@@ -121,13 +126,17 @@ function sheetjsCommit() {
 // Streaming JSON writer: the result for big sheets can exceed V8's max string
 // length, so big arrays are written element by element (same output as
 // JSON.stringify(value, replacer)).
-function writeJson(file, value) {
+// Throws an error with code "TOO_BIG" once more than maxBytes (UTF-16 units, close
+// enough) would be written; the caller then replaces the file.
+function writeJson(file, value, maxBytes = Infinity) {
   const fd = fs.openSync(file, "w")
   let pending = []
-  let size = 0
+  let size = 0, total = 0
   const emit = (s) => {
     pending.push(s)
     size += s.length
+    total += s.length
+    if (total > maxBytes) throw Object.assign(new Error("too big"), { code: "TOO_BIG" })
     if (size > 1 << 22) { fs.writeSync(fd, pending.join("")); pending = []; size = 0 }
   }
   // depth 0 doc, 1 sheets[], 2 sheet{}, 3 cells[]/rows[] (walked when long), 4 cell/row (stringified)
@@ -174,8 +183,30 @@ function parse(XLSX, job) {
     date1904: !!wb.Workbook?.WBProps?.date1904,
     sheets: wb.SheetNames.map((name, i) => ({ name, visibility: VIS[wbSheets[i]?.Hidden ?? 0] ?? String(wbSheets[i]?.Hidden) })),
   }
+  const options = { read: READ_OPTIONS, json: JSON_OPTIONS, rowsMaxArea: ROWS_MAX_AREA, maxCells: MAX_CELLS, maxBytes: MAX_BYTES }
+  const counts = wb.SheetNames.map((name) => sheetCounts(wb.Sheets[name], name))
+  const total = counts.reduce((a, c) => a + c.cellCount, 0)
+  if (total > MAX_CELLS) return tooBig({ options, workbook, sheets: counts }, `${total} cells > ${MAX_CELLS}`)
   const sheets = wb.SheetNames.map((name) => sheetOut(XLSX, wb.Sheets[name], name))
-  return { status: "ok", options: { read: READ_OPTIONS, json: JSON_OPTIONS, rowsMaxArea: ROWS_MAX_AREA }, workbook, sheets }
+  return { status: "ok", options, workbook, sheets }
+}
+
+// Counts-only view of a sheet (for "tooBig" results).
+function sheetCounts(ws, name) {
+  if (!ws) return { name, missing: true, cellCount: 0 }
+  let cellCount = 0
+  const data = ws["!data"]
+  if (data) { for (const row of data) if (row) for (const c of row) if (c && c.t != null) cellCount++ }
+  else for (const k of Object.keys(ws)) if (k[0] !== "!" && ws[k]?.t != null) cellCount++
+  const hiddenRows = (ws["!rows"] ?? []).reduce((a, r) => a + (r?.hidden ? 1 : 0), 0)
+  return { name, ref: ws["!ref"] ?? null, cellCount, hiddenRowCount: hiddenRows }
+}
+
+function tooBig(out, reason) {
+  return {
+    status: "tooBig", reason, options: out.options, workbook: out.workbook,
+    sheets: (out.sheets ?? []).map((s) => ({ name: s.name, ref: s.ref ?? null, cellCount: s.cellCount ?? 0, hiddenRowCount: s.hiddenRowCount ?? s.hiddenRows?.length ?? 0 })),
+  }
 }
 
 function sheetOut(XLSX, ws, name) {
@@ -308,10 +339,10 @@ async function main() {
       try { const d = JSON.parse(fs.readFileSync(j.out, "utf8")); r = { status: d.status, ms: d.ms, error: d.error } } catch { continue }
     }
     const key = j.kind === "probe" ? `probe-${j.variant}:${j.format}` : `parse:${j.format}`
-    const c = (report.counts[key] ??= { ok: 0, error: 0, timeout: 0, crash: 0 })
+    const c = (report.counts[key] ??= { ok: 0, tooBig: 0, error: 0, timeout: 0, crash: 0 })
     c[r.status] = (c[r.status] ?? 0) + 1
     if (j.kind === "probe") report.probes.push({ path: j.path, source: j.source, format: j.format, sha256: j.sha256, variant: j.variant, status: r.status, ms: r.ms, error: r.error })
-    else if (r.status !== "ok") report.notOk.push({ path: j.path, source: j.source, format: j.format, sha256: j.sha256, status: r.status, ms: r.ms, error: r.error })
+    else if (r.status !== "ok" && r.status !== "tooBig") report.notOk.push({ path: j.path, source: j.source, format: j.format, sha256: j.sha256, status: r.status, ms: r.ms, error: r.error })
   }
   // Per-file verdict on the stream.to_json(skipHidden) hang.
   const byFile = new Map()
