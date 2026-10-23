@@ -193,13 +193,15 @@ describe("toRecords", () => {
     }), 30_000)
 
   it("many rows that give no record (blank, before the header) finish fast and keep yielding", async () => {
-    // ~600 KB: the reader hands over ~10 pieces, and the stream yields between them
+    // ~600 KB: the reader hands over ~10 pieces with a yield before each, and
+    // the records stream yields once more per piece it gets: ~20 turns. At
+    // least 12 needs both; either one alone gives about 10.
     const bytes = enc("\n".repeat(300_000) + "h\n" + "\n".repeat(300_000) + "v\n")
     const { value: records, yields, ms } = await countYields(() =>
       Effect.runPromise(Stream.runCollect(Spreadsheet.toRecords(Csv.rows(bytes), { header: 300_000 })))
     )
     expect(Array.from(records)).toEqual([{ h: "v" }])
-    expect(yields).toBeGreaterThanOrEqual(5)
+    expect(yields).toBeGreaterThanOrEqual(12)
     expect(ms).toBeLessThan(10_000)
   }, 30_000)
 
