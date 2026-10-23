@@ -11,7 +11,7 @@ and each side picks its own entry file inside it. These scripts use `xlsx.js`
 The scripts are plain Node ESM (Node ≥ 24), with no dependencies.
 
 ```sh
-node scripts/corpus/fetch.mjs          # SheetJS test_files -> test/corpus/.cache/sheetjs (pinned, idempotent)
+node scripts/corpus/fetch.mjs          # SheetJS test_files -> test/corpus/.cache/sheetjs (pinned, idempotent; --timeout SEC, default 900)
 node scripts/corpus/generate.mjs       # our fixtures -> test/corpus/generated (deterministic)
 node scripts/corpus/generate.mjs --check
 node scripts/corpus/hidden-rows/generate.mjs --check   # hidden-row fixtures are byte-identical when regenerated
@@ -155,7 +155,8 @@ The **focus formats** listed are csv, xlsx, xlsm, xltx, xls, xlsb, xlml,
 ods, fods, sylk and ooxml-encrypted (`--all-formats` lists the rest too). Generated and hidden-rows
 files are always listed. **Features** are best effort and cheap: `biff`, `encrypted`
 (FILEPASS), `hiddenRows` (a count), `sheets`/`hiddenSheets`/`veryHiddenSheets`,
-`hugeDimension`, `vba`, `truncated` (BIFF record past the end of the stream) and `partial`
+`hugeDimension` (a declared range that reaches the format's last row or column: xlsx
+`<dimension>`, xlsb BrtWsDim, xls DIMENSIONS, xlml ExpandedRow/ColumnCount, SYLK `B;`), `vba`, `truncated` (BIFF record past the end of the stream) and `partial`
 (a part was too big to scan).
 
 ### Counts per format

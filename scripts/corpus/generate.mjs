@@ -126,7 +126,7 @@ function biffJoin(recs) {
 function rowRecord(r, colMac, hidden) {
   const d = Buffer.alloc(16)
   d.writeUInt16LE(r, 0); d.writeUInt16LE(0, 2); d.writeUInt16LE(colMac, 4)
-  d.writeUInt16LE(hidden ? 0x00ff : 0x00ff, 6)
+  d.writeUInt16LE(0x00ff, 6) // miyRw: same height for hidden and visible rows (fDyZero marks hidden)
   // flags: fDyZero (0x20) when hidden, fUnsynced (0x40), reserved byte 0x01
   d.writeUInt8(hidden ? 0x60 : 0x00, 12); d.writeUInt8(0x01, 13); d.writeUInt16LE(0x0f, 14)
   return { id: 0x0208, data: d }
@@ -298,7 +298,7 @@ out("sylk_row_format_no_m.slk", Buffer.from('ID;PWXL;N;E\r\nP;PGeneral\r\nF;SDM6
   out("huge_dimension.slk", Buffer.from("ID;PWXL;N;E\r\nB;Y1048576;X16384;D0 0 1048575 16383\r\nC;Y1;X1;K1\r\nC;Y2;X2;K2\r\nE\r\n", "latin1"), "huge B;Y1048576;X16384, cells A1=1, B2=2 only")
 }
 
-// ---- 4. many empty rows: 100k empty <row> elements between two cells (some hidden, some with height)
+// ---- 4. many empty rows: 5000 empty <row r> elements (some hidden, some with height), and 1048574 <row/> without r
 {
   const parts = ['<row r="1"><c r="A1" t="inlineStr"><is><t>top</t></is></c></row>']
   for (let r = 2; r <= 5001; r++) parts.push(r % 1000 === 0 ? `<row r="${r}" hidden="1"/>` : r % 777 === 0 ? `<row r="${r}" ht="30" customHeight="1"/>` : `<row r="${r}"/>`)

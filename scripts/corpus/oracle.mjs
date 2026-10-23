@@ -1,19 +1,25 @@
 #!/usr/bin/env node
-// SheetJS oracle: for each manifest file, write the expected output to
+// SheetJS oracle: for each file of the full manifest (test/corpus/.cache/manifest.json,
+// built by manifest.mjs), write the expected output to
 // test/corpus/.cache/expected/<sha256>.json (shape documented in docs/corpus.md).
 //
-// SheetJS is loaded from the local clone ~/sheetjs (override: SHEETJS_DIR), never
-// from node_modules. Each file is parsed in a pooled child process with a
-// per-file timeout; a timeout kills the child and is recorded as such.
+// SheetJS is loaded from SHEETJS_DIR (the repo dir, default ~/sheetjs; entry xlsx.js),
+// never from node_modules. Each file is parsed in a pooled child process with a
+// per-file timeout; a timeout kills the child and is recorded as such. Children are
+// killed when the parent exits or is signalled, and kill themselves (watchdog thread)
+// when orphaned or past a hard deadline. 3 consecutive startup deaths abort the run.
+// Results over MAX_CELLS / MAX_BYTES are stored as status "tooBig" (counts only).
 //
-// Also probes XLSX.stream.to_json(ws, {header:1, skipHidden:true}) on files that
-// have hidden rows (manifest features.hiddenRows), to confirm the known SheetJS
-// hang (a hidden row does `continue` before `++R`). Probe results go to
-// test/corpus/.cache/expected/<sha256>.stream.json and the run report.
+// It also probes XLSX.stream.to_json(ws, {raw, skipHidden:true, UTC, header:"A"}) (the
+// a typical SheetJS-based reader) on files with hidden rows and on all generated/hidden-rows files, in
+// three variants (default read, cellStyles, and a skipHidden:false control), to
+// confirm the known SheetJS hang (a hidden row does `continue` before `++R`). Probe
+// results go to test/corpus/.cache/expected/<sha256>.stream.<variant>.json.
 //
 // Usage: node scripts/corpus/oracle.mjs [--force] [--jobs N] [--timeout SEC]
-//          [--probe-timeout SEC] [--no-probe] [--source sheetjs|generated]
-//          [--format xls,xlsb,...] [--max-size BYTES] [--limit N]
+//          [--probe-timeout SEC] [--ready-timeout SEC] [--no-probe]
+//          [--source sheetjs|generated|hidden-rows] [--format xls,xlsb,...] [--max-size BYTES]
+//          [--limit N] [--verbose]
 // Writes a run report to test/corpus/.cache/oracle-report.json.
 
 import { fork } from "node:child_process"
@@ -57,6 +63,7 @@ export const PROBE_VARIANTS = {
   control: { read: { type: "buffer", cellStyles: true }, stream: { ...PROBE_OPTIONS, skipHidden: false } },
 }
 
+const SOURCES = ["sheetjs", "generated", "hidden-rows"]
 const SRC_ROOT = { sheetjs: path.join(SHEETJS_CACHE, "test_files"), generated: GENERATED_DIR, "hidden-rows": HIDDEN_ROWS_DIR }
 
 // ------------------------------------------------------------------ child
@@ -380,20 +387,24 @@ function upToDate(out) {
 
 function parseArgs(argv) {
   const a = { verbose: false, force: false, jobs: Math.max(1, Math.min(10, Math.floor(os.availableParallelism() / 2))), timeout: 60_000, probeTimeout: 15_000, readyTimeout: 30_000, probe: true, source: null, format: null, maxSize: 0, limit: 0 }
+  const fail = (msg) => { console.error(`oracle: ${msg}`); process.exit(2) }
+  const value = (i, k) => { const v = argv[i + 1]; if (v === undefined || v.startsWith("--")) fail(`${k} needs a value`); return v }
+  const posInt = (v, k) => { const n = Number(v); if (!Number.isInteger(n) || n < 1) fail(`${k} must be a positive integer, got "${v}"`); return n }
+  const posSec = (v, k) => { const n = Number(v); if (!Number.isFinite(n) || n <= 0) fail(`${k} must be a positive number of seconds, got "${v}"`); return Math.round(n * 1000) }
   for (let i = 0; i < argv.length; i++) {
-    const k = argv[i], v = argv[i + 1]
+    const k = argv[i]
     if (k === "--force") a.force = true
     else if (k === "--no-probe") a.probe = false
     else if (k === "--verbose") a.verbose = true
-    else if (k === "--jobs") { a.jobs = +v; i++ }
-    else if (k === "--timeout") { a.timeout = +v * 1000; i++ }
-    else if (k === "--probe-timeout") { a.probeTimeout = +v * 1000; i++ }
-    else if (k === "--ready-timeout") { a.readyTimeout = +v * 1000; i++ }
-    else if (k === "--source") { a.source = v; i++ }
-    else if (k === "--format") { a.format = v; i++ }
-    else if (k === "--max-size") { a.maxSize = +v; i++ }
-    else if (k === "--limit") { a.limit = +v; i++ }
-    else throw new Error(`unknown arg ${k}`)
+    else if (k === "--jobs") a.jobs = posInt(value(i++, k), k)
+    else if (k === "--timeout") a.timeout = posSec(value(i++, k), k)
+    else if (k === "--probe-timeout") a.probeTimeout = posSec(value(i++, k), k)
+    else if (k === "--ready-timeout") a.readyTimeout = posSec(value(i++, k), k)
+    else if (k === "--source") { a.source = value(i++, k); if (!SOURCES.includes(a.source)) fail(`--source must be one of ${SOURCES.join(", ")}, got "${a.source}"`) }
+    else if (k === "--format") a.format = value(i++, k)
+    else if (k === "--max-size") a.maxSize = posInt(value(i++, k), k)
+    else if (k === "--limit") a.limit = posInt(value(i++, k), k)
+    else fail(`unknown argument ${k}`)
   }
   return a
 }

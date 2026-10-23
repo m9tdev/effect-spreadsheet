@@ -213,6 +213,12 @@ export function biffFeatures(buf, biff) {
       else if (hs === 2) f.veryHiddenSheets++
     } else if (id === 0x0208 && len >= 16 && biff >= 3) { // ROW
       if (buf[d + 12] & 0x20) f.hiddenRows++
+    } else if (id === 0x0200 && !f.hugeDimension) { // DIMENSIONS: last row/col + 1
+      // BIFF8: rwMic(4) rwMac(4) colMic(2) colMac(2); BIFF2-5: rwMic(2) rwMac(2) colMic(2) colMac(2)
+      const big = biff === 8 && len >= 12
+      const rwMac = big ? buf.readUInt32LE(d + 4) : len >= 8 ? buf.readUInt16LE(d + 2) : 0
+      const colMac = big ? buf.readUInt16LE(d + 10) : len >= 8 ? buf.readUInt16LE(d + 6) : 0
+      if (rwMac >= (biff === 8 ? 65536 : 16384) || colMac >= 256) f.hugeDimension = `rows ${rwMac}, cols ${colMac}`
     }
     o = d + len
   }
@@ -231,18 +237,22 @@ function readVar(buf, o, max) {
   return [v >>> 0, i]
 }
 
-/** Count hidden BrtRowHdr records in an xlsb sheet part. */
-export function xlsbHiddenRows(buf) {
-  let o = 0, hidden = 0
+/** Scan an xlsb sheet part: hidden BrtRowHdr count and a huge BrtWsDim (reaching row 1048576 or col XFD). */
+export function xlsbSheetFeatures(buf) {
+  let o = 0, hidden = 0, hugeDimension = null
   for (let n = 0; o < buf.length && n < 100_000_000; n++) {
     const [type, a] = readVar(buf, o, 2)
     const [size, b] = readVar(buf, o + a, 4)
     if (a === 0 || b === 0) break
     const d = o + a + b
     if (type === 0 && size >= 12 && d + 12 <= buf.length) { if (buf[d + 11] & 0x10) hidden++ }
+    else if (type === 0x0094 && size >= 16 && d + 16 <= buf.length && !hugeDimension) { // BrtWsDim
+      const rwLast = buf.readUInt32LE(d + 4), colLast = buf.readUInt32LE(d + 12)
+      if (rwLast >= 1048575 || colLast >= 16383) hugeDimension = `rows ${rwLast + 1}, cols ${colLast + 1}`
+    }
     o = d + size // strictly increases (a >= 1)
   }
-  return hidden
+  return { hidden, hugeDimension }
 }
 
 // ---------------------------------------------------------------- text helpers
@@ -315,7 +325,7 @@ export function sniff(buf) {
       return { format: "fods", features: odsFeatures(full) }
     }
     if (/^<(!DOCTYPE\s+html|html|table|meta|head|body)/i.test(t)) return { format: "html", features: {} }
-    return { format: "xml", features: {} } // some other XML document (pom.xml, a bare worksheet part, ...)
+    return { format: "xml", features: {} } // some other XML document (not a workbook we know)
   }
   if (/^<(!DOCTYPE\s+html|html|table|meta|head|body)/i.test(t)) return { format: "html", features: {} }
   if (/^[[{]/.test(t) && buf.length < 256 * 1024 * 1024) {
@@ -367,9 +377,12 @@ function sylkFeatures(buf) {
     if (fields.some((x) => /^R\d+$/.test(x))) hiddenRows++
     else if (fields.some((x) => /^C\d+$/.test(x))) hiddenCols++
   }
+  const dim = /^B;([^\r\n]*)$/m.exec(s)
+  const by = dim && /(?:^|;)Y(\d+)/.exec(dim[1]), bx = dim && /(?:^|;)X(\d+)/.exec(dim[1])
   const f = {}
   if (hiddenRows) f.hiddenRows = hiddenRows
   if (hiddenCols) f.hiddenCols = hiddenCols
+  if ((by && +by[1] >= 1048576) || (bx && +bx[1] >= 16384)) f.hugeDimension = `rows ${by?.[1] ?? "?"}, cols ${bx?.[1] ?? "?"}`
   return f
 }
 
@@ -383,6 +396,8 @@ function xlmlFeatures(s) {
   if (vh) f.veryHiddenSheets = vh
   const hr = countMatches(s, /<(?:ss:)?Row\b[^>]*\bss:Hidden="(?:1|true)"/g)
   if (hr) f.hiddenRows = hr
+  const er = /\bss:ExpandedRowCount="(\d+)"/.exec(s), ec = /\bss:ExpandedColumnCount="(\d+)"/.exec(s)
+  if ((er && +er[1] >= 1048576) || (ec && +ec[1] >= 16384)) f.hugeDimension = `rows ${er?.[1] ?? "?"}, cols ${ec?.[1] ?? "?"}`
   return f
 }
 
@@ -464,7 +479,9 @@ function sniffZip(buf) {
       for (const e of ents) {
         if (!/sheets?\/sheet\d*\.bin$/i.test(e.name)) continue
         if (e.usize > PART_LIMIT) { partial = true; continue }
-        hidden += xlsbHiddenRows(zipRead(buf, e))
+        const sf = xlsbSheetFeatures(zipRead(buf, e))
+        hidden += sf.hidden
+        if (sf.hugeDimension) features.hugeDimension ??= sf.hugeDimension
       }
       if (hidden) features.hiddenRows = hidden
       if (partial) features.partial = true
