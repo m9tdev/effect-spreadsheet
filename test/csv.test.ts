@@ -253,6 +253,25 @@ describe("csv: type inference", () => {
     ])
   })
 
+  it("number inference as documented in the README: exponents, bare fractions, -0, finite only", async () => {
+    const inputs = ["1e21", "1E-3", "-0", "1.", ".5", "+5", "0.5", "1e999", "007", "0x10", "1_000", "1234567890123456"]
+    const rows = await Effect.runPromise(csvRows(inputs.join(",") + "\n", { inferTypes: true }))
+    assert.deepStrictEqual(rows[0]!.cells.map((c) => [c._tag, Cell.value(c)]), [
+      ["Number", 1e21],
+      ["Number", 0.001],
+      ["Number", 0],
+      ["Number", 1],
+      ["Number", 0.5],
+      ["Number", 5],
+      ["Number", 0.5],
+      ["Text", "1e999"],
+      ["Text", "007"],
+      ["Text", "0x10"],
+      ["Text", "1_000"],
+      ["Text", "1234567890123456"]
+    ])
+  })
+
   it("negative zero is inferred as 0", async () => {
     const rows = await Effect.runPromise(csvRows("-0,-0.0,-0e5,+0\n", { inferTypes: true }))
     for (const cell of rows[0]!.cells) assert.isTrue(Object.is(Cell.value(cell), 0), String(Cell.value(cell)))

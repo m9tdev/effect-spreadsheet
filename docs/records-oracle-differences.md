@@ -66,6 +66,25 @@ An explicit `""` is treated like a blank header cell: it gets an `__EMPTY…`
 key when data appears in its column, and no `defval` fill. A hole,
 `undefined` or `null` entry drops the column in both.
 
+## 5. Numeric header cells are named from the parsed number
+
+With `inferTypes: true`, a header cell like `1.50` is a Number, and its key
+is `String(n)` of the parsed value, so the source text is lost where SheetJS
+keeps it:
+
+```
+1.0,-0,1.50,1e21
+a,b,c,d
+```
+
+| | record |
+|---|---|
+| effect-spreadsheet | `{ "1": "a", "0": "b", "1.5": "c", "1e+21": "d" }` |
+| SheetJS | `{ "1.0": "a", "-0": "b", "1.50": "c", "1e21": "d" }` |
+
+Without `inferTypes` the header cells are text and the keys are the source
+text, as in SheetJS.
+
 ## Not a difference: boolean header cells
 
 A header cell `TRUE` (a Boolean with `inferTypes`) gives the key `"TRUE"`,
