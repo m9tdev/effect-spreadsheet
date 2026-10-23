@@ -108,16 +108,18 @@ console.log(`SheetJS ${XLSX.version} (${SHEETJS_DIR}): wrote ${NAMES.length} fix
 
 if (check) {
   let ok = reportCompare(compareDirs(OUT, HIDDEN_ROWS_DIR, ["manifest.json"]), "test/corpus/hidden-rows")
-  // The pinned sha256s in hidden-rows/manifest.json must match too (every entry, renamed copies included).
+  // The sha256s pinned in hidden-rows/manifest.json must match the committed files (every
+  // entry, renamed copies included). Regenerated zips may differ in deflate bytes only
+  // (zlib build), which compareDirs above already accepts by content.
   const manifest = JSON.parse(fs.readFileSync(path.join(HIDDEN_ROWS_DIR, "manifest.json"), "utf8"))
   const listed = new Set(manifest.files.map((f) => f.path))
   for (const f of manifest.files) {
-    const p = path.join(OUT, f.path)
+    const p = path.join(HIDDEN_ROWS_DIR, f.path)
     const got = fs.existsSync(p) ? sha256(fs.readFileSync(p)) : null
-    if (got !== f.sha256) { ok = false; console.log(`PIN     ${f.path}: manifest ${f.sha256.slice(0, 12)}…, generated ${got?.slice(0, 12) ?? "missing"}`) }
+    if (got !== f.sha256) { ok = false; console.log(`PIN     ${f.path}: manifest ${f.sha256.slice(0, 12)}…, committed ${got?.slice(0, 12) ?? "missing"}`) }
   }
   for (const n of [...NAMES, ...Object.keys(RENAMED)]) if (!listed.has(n)) { ok = false; console.log(`UNLISTED ${n} (not in hidden-rows/manifest.json)`) }
   fs.rmSync(OUT, { recursive: true, force: true })
   if (!ok) process.exit(1)
-  console.log("byte-identical to the committed fixtures and their manifest pins")
+  console.log("identical to the committed fixtures (zips by content), and the committed files match their manifest pins")
 }

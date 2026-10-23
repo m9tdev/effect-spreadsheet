@@ -18,7 +18,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { createRequire } from "node:module"
-import { GENERATED_DIR, SHEETJS_DIR, SHEETJS_ENTRY, compareDirs, parseFlags, reportCompare, rezip, sha256, sniff, stripWriterBoilerplate, zip } from "./lib.mjs"
+import { GENERATED_DIR, SHEETJS_DIR, SHEETJS_ENTRY, compareDirs, parseFlags, reportCompare, rezip, sameZipContent, sha256, sniff, stripWriterBoilerplate, zip } from "./lib.mjs"
 
 const require = createRequire(import.meta.url)
 const XLSX = require(SHEETJS_ENTRY)
@@ -391,7 +391,25 @@ const total = written.reduce((a, w) => a + w.size, 0)
 console.log(`generated ${written.length} files, ${(total / 1024).toFixed(1)} KiB total -> ${OUT}`)
 
 if (check) {
-  const ok = reportCompare(compareDirs(OUT, GENERATED_DIR), "test/corpus/generated")
+  // README.json lists size and sha256 per file. For zips those depend on the zlib build, so
+  // they may differ when the zip content is the same; everything else must match exactly.
+  const readmeEqual = (rel, a, b) => {
+    if (rel !== "README.json") return false
+    const ga = JSON.parse(a), cb = JSON.parse(b)
+    const norm = (doc) => ({ ...doc, files: doc.files.map((f) => {
+      const g = path.join(OUT, f.name), c = path.join(GENERATED_DIR, f.name)
+      if (fs.existsSync(g) && fs.existsSync(c) && sameZipContent(fs.readFileSync(g), fs.readFileSync(c))) { const { size, sha256: _s, ...rest } = f; return rest }
+      return f
+    }) })
+    return JSON.stringify(norm(ga)) === JSON.stringify(norm(cb))
+  }
+  let ok = reportCompare(compareDirs(OUT, GENERATED_DIR, [], readmeEqual), "test/corpus/generated")
+  // The committed README.json must describe the committed bytes.
+  for (const f of JSON.parse(fs.readFileSync(path.join(GENERATED_DIR, "README.json"), "utf8")).files) {
+    const p = path.join(GENERATED_DIR, f.name)
+    const buf = fs.existsSync(p) ? fs.readFileSync(p) : null
+    if (!buf || buf.length !== f.size || sha256(buf) !== f.sha256) { ok = false; console.log(`README  ${f.name}: size/sha256 don't match the committed file`) }
+  }
   fs.rmSync(OUT, { recursive: true, force: true })
   if (!ok) process.exit(1)
 }

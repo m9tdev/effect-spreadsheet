@@ -47,3 +47,16 @@ test("biffVersion via sniff on the generated xls fixtures", () => {
     assert.equal(s.features.biff, biff, name)
   }
 })
+
+test("sameZipContent: equal content with other deflate bytes, not when content or order differs", async () => {
+  const { zip, sameZipContent } = await import("./lib.mjs")
+  const parts = [["a.xml", Buffer.from("<a>" + "xy".repeat(3000) + "<b/>".repeat(500) + "</a>")], ["b.txt", Buffer.from("hello")]]
+  const ours = zip(parts)
+  const relevelled = zip(parts, { level: 1 }) // stands in for another zlib build
+  assert.ok(!ours.equals(relevelled), "different deflate bytes")
+  assert.ok(sameZipContent(ours, relevelled))
+  assert.ok(!sameZipContent(ours, zip([parts[0], ["b.txt", Buffer.from("hellO")]])), "content change")
+  assert.ok(!sameZipContent(ours, zip([parts[1], parts[0]])), "order change")
+  assert.ok(!sameZipContent(ours, zip([parts[0]])), "missing entry")
+  assert.ok(!sameZipContent(Buffer.from("not a zip"), ours))
+})

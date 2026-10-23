@@ -566,20 +566,48 @@ function listFiles(dir, base = dir, out = []) {
  * Compare two directory trees both ways by sha256. `ignore` holds relative paths
  * that may exist only in `committed`. Returns { same, missing, extra, differ, files }.
  */
-export function compareDirs(generated, committed, ignore = []) {
+const isZip = (b) => b.length >= 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 3 && b[3] === 4
+
+/**
+ * Same zip content: the same entries in the same order with the same uncompressed bytes.
+ * Deflate output isn't stable across zlib builds (Node's bundled zlib vs a system zlib,
+ * CPU-specific code paths), so regenerated zips may differ in their compressed bytes only.
+ */
+export function sameZipContent(a, b) {
+  if (!isZip(a) || !isZip(b)) return false
+  const ea = zipEntries(a), eb = zipEntries(b)
+  if (!ea || !eb || ea.length !== eb.length) return false
+  return ea.every((e, i) => e.name === eb[i].name && Buffer.from(zipRead(a, e)).equals(Buffer.from(zipRead(b, eb[i]))))
+}
+
+/**
+ * Compare two directory trees both ways. `ignore` holds relative paths that may exist only
+ * in `committed`. Files match when their bytes are equal, or (zips) when their content is
+ * (sameZipContent), or when `equal(rel, generatedBuf, committedBuf)` says so.
+ * Returns { same, missing, extra, differ, zipRecompressed, files }.
+ */
+export function compareDirs(generated, committed, ignore = [], equal = null) {
   const g = new Set(listFiles(generated)), c = new Set(listFiles(committed))
   const skip = new Set(ignore)
   const missing = [...g].filter((f) => !c.has(f)).sort() // generated but not committed
   const extra = [...c].filter((f) => !g.has(f) && !skip.has(f)).sort() // committed but not generated (stale)
-  const differ = [...g].filter((f) => c.has(f) && sha256(fs.readFileSync(path.join(generated, f))) !== sha256(fs.readFileSync(path.join(committed, f)))).sort()
-  return { same: !missing.length && !extra.length && !differ.length, missing, extra, differ, files: g.size }
+  const differ = [], zipRecompressed = []
+  for (const f of [...g].filter((f) => c.has(f)).sort()) {
+    const a = fs.readFileSync(path.join(generated, f)), b = fs.readFileSync(path.join(committed, f))
+    if (a.equals(b)) continue
+    if (sameZipContent(a, b)) { zipRecompressed.push(f); continue }
+    if (equal?.(f, a, b)) continue
+    differ.push(f)
+  }
+  return { same: !missing.length && !extra.length && !differ.length, missing, extra, differ, zipRecompressed, files: g.size }
 }
 
 export function reportCompare(r, label) {
   for (const f of r.differ) console.log(`DIFF    ${f}`)
   for (const f of r.missing) console.log(`MISSING ${f} (generated, not committed)`)
   for (const f of r.extra) console.log(`EXTRA   ${f} (committed, not generated: stale?)`)
-  console.log(r.same ? `${label}: ${r.files} files byte-identical, no missing or extra files` : `${label}: ${r.differ.length} differ, ${r.missing.length} missing, ${r.extra.length} extra`)
+  const z = r.zipRecompressed?.length ? ` (${r.zipRecompressed.length} zips with identical content but different deflate bytes: another zlib build)` : ""
+  console.log(r.same ? `${label}: ${r.files} files identical, no missing or extra files${z}` : `${label}: ${r.differ.length} differ, ${r.missing.length} missing, ${r.extra.length} extra${z}`)
   return r.same
 }
 
@@ -609,14 +637,17 @@ export function parseFlags(argv, flags, withValue = []) {
 
 // ---------------------------------------------------------------- zip writer (fixture generators)
 
-/** Deterministic zip: fixed DOS timestamp (1980-01-01), deflate unless that's not smaller. */
-export function zip(files) {
+/**
+ * Zip with a fixed DOS timestamp (1980-01-01), deflate (level 9 by default) unless that's not
+ * smaller. Deterministic for a given zlib build; other zlib builds may deflate differently.
+ */
+export function zip(files, { level = 9 } = {}) {
   const locals = [], centrals = []
   let off = 0
   for (const [name, content] of files) {
     const data = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8")
     const nameBuf = Buffer.from(name, "utf8")
-    const deflated = deflateRawSync(data, { level: 9 })
+    const deflated = deflateRawSync(data, { level })
     const store = deflated.length >= data.length
     const body = store ? data : deflated
     const crc = crc32(data)

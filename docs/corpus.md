@@ -15,7 +15,7 @@ The scripts are plain Node ESM (Node ≥ 24), with no dependencies.
 node scripts/corpus/fetch.mjs          # SheetJS test_files -> test/corpus/.cache/sheetjs (pinned, idempotent; --timeout SEC, default 900)
 node scripts/corpus/generate.mjs       # our fixtures -> test/corpus/generated (deterministic)
 node scripts/corpus/generate.mjs --check
-node scripts/corpus/hidden-rows/generate.mjs --check   # hidden-row fixtures are byte-identical when regenerated
+node scripts/corpus/hidden-rows/generate.mjs --check   # hidden-row fixtures regenerate identically (zips by content)
 node scripts/corpus/hidden-rows/manifest.mjs    # test/corpus/hidden-rows/manifest.json
 node scripts/corpus/manifest.mjs       # full manifest -> test/corpus/.cache/manifest.json (gitignored)
 node scripts/corpus/oracle.mjs         # expected output -> test/corpus/.cache/expected/<sha256>.json
@@ -365,7 +365,12 @@ themselves. This is a deliberate difference from SheetJS, which drops hidden row
 ## Generated fixtures (`test/corpus/generated/`)
 
 `generate.mjs` writes them. The output is deterministic (`--check` regenerates it into
-a temp dir and compares). Zips are rebuilt with fixed timestamps, and document properties
+a temp dir and compares). A caveat for zips (xlsx, xlsb, ods): deflate output depends on the
+zlib build. Node's bundled zlib and a system zlib, or different CPUs, can compress the same
+data differently. So `--check` compares zips by content: the same entries in the same order,
+with identical uncompressed bytes. It reports how many differ only in their deflate bytes.
+Every other file, and the committed `README.json` against the committed bytes, must match
+exactly. Zips are rebuilt with fixed timestamps, and document properties
 are fixed (author `effect-spreadsheet`, 2026-01-01). They are our own files (MIT). They
 are generated with SheetJS 0.20.3 at script time (never a dependency). Where the SheetJS
 writer can't express a case, they are built or patched by hand.
