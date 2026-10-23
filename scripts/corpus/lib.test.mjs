@@ -128,3 +128,11 @@ test("compareDirs reports tampered zips as DIFF with the reason, recompressed on
     assert.match(r.reasons["ts.xlsx"], /central header fields/)
   } finally { fs.rmSync(g, { recursive: true, force: true }); fs.rmSync(c, { recursive: true, force: true }) }
 })
+
+test("zipDiff: a local header whose method or compressed size disagrees with its central header", async () => {
+  const { zipDiff, base, offsets } = await zipFixtures()
+  const m = Buffer.from(base); m.writeUInt16LE(0, offsets(m).local[0] + 8) // local says stored, central says deflate
+  assert.match(zipDiff(base, m), /not a plain zip/)
+  const c = Buffer.from(base); c.writeUInt32LE(c.readUInt32LE(offsets(c).local[0] + 18) + 1, offsets(c).local[0] + 18)
+  assert.match(zipDiff(base, c), /not a plain zip/)
+})

@@ -588,6 +588,8 @@ function zipLayout(buf) {
     const nlen = buf.readUInt16LE(p + 28), xlen = buf.readUInt16LE(p + 30), clen = buf.readUInt16LE(p + 32)
     const lho = buf.readUInt32LE(p + 42)
     if (lho + 30 > buf.length || buf.readUInt32LE(lho) !== 0x04034b50) return null
+    // within one zip, the local header's method and compressed size must agree with the central one
+    if (buf.readUInt16LE(lho + 8) !== buf.readUInt16LE(p + 10) || buf.readUInt32LE(lho + 18) !== buf.readUInt32LE(p + 20)) return null
     const lnlen = buf.readUInt16LE(lho + 26), lxlen = buf.readUInt16LE(lho + 28)
     const flags = buf.readUInt16LE(p + 8)
     if (flags & 0x0008) return null // data descriptor: not used by our writer
