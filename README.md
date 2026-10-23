@@ -54,7 +54,7 @@ not from the workbook the rows were read from.
 - Delimiter: `delimiter` option, else an Excel `sep=X` first line, else sniffed among `,` `\t` `;` `|` (a count consistent across lines wins, then frequency).
 - RFC 4180 quoting; LF / CRLF / CR line breaks; ragged rows; blank lines are empty rows; empty fields produce no cell.
 - Lenient by default: text after a closing quote is appended (`"ab"c` → `abc`), an unterminated quote runs to end of input. `strict: true` makes both `MalformedFile`.
-- `inferTypes` (default `false`): booleans (any case), decimal numbers, Excel error literals. A number is an optional sign, digits with no leading zeros (`0.5` is fine, `007` stays text), an optional fraction (`1.`, `.5`) and an optional exponent (`1e21`, `1E-3`), with at most 15 significant digits and a finite value (`1e999` stays text); `-0` becomes `0`. Never dates, `%`, currency, thousands separators, hex or formulas.
+- `inferTypes` (default `false`): booleans (any case), decimal numbers, Excel error literals. A number is an optional sign, digits with no leading zeros (`0.5` is fine, `007` stays text), an optional fraction (`1.`, `.5`) and an optional exponent (`1e21`, `1E-3`), with at most 15 digits, not counting leading zeros (`1000000000000000` and `1.000000000000000` stay text), and a finite value (`1e999` stays text); `-0` becomes `0`. Never dates, `%`, currency, thousands separators, hex or formulas.
 
 ### Comparison with other readers
 

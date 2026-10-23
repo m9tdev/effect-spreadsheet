@@ -272,6 +272,19 @@ describe("csv: type inference", () => {
     ])
   })
 
+  it("at most 15 digits, not counting leading zeros", async () => {
+    const inputs = ["1000000000000000", "1.000000000000000", "100000000000000", "1.00000000000000", "0.000000000000001", "-0.00000000000000123456789012345"]
+    const rows = await Effect.runPromise(csvRows(inputs.join(",") + "\n", { inferTypes: true }))
+    assert.deepStrictEqual(rows[0]!.cells.map((c) => [c._tag, Cell.value(c)]), [
+      ["Text", "1000000000000000"],
+      ["Text", "1.000000000000000"],
+      ["Number", 100000000000000],
+      ["Number", 1],
+      ["Number", 1e-15],
+      ["Number", -1.23456789012345e-15]
+    ])
+  })
+
   it("negative zero is inferred as 0", async () => {
     const rows = await Effect.runPromise(csvRows("-0,-0.0,-0e5,+0\n", { inferTypes: true }))
     for (const cell of rows[0]!.cells) assert.isTrue(Object.is(Cell.value(cell), 0), String(Cell.value(cell)))
