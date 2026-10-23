@@ -334,6 +334,28 @@ describe("csv: workbook", () => {
       assert.strictEqual(e._tag === "LimitExceeded" && e.limit, "maxRows")
     }))
 
+  it.effect("limits from the layer at read time stay with the workbook (rows streamed outside that scope)", () =>
+    Effect.gen(function*() {
+      const bytes = enc("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")
+      for (const open of [Csv.read(bytes), Spreadsheet.read(bytes)]) {
+        const wb = yield* open.pipe(Effect.provide(SpreadsheetLimits.layer({ maxRows: 3 })))
+        assert.strictEqual(wb.limits.maxRows, 3)
+        const error = yield* Effect.flip(Stream.runCollect(Workbook.rows(wb, 0)))
+        assert.deepStrictEqual(error._tag === "LimitExceeded" && [error.limit, error.max], ["maxRows", 3])
+        // a different layer at streaming time doesn't change them
+        const still = yield* Effect.flip(Stream.runCollect(Workbook.rows(wb, 0))).pipe(
+          Effect.provide(SpreadsheetLimits.layer({ maxRows: 100 }))
+        )
+        assert.strictEqual(still._tag === "LimitExceeded" && still.max, 3)
+        // rows options apply on top
+        const raised = yield* Stream.runCollect(Workbook.rows(wb, 0, { limits: { maxRows: 10 } }))
+        assert.strictEqual(Array.from(raised).length, 10)
+      }
+      // read-call overrides are kept too
+      const wb = yield* Csv.read(bytes, { limits: { maxColumns: 1, maxRows: 4 } })
+      assert.deepStrictEqual([wb.limits.maxColumns, wb.limits.maxRows], [1, 4])
+    }))
+
   it.effect("Spreadsheet.read dispatches text to CSV with csv options", () =>
     Effect.gen(function*() {
       const wb = yield* Spreadsheet.read(enc("x;1\n"), { csv: { inferTypes: true } })

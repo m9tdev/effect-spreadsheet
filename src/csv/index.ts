@@ -65,14 +65,16 @@ export interface ReadOptions {
   readonly limits?: SpreadsheetLimits.LimitOverrides | undefined
 }
 
-const resolve = (options: ReadOptions | undefined) =>
-  Effect.map(SpreadsheetLimits.resolve(options?.limits), (limits) => ({
-    encoding: options?.encoding ?? "auto",
-    delimiter: options?.delimiter,
-    inferTypes: options?.inferTypes ?? false,
-    strict: options?.strict ?? false,
-    limits
-  }))
+const resolved = (options: ReadOptions | undefined, limits: SpreadsheetLimits.Limits) => ({
+  encoding: options?.encoding ?? "auto",
+  delimiter: options?.delimiter,
+  inferTypes: options?.inferTypes ?? false,
+  strict: options?.strict ?? false,
+  limits
+})
+
+const toStream = <E, R>(input: Uint8Array | Stream.Stream<Uint8Array, E, R>): Stream.Stream<Uint8Array, E, R> =>
+  input instanceof Uint8Array ? Stream.succeed(input) as Stream.Stream<Uint8Array, E, R> : input
 
 /**
  * Streams the rows of delimited text. A `Uint8Array` is read in 64 KiB
@@ -90,16 +92,15 @@ export const rows: {
   options?: ReadOptions
 ): Stream.Stream<Workbook.Row, E | SpreadsheetError, R> =>
   Stream.unwrap(
-    Effect.map(resolve(options), (resolved) =>
-      rowsFromByteStream(
-        input instanceof Uint8Array ? Stream.succeed(input) as Stream.Stream<Uint8Array, E, R> : input,
-        resolved
-      ))
+    Effect.map(SpreadsheetLimits.resolve(options?.limits), (limits) =>
+      rowsFromByteStream(toStream(input), resolved(options, limits)))
   )) as never
 
 /**
- * Opens delimited text as a one-sheet workbook. For a `Uint8Array`, the
- * size limit is checked here; parsing happens when rows are streamed.
+ * Opens delimited text as a one-sheet workbook. The limits are resolved
+ * here (context plus `options.limits`) and kept in the workbook; for a
+ * `Uint8Array` the size limit is checked here too. Parsing happens when
+ * rows are streamed.
  * A byte-stream input is consumed each time the rows are streamed, so it
  * must be re-runnable to stream them more than once, and may only fail
  * with `SpreadsheetError` (map other errors first, or use {@link rows},
@@ -123,10 +124,7 @@ export const read = (
     return Workbook.make({
       format: "csv",
       sheets: [sheet],
-      rows: (_, rowsOptions) =>
-        rows(input as Stream.Stream<Uint8Array, SpreadsheetError>, {
-          ...options,
-          limits: SpreadsheetLimits.mergePartial(options?.limits, rowsOptions.limits)
-        })
+      limits,
+      rows: (_, effective) => rowsFromByteStream(toStream(input), resolved(options, effective))
     })
   })

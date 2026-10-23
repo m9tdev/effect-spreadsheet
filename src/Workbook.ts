@@ -7,7 +7,7 @@
 import { Effect, Schema, Stream } from "effect"
 import { Cell } from "./Cell.ts"
 import { SheetNotFound, type SpreadsheetError } from "./SpreadsheetError.ts"
-import type { LimitOverrides } from "./SpreadsheetLimits.ts"
+import { type LimitOverrides, type Limits, merge } from "./SpreadsheetLimits.ts"
 
 /**
  * One row. `index` is the 0-based row index in the sheet (rows that hold
@@ -83,7 +83,11 @@ export type SheetInfo = typeof SheetInfo.Type
  * @category models
  */
 export interface RowsOptions {
-  /** Overrides on top of the `SpreadsheetLimits` in context. */
+  /**
+   * Overrides on top of the limits the workbook was read with (the
+   * `SpreadsheetLimits` in context at read time, plus the read call's own
+   * overrides). The context at streaming time doesn't matter.
+   */
   readonly limits?: LimitOverrides | undefined
 }
 
@@ -101,13 +105,18 @@ export interface Workbook {
   /** The format the workbook was read from, e.g. `"csv"`, `"xlsx"`. */
   readonly format: string
   readonly sheets: ReadonlyArray<SheetInfo>
+  /** The limits resolved when the workbook was read; {@link rows} applies its overrides on top. */
+  readonly limits: Limits
   /** @internal */
-  readonly [RowsSource]: (sheet: SheetInfo, options: RowsOptions) => Stream.Stream<Row, SpreadsheetError>
+  readonly [RowsSource]: (sheet: SheetInfo, limits: Limits) => Stream.Stream<Row, SpreadsheetError>
 }
 
 /**
- * Builds a workbook. For format implementations: `rows` is called with a
- * sheet from `sheets` and must give a stream that can be run again.
+ * Builds a workbook. For format implementations: pass the limits resolved
+ * at read time; `rows` is called with a sheet from `sheets` and the
+ * effective limits (those, plus the {@link rows} call's overrides), and
+ * must give a stream that can be run again and that uses exactly these
+ * limits (not the context's).
  *
  * @since 0.1.0
  * @category constructors
@@ -115,10 +124,12 @@ export interface Workbook {
 export const make = (options: {
   readonly format: string
   readonly sheets: ReadonlyArray<SheetInfo>
-  readonly rows: (sheet: SheetInfo, options: RowsOptions) => Stream.Stream<Row, SpreadsheetError>
+  readonly limits: Limits
+  readonly rows: (sheet: SheetInfo, limits: Limits) => Stream.Stream<Row, SpreadsheetError>
 }): Workbook => ({
   format: options.format,
   sheets: options.sheets,
+  limits: options.limits,
   [RowsSource]: options.rows
 })
 
@@ -163,5 +174,5 @@ export const rows = (
 ): Stream.Stream<Row, SpreadsheetError> => {
   const found = findSheet(workbook, sheet)
   if (found === undefined) return Stream.fail(new SheetNotFound({ sheet }))
-  return workbook[RowsSource](found, options ?? {})
+  return workbook[RowsSource](found, merge(workbook.limits, options?.limits))
 }

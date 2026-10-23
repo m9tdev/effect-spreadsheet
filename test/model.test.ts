@@ -91,6 +91,7 @@ describe("SpreadsheetLimits", () => {
 describe("Workbook", () => {
   const wb = Workbook.make({
     format: "test",
+    limits: SpreadsheetLimits.defaults,
     sheets: [
       { name: "Data", index: 0, visibility: "visible" },
       { name: "Hidden", index: 1, visibility: "hidden", dimension: { firstRow: 0, firstColumn: 0, lastRow: 1048575, lastColumn: 16383 } }
