@@ -31,4 +31,10 @@ if (g[key] === undefined) {
   watchdog.unref()
   setInterval(() => watchdog.postMessage(0), BEAT_MS).unref()
   g[key] = watchdog
+  // The settings in use, so a test can check the wiring (not just periods()).
+  ;(globalThis as { [key: symbol]: unknown })[Symbol.for("effect-spreadsheet/test-watchdog-settings")] = {
+    hangMs: HANG_MS,
+    beatMs: BEAT_MS,
+    checkMs: CHECK_MS
+  }
 }

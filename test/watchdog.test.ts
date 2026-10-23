@@ -28,6 +28,28 @@ describe("test watchdog", () => {
     expect([result.code, result.signal]).toEqual([0, null])
   }, 20_000)
 
+  it("this test process runs the watchdog with periods(HANG_MS)", () => {
+    const settings = (globalThis as { [key: symbol]: unknown })[Symbol.for("effect-spreadsheet/test-watchdog-settings")] as
+      | { hangMs: number; beatMs: number; checkMs: number }
+      | undefined
+    const hangMs = Number(process.env["TEST_HANG_MS"] ?? 60_000)
+    expect(settings).toEqual({ hangMs, ...periods(hangMs) })
+  })
+
+  it("a process with a 300 ms limit runs the watchdog with periods(300)", async () => {
+    const out = await new Promise<string>((resolve) => {
+      const child = spawn(process.execPath, [
+        "--input-type=module",
+        "-e",
+        `await import(${JSON.stringify(WATCHDOG)}); console.log(JSON.stringify(globalThis[Symbol.for("effect-spreadsheet/test-watchdog-settings")]))`
+      ], { env: { ...process.env, TEST_HANG_MS: "300" }, stdio: ["ignore", "pipe", "ignore"] })
+      let text = ""
+      child.stdout.on("data", (d) => (text += String(d)))
+      child.on("exit", () => resolve(text))
+    })
+    expect(JSON.parse(out)).toEqual({ hangMs: 300, ...periods(300) })
+  }, 20_000)
+
   it("the heartbeat comes at least 4 times per hang limit (pure check, no timing)", () => {
     // A child process with a 300 ms limit used to be killed while healthy,
     // because the heartbeat was a fixed 500 ms. Checked on the formula, so
