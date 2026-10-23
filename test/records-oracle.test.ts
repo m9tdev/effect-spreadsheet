@@ -54,6 +54,12 @@ describe.skipIf(xlsx === undefined)("toRecords vs SheetJS oracle", () => {
       { header: "first-row" },
       [{ "1": "a", "0": "b", "1.5": "c", "1e+21": "d" }],
       [{ "1.0": "a", "-0": "b", "1.50": "c", "1e21": "d" }]
+    ],
+    "5. numeric header cells with the same number collide": [
+      "1,1.0,x\na,b,c\n",
+      { header: "first-row" },
+      [{ "1": "a", "1_1": "b", x: "c" }],
+      [{ "1": "a", "1.0": "b", x: "c" }]
     ]
   }
   for (const [name, [text, options, expectedOurs, expectedTheirs]] of Object.entries(DIFFERENT)) {

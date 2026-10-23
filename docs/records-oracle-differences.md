@@ -82,6 +82,10 @@ a,b,c,d
 | effect-spreadsheet | `{ "1": "a", "0": "b", "1.5": "c", "1e+21": "d" }` |
 | SheetJS | `{ "1.0": "a", "-0": "b", "1.50": "c", "1e21": "d" }` |
 
+Two header cells with the same number but different text then collide and
+are made unique: with `inferTypes`, `1,1.0,x` gives the keys `"1"`, `"1_1"`,
+`"x"`, while SheetJS gives `"1"`, `"1.0"`, `"x"`.
+
 Without `inferTypes` the header cells are text and the keys are the source
 text, as in SheetJS.
 
