@@ -68,3 +68,23 @@ test("decodeFixture: BOM stripped when present, nothing lost without one", async
   assert.equal(decodeFixture(Buffer.from("a,b"), "utf-8"), "a,b")
   assert.equal(decodeFixture(Buffer.from([0x80, 0x61]), "windows-1252"), "€a")
 })
+
+test("declared-dimension: the cells span is checked, not only the declared size", () => {
+  const q = QUIRKS.find((x) => x.correctCheck === "declared-dimension")
+  assert.throws(() => run(mutate(q, (c) => { c.correct.cells = "A1:C3" })), /correct: cells span A1:B2/)
+  assert.throws(() => run(mutate(q, (c) => { c.correct.declaredCols = 256 })), /correct: declared/)
+})
+
+test("xmlText: rich runs joined, phonetic (<rPh>) runs dropped, entities and _xHHHH_ decoded", async () => {
+  const { xmlText } = await import("./quirks.mjs")
+  assert.equal(xmlText('<t>phonetic</t><rPh sb="0" eb="1"><t>ignored</t></rPh>'), "phonetic")
+  assert.equal(xmlText('<r><t>rich </t></r><r><rPr><b/></rPr><t>bold</t></r>'), "rich bold")
+  assert.equal(xmlText("<t>&lt;a&gt; &amp; &#x1F363; &#233; _x000D__x000A_</t>"), "<a> & 🍣 é \r\n")
+  assert.equal(xmlText("<t/>"), "")
+})
+
+test("unknown field or check method is an error, not a silent pass", () => {
+  const q = QUIRKS[0]
+  assert.throws(() => run(mutate(q, (c) => { c.field = "bogus" })), /unknown field bogus/)
+  assert.throws(() => run(mutate(q, (c) => { c.correctCheck = "bogus" })), /unknown correctCheck bogus/)
+})

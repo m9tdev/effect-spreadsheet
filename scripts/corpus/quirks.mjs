@@ -39,7 +39,7 @@ export function csvFields(text) {
 export function decodeFixture(buf, enc) {
   return new TextDecoder(enc).decode(buf)
 }
-const xmlText = (s) => s
+export const xmlText = (s) => s
   .replace(/<rPh\b[\s\S]*?<\/rPh>/g, "")
   .replace(/<t(?:\s[^>]*)?\/>/g, "")
   .replace(/[\s\S]*?<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g, "$1\u0000").split("\u0000").slice(0, -1).join("")
