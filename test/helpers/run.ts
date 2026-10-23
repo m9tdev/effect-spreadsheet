@@ -1,5 +1,4 @@
-import { Cause, Effect, Exit, Option, Stream } from "effect"
-import { isSpreadsheetError } from "../../src/SpreadsheetError.ts"
+import { Effect, Exit, Option, Stream } from "effect"
 import * as Csv from "../../src/csv/index.ts"
 import type { SpreadsheetError } from "../../src/SpreadsheetError.ts"
 import type { Row } from "../../src/Workbook.ts"
@@ -46,14 +45,4 @@ export const splitAt = (bytes: Uint8Array, cuts: ReadonlyArray<number>): Array<U
 export const failureOf = <A, E>(exit: Exit.Exit<A, E>): E | undefined =>
   Exit.isFailure(exit) ? Option.getOrUndefined(Exit.findErrorOption(exit)) : undefined
 
-/**
- * "value" for success, "typed" for a SpreadsheetError failure, "defect" for
- * anything else (die, interrupt, untyped failure) with the pretty cause.
- */
-export const classify = <A, E>(exit: Exit.Exit<A, E>): { kind: "value" | "typed" | "defect"; detail?: string } => {
-  if (Exit.isSuccess(exit)) return { kind: "value" }
-  const cause = exit.cause
-  if (Cause.hasDies(cause) || Cause.hasInterrupts(cause)) return { kind: "defect", detail: Cause.pretty(cause) }
-  const error = Option.getOrUndefined(Exit.findErrorOption(exit))
-  return isSpreadsheetError(error) ? { kind: "typed" } : { kind: "defect", detail: Cause.pretty(cause) }
-}
+export { classify } from "./classify.ts"
