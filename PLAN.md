@@ -27,7 +27,7 @@ API, harness and limits end to end.
 Not in v1: formula evaluation, charts, images, cell styling beyond number
 formats, and encrypted files (they get a typed `Encrypted` error). Full
 SSF-style formatted text (`w`) comes later: v1 gives the typed value plus the
-number-format code and a date flag. A port of SSF, with attribution, can follow.
+number-format code and a date flag. Our own number-format renderer can follow (SSF is a behaviour reference only).
 
 ## API sketch (names final, details may move)
 
@@ -112,8 +112,10 @@ Spreadsheet.toRecords(rows, { header: "first-row" | number | string[] }) // like
 
 ## Licensing
 
-The project is licensed MIT. SheetJS (Apache-2.0) is a reference: we learn
-from it but don't copy its code. If a file is ever derived from SheetJS, it
-stays Apache-2.0, keeps a header naming the SheetJS source file and
-copyright, and `NOTICE` lists it. Test fixtures written by the SheetJS writer
-carry SheetJS boilerplate; `NOTICE` notes that too.
+The repo and the npm package are plain MIT, with no third-party code: no
+Apache-2.0 code, no `NOTICE`, no `LICENSE-APACHE-2.0`. SheetJS is a test
+oracle and a behaviour reference only: we learn its behaviour, but never
+copy its code or closely follow its structure. It is loaded only in tests
+and corpus scripts, from `$SHEETJS_DIR` (default `~/sheetjs`). Corpus
+fixtures made with the SheetJS writer are generated at script time, with
+the writer's boilerplate parts stripped.
