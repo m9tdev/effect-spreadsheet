@@ -107,7 +107,9 @@ How `records.ts` uses it:
   4.6) and call `make`. If the header row is missing (sparse rows skip it), call
   `make([])`: every column gets an `__EMPTY…` key (test "header row missing from
   sparse rows").
-- `header: [...]`: `make(array.map((name, i) => [i, name]))`. The API drops
+- `header: [...]`: build the entries with an index loop over the array (not
+  `map`, which keeps holes), one `[i, name]` per string entry; a hole,
+  `undefined` or `null` drops that column. The API also drops
   columns at or past `array.length` (test "explicit header names; extra columns
   dropped"), so the caller never calls `key` for them. Recommended: run explicit
   names through the same de-duplication, so `["x", "x"]` doesn't lose data.

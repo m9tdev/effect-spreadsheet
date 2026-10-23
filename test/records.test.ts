@@ -57,6 +57,18 @@ describe("toRecords", () => {
     assert.deepStrictEqual(recs(rows, { header: ["x", "y"] }), [{ x: 1, y: 2 }, { x: 4, y: 5 }])
   })
 
+  it("explicit header with a hole, undefined or null drops that column", async () => {
+    const rows = await rowsOf("1,2,3\n")
+    const sparse: Array<string> = new Array(3)
+    sparse[0] = "x"
+    sparse[2] = "y"
+    assert.deepStrictEqual(recs(rows, { header: sparse }), [{ x: 1, y: 3 }])
+    assert.deepStrictEqual(recs(rows, { header: ["x", undefined as unknown as string, "y"] }), [{ x: 1, y: 3 }])
+    assert.deepStrictEqual(recs(rows, { header: ["x", null as unknown as string, "y"] }), [{ x: 1, y: 3 }])
+    // dropped columns get no defval either
+    assert.deepStrictEqual(recs(await rowsOf("1\n"), { header: sparse, defval: 0 }), [{ x: 1, y: 0 }])
+  })
+
   it("explicit header names are de-duplicated too, so no column is lost", async () => {
     const rows = await rowsOf("1,2,3,4\n")
     assert.deepStrictEqual(recs(rows, { header: ["x", "x", "", "x_1"] }), [{ x: 1, x_1: 2, __EMPTY: 3, x_1_1: 4 }])

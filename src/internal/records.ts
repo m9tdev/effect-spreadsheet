@@ -63,6 +63,8 @@ export class RecordBuilder {
   private namer: RecordKeys.RecordKeys | undefined
   /** With an explicit `header: [...]`, columns at or past its length are dropped. */
   private readonly explicitLength: number | undefined
+  /** Explicit-header columns given no name (a hole, `undefined`, `null`): dropped. */
+  private readonly dropped = new Set<number>()
   private cells = 0
   private fills = 0
   /** Keys written so far (cells and fills); callers diff it to size batches. */
@@ -78,10 +80,19 @@ export class RecordBuilder {
     this.maxFills = limits.maxRecordFields
     const header = options.header
     if (typeof header !== "string" && typeof header !== "number") {
-      const names = header as ReadonlyArray<string>
+      const names = header as ReadonlyArray<string | null | undefined>
       this.explicitLength = names.length
-      // explicit names go through the same de-duplication: ["x", "x"] -> x, x_1
-      this.namer = RecordKeys.make(names.map((name, column): RecordKeys.HeaderEntry => [column, name]))
+      // An index loop, not `map`: `map` keeps holes, and a hole, `undefined`
+      // or `null` drops that column. Strings (also "") are names; explicit
+      // names go through the same de-duplication: ["x", "x"] -> x, x_1.
+      // progress: column increases by one up to names.length
+      const entries: Array<RecordKeys.HeaderEntry> = []
+      for (let column = 0; column < names.length; column++) {
+        const name = names[column]
+        if (typeof name === "string") entries.push([column, name])
+        else this.dropped.add(column)
+      }
+      this.namer = RecordKeys.make(entries)
     } else {
       this.explicitLength = undefined
     }
@@ -156,7 +167,7 @@ export class RecordBuilder {
     const limit = this.explicitLength
     // progress: one cell per iteration
     for (const cell of row.cells) {
-      if (limit !== undefined && cell.column >= limit) continue
+      if (limit !== undefined && (cell.column >= limit || this.dropped.has(cell.column))) continue
       const key = namer.key(cell.column)
       const v = Cell.value(cell)
       if (v === undefined) {
