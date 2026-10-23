@@ -6,15 +6,10 @@
  * Times use the monotonic performance.now(), so clock changes do not matter.
  */
 import { Worker } from "node:worker_threads"
+import { periods } from "./watchdog-periods.ts"
 
 const HANG_MS = Number(process.env["TEST_HANG_MS"] ?? 60_000)
-/**
- * Heartbeat and check periods: at least 4 heartbeats per HANG_MS, so a
- * healthy but busy process never looks blocked (a 500 ms beat with a 300 ms
- * limit used to kill healthy processes under load).
- */
-const BEAT_MS = Math.max(1, Math.min(500, Math.floor(HANG_MS / 4)))
-const CHECK_MS = Math.max(1, Math.min(250, Math.floor(HANG_MS / 4)))
+const { beatMs: BEAT_MS, checkMs: CHECK_MS } = periods(HANG_MS)
 
 const key = Symbol.for("effect-spreadsheet/test-watchdog")
 const g = globalThis as { [key]?: Worker }

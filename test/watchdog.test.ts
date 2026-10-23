@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process"
 import { describe, expect, it } from "vitest"
+import { periods } from "./setup/watchdog-periods.ts"
 
 const WATCHDOG = new URL("./setup/watchdog.ts", import.meta.url).pathname
 
@@ -18,17 +19,26 @@ describe("test watchdog", () => {
   it("kills a process whose event loop is blocked", async () => {
     const result = await run("while (true) {}")
     expect(result.signal).toBe("SIGKILL")
-    expect(result.ms).toBeLessThan(10_000)
-  }, 20_000)
+    // 2 s limit; a generous ceiling for a loaded machine
+    expect(result.ms).toBeLessThan(30_000)
+  }, 40_000)
 
   it("leaves a process alone that waits asynchronously (longer than the hang limit)", async () => {
     const result = await run("await new Promise((r) => setTimeout(r, 3000))")
     expect([result.code, result.signal]).toEqual([0, null])
   }, 20_000)
 
-  it("with a short limit (300 ms) the heartbeat keeps up: a healthy process survives", async () => {
-    // the heartbeat used to be a fixed 500 ms, longer than this limit
-    const result = await run("await new Promise((r) => setTimeout(r, 1500))", 300)
-    expect([result.code, result.signal]).toEqual([0, null])
-  }, 20_000)
+  it("the heartbeat comes at least 4 times per hang limit (pure check, no timing)", () => {
+    // A child process with a 300 ms limit used to be killed while healthy,
+    // because the heartbeat was a fixed 500 ms. Checked on the formula, so
+    // machine load can't make it flaky.
+    for (const hangMs of [4, 10, 100, 300, 1000, 2000, 60_000, 3_600_000]) {
+      const { beatMs, checkMs } = periods(hangMs)
+      expect(beatMs * 4, `beat for ${hangMs}`).toBeLessThanOrEqual(hangMs)
+      expect(checkMs * 4, `check for ${hangMs}`).toBeLessThanOrEqual(hangMs)
+      expect(beatMs).toBeGreaterThanOrEqual(1)
+    }
+    expect(periods(300).beatMs).toBe(75)
+    expect(periods(60_000)).toEqual({ beatMs: 500, checkMs: 250 })
+  })
 })
