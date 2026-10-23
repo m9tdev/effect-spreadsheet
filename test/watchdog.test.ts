@@ -36,9 +36,8 @@ describe("test watchdog", () => {
   it("kills a process whose event loop is blocked", async () => {
     const result = await run("while (true) {}")
     expect(result.signal).toBe("SIGKILL")
+    // the watchdog did it (2 s limit), not the helper's 30 s deadline
     expect(result.killedByTest).toBe(false)
-    // 2 s limit; a generous ceiling for a loaded machine
-    expect(result.ms).toBeLessThan(30_000)
   }, 40_000)
 
   it("a child the watchdog doesn't stop is killed at the test's deadline, never left running", async () => {
