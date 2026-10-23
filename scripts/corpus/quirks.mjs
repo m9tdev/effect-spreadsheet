@@ -34,10 +34,10 @@ export function csvFields(text) {
   rows.forEach((row, r) => row.forEach((x, c) => { if (x.f !== "" || x.any) m.set(`${r},${c}`, x.f) }))
   return m
 }
-const BOMS = { "utf-8": 3, "utf-16be": 2, "utf-16le": 2, "windows-1252": 0 }
-function decodeFixture(buf, enc) {
-  const skip = enc === "utf-8" && buf[0] === 0xef ? 3 : enc.startsWith("utf-16") ? BOMS[enc] : 0
-  return new TextDecoder(enc).decode(buf.subarray(skip))
+// TextDecoder strips a leading BOM itself for utf-8 and utf-16 (ignoreBOM is false by
+// default), so nothing is skipped here: a BOM-less file keeps its first character.
+export function decodeFixture(buf, enc) {
+  return new TextDecoder(enc).decode(buf)
 }
 const xmlText = (s) => s
   .replace(/<rPh\b[\s\S]*?<\/rPh>/g, "")

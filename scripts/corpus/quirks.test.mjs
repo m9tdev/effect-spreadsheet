@@ -56,3 +56,15 @@ test("csvFields: quotes, escaped quotes, explicit empty field, line endings", ()
   assert.equal(m.has("1,1"), false) // unquoted empty is no cell
   assert.equal(m.get("2,0"), "3")
 })
+
+test("decodeFixture: BOM stripped when present, nothing lost without one", async () => {
+  const { decodeFixture } = await import("./quirks.mjs")
+  const be = (s) => { const b = Buffer.from(s, "utf16le"); b.swap16(); return b }
+  assert.equal(decodeFixture(Buffer.concat([Buffer.from([0xfe, 0xff]), be("a,b")]), "utf-16be"), "a,b")
+  assert.equal(decodeFixture(be("a,b"), "utf-16be"), "a,b") // no BOM: the first character survives
+  assert.equal(decodeFixture(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("a,b", "utf16le")]), "utf-16le"), "a,b")
+  assert.equal(decodeFixture(Buffer.from("a,b", "utf16le"), "utf-16le"), "a,b")
+  assert.equal(decodeFixture(Buffer.from("\ufeffa,b"), "utf-8"), "a,b")
+  assert.equal(decodeFixture(Buffer.from("a,b"), "utf-8"), "a,b")
+  assert.equal(decodeFixture(Buffer.from([0x80, 0x61]), "windows-1252"), "€a")
+})
