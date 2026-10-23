@@ -1,8 +1,8 @@
 import { describe, it } from "@effect/vitest"
-import { Stream } from "effect"
+import { Effect, Stream } from "effect"
 import fc from "fast-check"
 import { expect } from "vitest"
-import { csvAoa, enc, splitAt } from "./helpers/run.ts"
+import { csvAoa, csvExit, csvRows, enc, failureOf, splitAt } from "./helpers/run.ts"
 
 /** Independent, naive reference for the lenient parser (whole string at once). */
 const reference = (text: string, delimiter: string): Array<Array<string | undefined>> => {
@@ -77,6 +77,23 @@ describe("csv properties", () => {
         expect(dense(ours)).toEqual(reference(text, ","))
       }),
       { numRuns: 300 }
+    )
+  })
+
+  it("maxCellsPerSheet counts exactly the emitted cells", async () => {
+    await fc.assert(
+      fc.asyncProperty(csvText, async (text) => {
+        const rows = await Effect.runPromise(csvRows(text))
+        const cells = rows.reduce((n, r) => n + r.cells.length, 0)
+        // exactly enough passes, one less fails with maxCellsPerSheet
+        const ok = await csvExit(text, { limits: { maxCellsPerSheet: cells } })
+        expect(ok._tag).toBe("Success")
+        if (cells > 0) {
+          const error = failureOf(await csvExit(text, { limits: { maxCellsPerSheet: cells - 1 } }))
+          expect(error?._tag === "LimitExceeded" && error.limit).toBe("maxCellsPerSheet")
+        }
+      }),
+      { numRuns: 200 }
     )
   })
 

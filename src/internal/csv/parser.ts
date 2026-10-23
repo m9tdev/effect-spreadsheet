@@ -138,6 +138,7 @@ export class CsvParser {
     const value = this.field
     this.field = ""
     this.state = State.FieldStart
+    // An empty field emits no cell; every emitted cell counts.
     if (value.length === 0) return
     const maxCells = this.options.limits.maxCellsPerSheet
     if (++this.cellCount > maxCells) {

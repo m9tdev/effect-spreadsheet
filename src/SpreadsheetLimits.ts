@@ -33,7 +33,11 @@ export interface Limits {
   readonly maxRows: number
   /** Columns per row: column indexes must be `< maxColumns`. */
   readonly maxColumns: number
-  /** Cells actually present (non-empty) in one sheet. */
+  /**
+   * Cells emitted for one sheet: every cell in every `Row.cells`, `Empty`
+   * cells included (a styled blank in XLSX counts). Positions without a
+   * cell (sparse gaps, CSV empty fields) don't count.
+   */
   readonly maxCellsPerSheet: number
   /**
    * `defval` fills written by `Spreadsheet.toRecords` in one run (keys
