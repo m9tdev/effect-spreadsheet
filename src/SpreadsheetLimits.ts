@@ -35,6 +35,13 @@ export interface Limits {
   readonly maxColumns: number
   /** Cells actually present (non-empty) in one sheet. */
   readonly maxCellsPerSheet: number
+  /**
+   * `defval` fills written by `Spreadsheet.toRecords` in one run (keys
+   * added for header columns a row has no value in). Smaller than
+   * `maxCellsPerSheet`, since a wide header times many short rows would
+   * otherwise cost far more than the cells present.
+   */
+  readonly maxRecordFields: number
   /** Length of one string value (cell text, shared string), in UTF-16 code units. */
   readonly maxStringLength: number
   /** Entries in a shared-string table. */
@@ -69,6 +76,7 @@ export type LimitOverrides = { readonly [K in keyof Limits]?: number | undefined
  * | maxRows | 1 048 576 | Excel's row limit |
  * | maxColumns | 16 384 | Excel's column limit (XFD) |
  * | maxCellsPerSheet | 20 000 000 | about 1M rows x 20 columns |
+ * | maxRecordFields | 1 048 576 | defval fills per toRecords run: ~1M keys, well under a second |
  * | maxStringLength | 262 144 | 8x Excel's 32 767-character cell limit, room for CSV blobs |
  * | maxSharedStrings | 5 000 000 | |
  * | maxXmlDepth | 128 | worksheet XML is about 6 levels deep |
@@ -87,6 +95,7 @@ export const defaults: Limits = {
   maxRows: 1_048_576,
   maxColumns: 16_384,
   maxCellsPerSheet: 20_000_000,
+  maxRecordFields: 1_048_576,
   maxStringLength: 262_144,
   maxSharedStrings: 5_000_000,
   maxXmlDepth: 128,

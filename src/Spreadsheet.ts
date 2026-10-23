@@ -7,7 +7,7 @@
 import { Effect, Stream } from "effect"
 import type * as Cell from "./Cell.ts"
 import * as Csv from "./csv/index.ts"
-import { RecordBuilder, type RecordsOptions } from "./internal/records.ts"
+import { type RecordsOptions, recordsStream } from "./internal/records.ts"
 import { detect } from "./internal/sniff.ts"
 import { LimitExceeded, type SpreadsheetError, UnsupportedFormat } from "./SpreadsheetError.ts"
 import * as SpreadsheetLimits from "./SpreadsheetLimits.ts"
@@ -111,10 +111,16 @@ export const readCsv: (
  *
  * Header names are made unique like SheetJS (`__EMPTY`, `name_1`, ...).
  * A column with no header cell is named `__EMPTY_k` when a data cell first
- * appears in it, and `defval` fills only the header-named columns, so the
- * cost follows the cells present. Every key written (fills included) counts
- * against `maxCellsPerSheet` for the run; going over fails with
- * `LimitExceeded`.
+ * appears in it, and `defval` fills only the header-named columns.
+ *
+ * Cost is bounded per run: every cell of the rows (Empty included) counts
+ * against `maxCellsPerSheet`, every `defval` fill against `maxRecordFields`;
+ * going over fails with `LimitExceeded` after the records built so far.
+ * Records come out in batches of about 64 Ki keys, yielding in between, so a
+ * wide header times many rows doesn't block the event loop. The limits come
+ * from the `SpreadsheetLimits` in context where the records are produced
+ * (plus `options.limits`), not from the workbook the rows came from.
+ *
  * Values are `Cell.value`s (text, number, boolean, Date, error code).
  * Rows without values are skipped unless `blankRows: true`.
  *
@@ -134,29 +140,13 @@ export const toRecords: {
     options: RecordsOptions<D>
   ): Effect.Effect<Array<Record<string, Cell.Value | D>>, LimitExceeded>
 } = (<E, R>(rows: Stream.Stream<Row, E, R> | Iterable<Row>, options: RecordsOptions<unknown>) => {
-  if (Stream.isStream(rows)) {
-    return Stream.unwrap(Effect.map(SpreadsheetLimits.resolve(options.limits), (limits) =>
-      Stream.suspend(() => {
-        const builder = new RecordBuilder(options, limits.maxCellsPerSheet)
-        return (rows as Stream.Stream<Row, E, R>).pipe(
-          Stream.mapArray((chunk) => [pushAll(builder, chunk)] as const),
-          Stream.flatMap((out) => Array.isArray(out) ? Stream.fromArray(out) : Stream.fail(out as LimitExceeded))
-        )
-      })))
-  }
-  return Effect.flatMap(SpreadsheetLimits.resolve(options.limits), (limits) => {
-    const out = pushAll(new RecordBuilder(options, limits.maxCellsPerSheet), rows as Iterable<Row>)
-    return Array.isArray(out) ? Effect.succeed(out) : Effect.fail(out as LimitExceeded)
-  })
+  const stream = Stream.unwrap(
+    Effect.map(SpreadsheetLimits.resolve(options.limits), (limits) =>
+      recordsStream(
+        Stream.isStream(rows) ? rows as Stream.Stream<Row, E, R> : Stream.fromIterable(rows as Iterable<Row>),
+        options,
+        limits
+      ))
+  )
+  return Stream.isStream(rows) ? stream : Effect.map(Stream.runCollect(stream), (chunk) => Array.from(chunk))
 }) as never
-
-const pushAll = (builder: RecordBuilder, rows: Iterable<Row>): Array<Record<string, unknown>> | LimitExceeded => {
-  const out: Array<Record<string, unknown>> = []
-  // progress: one row per iteration
-  for (const row of rows) {
-    const record = builder.push(row)
-    if (record instanceof LimitExceeded) return record
-    if (record !== undefined) out.push(record)
-  }
-  return out
-}

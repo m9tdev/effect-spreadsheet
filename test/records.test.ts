@@ -1,6 +1,6 @@
 import { assert, describe, expect, expectTypeOf, it } from "@effect/vitest"
 import type { LimitExceeded } from "../src/SpreadsheetError.ts"
-import { Effect, Stream } from "effect"
+import { Cause, Effect, Stream } from "effect"
 import * as Cell from "../src/Cell.ts"
 import * as Csv from "../src/csv/index.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
@@ -99,22 +99,95 @@ describe("toRecords", () => {
     ])
   })
 
-  it.effect("keys written, defval fills included, count against maxCellsPerSheet", () =>
+  it.effect("cells count against maxCellsPerSheet, defval fills against maxRecordFields", () =>
     Effect.gen(function*() {
       const rows = yield* csvRows("a,b,c\n1\n2\n3\n")
-      // 3 records x (3 fills + 1 cell) = 12 keys
-      const ok = yield* Spreadsheet.toRecords(rows, { header: "first-row", defval: null, limits: { maxCellsPerSheet: 12 } })
+      // 3 records x (3 fills + 1 cell): 9 fills, 3 cells
+      const ok = yield* Spreadsheet.toRecords(rows, {
+        header: "first-row",
+        defval: null,
+        limits: { maxCellsPerSheet: 3, maxRecordFields: 9 }
+      })
       assert.strictEqual(ok.length, 3)
-      const error = yield* Effect.flip(
-        Spreadsheet.toRecords(rows, { header: "first-row", defval: null, limits: { maxCellsPerSheet: 11 } })
+      const fills = yield* Effect.flip(
+        Spreadsheet.toRecords(rows, { header: "first-row", defval: null, limits: { maxRecordFields: 8 } })
       )
-      assert.deepStrictEqual([error._tag, error.limit, error.max], ["LimitExceeded", "maxCellsPerSheet", 11])
+      assert.deepStrictEqual([fills._tag, fills.limit, fills.max], ["LimitExceeded", "maxRecordFields", 8])
+      const cells = yield* Effect.flip(
+        Spreadsheet.toRecords(rows, { header: "first-row", limits: { maxCellsPerSheet: 2 } })
+      )
+      assert.deepStrictEqual([cells.limit, cells.max], ["maxCellsPerSheet", 2])
       // the stream variant fails the same way, and the layer applies
       const streamError = yield* Effect.flip(
         Stream.runCollect(Spreadsheet.toRecords(Stream.fromIterable(rows), { header: "first-row", defval: null }))
-      ).pipe(Effect.provide(SpreadsheetLimits.layer({ maxCellsPerSheet: 11 })))
-      assert.strictEqual(streamError._tag === "LimitExceeded" && streamError.limit, "maxCellsPerSheet")
+      ).pipe(Effect.provide(SpreadsheetLimits.layer({ maxRecordFields: 8 })))
+      assert.strictEqual(streamError._tag === "LimitExceeded" && streamError.limit, "maxRecordFields")
     }))
+
+  it.effect("Empty cells count against maxCellsPerSheet", () =>
+    Effect.gen(function*() {
+      const rows: Array<Row> = [
+        { index: 0, hidden: false, cells: [Cell.text(0, "h")] },
+        { index: 1, hidden: false, cells: [Cell.empty(0), Cell.empty(1)] },
+        { index: 2, hidden: false, cells: [Cell.empty(0)] }
+      ]
+      const error = yield* Effect.flip(Spreadsheet.toRecords(rows, { header: "first-row", limits: { maxCellsPerSheet: 2 } }))
+      assert.deepStrictEqual([error.limit, error.actual], ["maxCellsPerSheet", 3])
+    }))
+
+  it.effect("records built before a limit hit in the same chunk are emitted first", () =>
+    Effect.gen(function*() {
+      const got: Array<unknown> = []
+      const stream = Spreadsheet.toRecords(Csv.rows(enc("h\n1\n2\n3\n4"), { inferTypes: true }), {
+        header: "first-row",
+        limits: { maxCellsPerSheet: 2 }
+      })
+      const error = yield* Effect.flip(Stream.runForEach(stream, (r) => Effect.sync(() => got.push(r))))
+      assert.deepStrictEqual(got, [{ h: 1 }, { h: 2 }])
+      assert.strictEqual(error._tag === "LimitExceeded" && error.limit, "maxCellsPerSheet")
+    }))
+
+  it("B1': a 16384-column header times 1300 rows with defval stays fast, bounded and yielding", async () => {
+    const header = Array.from({ length: 16384 }, (_, i) => `c${i}`).join(",")
+    const bytes = enc(header + "\n" + "y\n".repeat(1300))
+    expect(bytes.length).toBeLessThan(110_000)
+    let last = performance.now()
+    let maxGap = 0
+    const timer = setInterval(() => {
+      const now = performance.now()
+      maxGap = Math.max(maxGap, now - last)
+      last = now
+    }, 5)
+    const start = performance.now()
+    let emitted = 0
+    const exit = await Effect.runPromise(Effect.exit(Stream.runForEach(
+      Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null }),
+      () => Effect.sync(() => emitted++)
+    )))
+    const elapsed = performance.now() - start
+    clearInterval(timer)
+    // 1 048 576 fills / 16384 per record = 64 records, then maxRecordFields
+    expect(exit._tag).toBe("Failure")
+    const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : undefined
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxRecordFields", max: 1_048_576 })
+    expect(emitted).toBe(64)
+    expect(elapsed).toBeLessThan(1500)
+    expect(maxGap).toBeLessThan(250)
+    // with the fill budget raised, all 1300 records come out, still yielding
+    maxGap = 0
+    last = performance.now()
+    const timer2 = setInterval(() => {
+      const now = performance.now()
+      maxGap = Math.max(maxGap, now - last)
+      last = now
+    }, 5)
+    const count = await Effect.runPromise(Stream.runCount(
+      Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null, limits: { maxRecordFields: Infinity } })
+    ))
+    clearInterval(timer2)
+    expect(count).toBe(1300)
+    expect(maxGap).toBeLessThan(250)
+  }, 30_000)
 
   it("record values are typed: cell values, plus the defval type", () => {
     const rows: Array<Row> = [{ index: 0, hidden: false, cells: [Cell.text(0, "a")] }]

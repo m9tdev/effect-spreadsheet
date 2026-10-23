@@ -5,8 +5,10 @@
  * @internal
  */
 import * as Cell from "../Cell.ts"
+import { Cause, Effect, Pull, Stream } from "effect"
+import type * as Arr from "effect/Array"
 import { LimitExceeded } from "../SpreadsheetError.ts"
-import type { LimitOverrides } from "../SpreadsheetLimits.ts"
+import type { LimitOverrides, Limits } from "../SpreadsheetLimits.ts"
 import type { Row } from "../Workbook.ts"
 
 export interface RecordsOptions<D = never> {
@@ -21,9 +23,11 @@ export interface RecordsOptions<D = never> {
   /** Keep rows without any value (as `{}`, or filled with `defval`). Default `false`. */
   readonly blankRows?: boolean | undefined
   /**
-   * Overrides on top of the `SpreadsheetLimits` in context. Every key
-   * written to a record (`defval` fills included) counts against
-   * `maxCellsPerSheet`, for the whole run.
+   * Overrides on top of the `SpreadsheetLimits` in the context where the
+   * records are produced (when the stream runs, or the Effect runs), not the
+   * limits a workbook was read with. Per run, every cell of the rows (Empty
+   * included) counts against `maxCellsPerSheet` and every `defval` fill
+   * against `maxRecordFields`.
    */
   readonly limits?: LimitOverrides | undefined
 }
@@ -45,8 +49,9 @@ const headerText = (cell: Cell.Cell): string => {
  *
  * Cost follows the cells present: names live in a sparse map, a column the
  * header row has no cell for is named (`__EMPTY_k`) only when a data cell
- * shows up in it, and `defval` fills only the header-named columns. Every
- * key written (fills included) counts against `maxFields` for the whole run.
+ * shows up in it, and `defval` fills only the header-named columns. For the
+ * whole run, cells (Empty included) count against `maxCellsPerSheet` and
+ * `defval` fills against `maxRecordFields`.
  */
 export class RecordBuilder {
   private readonly names = new Map<number, string>()
@@ -57,14 +62,19 @@ export class RecordBuilder {
   private readonly headerRow: number | undefined
   private readonly firstRow: boolean
   private headerDone: boolean
-  private fields = 0
+  private cells = 0
+  private fills = 0
+  /** Keys written so far (cells and fills); callers diff it to size batches. */
+  keys = 0
 
   private readonly options: RecordsOptions<unknown>
-  private readonly maxFields: number
+  private readonly maxCells: number
+  private readonly maxFills: number
 
-  constructor(options: RecordsOptions<unknown>, maxFields: number) {
+  constructor(options: RecordsOptions<unknown>, limits: { readonly maxCellsPerSheet: number; readonly maxRecordFields: number }) {
     this.options = options
-    this.maxFields = maxFields
+    this.maxCells = limits.maxCellsPerSheet
+    this.maxFills = limits.maxRecordFields
     const header = options.header
     this.firstRow = header === "first-row"
     this.headerRow = typeof header === "number" ? header : undefined
@@ -123,10 +133,19 @@ export class RecordBuilder {
     return name
   }
 
-  private count(n: number): LimitExceeded | undefined {
-    this.fields += n
-    return this.fields > this.maxFields
-      ? new LimitExceeded({ limit: "maxCellsPerSheet", max: this.maxFields, actual: this.fields })
+  private countCells(n: number): LimitExceeded | undefined {
+    this.cells += n
+    this.keys += n
+    return this.cells > this.maxCells
+      ? new LimitExceeded({ limit: "maxCellsPerSheet", max: this.maxCells, actual: this.cells })
+      : undefined
+  }
+
+  private countFills(n: number): LimitExceeded | undefined {
+    this.fills += n
+    this.keys += n
+    return this.fills > this.maxFills
+      ? new LimitExceeded({ limit: "maxRecordFields", max: this.maxFills, actual: this.fills })
       : undefined
   }
 
@@ -153,12 +172,12 @@ export class RecordBuilder {
     let empty = true
     const defval = this.options.defval
     if (defval !== undefined) {
-      const over = this.count(this.headerNames.length)
+      const over = this.countFills(this.headerNames.length)
       if (over !== undefined) return over
       // progress: one header name per iteration
       for (const name of this.headerNames) set(record, name, defval)
     }
-    const over = this.count(row.cells.length)
+    const over = this.countCells(row.cells.length)
     if (over !== undefined) return over
     // progress: one cell per iteration
     for (const cell of row.cells) {
@@ -176,3 +195,60 @@ export class RecordBuilder {
     return record
   }
 }
+
+/** Keys written per emitted batch: the stream yields between batches. */
+export const BATCH_KEYS = 64 * 1024
+
+/**
+ * Rows -> records as a stream. Records come out in batches of about
+ * {@link BATCH_KEYS} keys with a yield before each, so a wide header times
+ * many rows can't block the event loop. When a limit is hit, the records
+ * already built are emitted first, then the stream fails.
+ */
+export const recordsStream = <E, R>(
+  rows: Stream.Stream<Row, E, R>,
+  options: RecordsOptions<unknown>,
+  limits: Limits
+): Stream.Stream<Record<string, unknown>, E | LimitExceeded, R> =>
+  Stream.transformPull(rows, (upstream) =>
+    Effect.sync(() => {
+      const builder = new RecordBuilder(options, limits)
+      const pullUpstream = Pull.catchDone(upstream, () => Effect.succeed(undefined))
+      let chunk: ReadonlyArray<Row> = []
+      let i = 0
+      let upstreamDone = false
+      let failure: LimitExceeded | undefined
+      const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Record<string, unknown>>, E | LimitExceeded> = Effect.gen(
+        function*() {
+          // progress: each iteration consumes >= 1 row of `chunk` (i grows),
+          // pulls one upstream chunk, or ends (done / failure).
+          while (true) {
+            if (failure !== undefined) return yield* Effect.fail(failure)
+            if (i >= chunk.length) {
+              if (upstreamDone) return yield* Cause.done()
+              const next = yield* pullUpstream
+              if (next === undefined) upstreamDone = true
+              else {
+                chunk = next
+                i = 0
+              }
+              continue
+            }
+            yield* Effect.yieldNow
+            const out: Array<Record<string, unknown>> = []
+            const until = builder.keys + BATCH_KEYS
+            // progress: i grows by one per iteration, bounded by chunk.length
+            while (i < chunk.length && builder.keys < until) {
+              const record = builder.push(chunk[i++]!)
+              if (record instanceof LimitExceeded) {
+                failure = record
+                break
+              }
+              if (record !== undefined) out.push(record)
+            }
+            if (out.length > 0) return out as unknown as Arr.NonEmptyReadonlyArray<Record<string, unknown>>
+          }
+        }
+      )
+      return pull
+    }))
