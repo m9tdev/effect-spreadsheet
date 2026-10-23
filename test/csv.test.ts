@@ -274,7 +274,7 @@ describe("csv: type inference", () => {
     ])
   })
 
-  it("at most 15 digits, not counting leading zeros", async () => {
+  it("at most 15 digits before the exponent, not counting leading zeros", async () => {
     const inputs = ["1000000000000000", "1.000000000000000", "100000000000000", "1.00000000000000", "0.000000000000001", "-0.00000000000000123456789012345"]
     const rows = await Effect.runPromise(csvRows(inputs.join(",") + "\n", { inferTypes: true }))
     assert.deepStrictEqual(rows[0]!.cells.map((c) => [c._tag, Cell.value(c)]), [
@@ -284,6 +284,12 @@ describe("csv: type inference", () => {
       ["Number", 1],
       ["Number", 1e-15],
       ["Number", -1.23456789012345e-15]
+    ])
+    // exponent digits don't count toward the 15
+    const exp = await Effect.runPromise(csvRows("123456789012345e10,1234567890123456e-10\n", { inferTypes: true }))
+    assert.deepStrictEqual(exp[0]!.cells.map((c) => [c._tag, Cell.value(c)]), [
+      ["Number", 1.23456789012345e+24],
+      ["Text", "1234567890123456e-10"]
     ])
   })
 
