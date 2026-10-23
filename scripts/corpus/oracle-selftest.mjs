@@ -20,13 +20,20 @@
 //         TZ=UTC) are removed.
 //      G2 runs just the JSON step (READ_OPTIONS + JSON_OPTIONS from oracle-options.mjs)
 //         in a child with TZ=Pacific/Auckland and no TZ=UTC override. This fails when
-//         UTC:true alone is dropped.
+//         UTC:true alone is dropped. The child exits 3 when its zone gives a UTC offset of
+//         0 (an unknown TZ such as Bogus/Zone silently does), so G2 can't pass without
+//         testing anything. ORACLE_SELFTEST_G2_TZ overrides the zone; it is only there to
+//         show that guard working (e.g. ORACLE_SELFTEST_G2_TZ=Bogus/Zone makes G2 fail).
+//         A child that fails or hangs (60 s timeout) is a failed check with its error line.
 //   H. a timeout is not a cached result: after a run where every parse times out
 //      (--timeout 0.001), a run without --force parses those files again.
-// Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B and E: they are skipped, not
-// failed, without it. Linux `ps` for the child lookup. Stale temp dirs from a SIGKILLed
-// run are removed at the next start.
+// Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B, E, F, G and H: they are skipped,
+// not failed, without it (C and D use a fake SheetJS). Linux `ps` for the child lookup.
+// Stale temp dirs from a SIGKILLed run are removed at the next start.
 // Usage: node scripts/corpus/oracle-selftest.mjs
+//   ORACLE_SELFTEST_ONLY=G,H        run only these cases (A-H, G1, G2; unknown names exit 2)
+//   ORACLE_SELFTEST_G2_TIMEOUT_MS=N G2 child timeout in ms (positive integer, default 60000)
+//   ORACLE_SELFTEST_G2_TZ=Zone      G2's zone, only to show the offset-0 guard (e.g. Bogus/Zone)
 
 import { execFileSync, spawn } from "node:child_process"
 import fs from "node:fs"
@@ -35,7 +42,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const { parseFlags, SHEETJS_ENTRY } = await import(path.join(HERE, "lib.mjs"))
+const { childErrorDetail, parseFlags, SHEETJS_ENTRY } = await import(path.join(HERE, "lib.mjs"))
 parseFlags(process.argv.slice(2), []) // no arguments
 const ORACLE = path.join(HERE, "oracle.mjs")
 const MANIFEST = path.join(HERE, "manifest.mjs")
@@ -58,9 +65,9 @@ const childrenOf = (pid) => {
   try { return execFileSync("ps", ["-o", "pid=", "--ppid", String(pid)], { encoding: "utf8" }).split(/\s+/).filter(Boolean).map(Number) } catch { return [] }
 }
 
-let failed = 0
+let failed = 0, ran = 0
 const skip = (name, why) => console.log(`skip ${name}  — ${why}`)
-const check = (name, ok, detail = "") => { console.log(`${ok ? "ok  " : "FAIL"} ${name}${detail ? "  — " + detail : ""}`); if (!ok) failed++ }
+const check = (name, ok, detail = "") => { ran++; console.log(`${ok ? "ok  " : "FAIL"} ${name}${detail ? "  — " + detail : ""}`); if (!ok) failed++ }
 
 function startOracle(env, args) {
   const p = spawn(process.execPath, [ORACLE, "--source", "hidden-rows", "--force", ...args], { env: { ...process.env, CORPUS_CACHE_DIR: tmp, ...env }, stdio: ["ignore", "pipe", "pipe"] })
@@ -129,13 +136,16 @@ async function maxBytesCase(name) {
   check(`${name}: cap ${cap} (between ${chars} chars and ${bytes} bytes) gives tooBig`, second?.d.status === "tooBig" && /over \d+ bytes/.test(second.d.reason ?? ""), `status ${second?.d.status}, reason ${second?.d.reason}`)
 }
 
-async function timeZoneCase(name) {
-  const r = await startOracle({ TZ: "Pacific/Auckland" }, ["--source", "generated", "--format", "xlsx", "--no-probe", "--jobs", "2"]).exited
-  const dir = path.join(tmp, "expected")
-  const doc = fs.readdirSync(dir).filter((f) => !f.includes(".stream.")).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))).find((d) => d.source === "generated" && d.path === "dates.xlsx")
+async function timeZoneCase(name, { g1 = true, g2 = true } = {}) {
   const committed = JSON.parse(fs.readFileSync(path.join(HERE, "..", "..", "test", "corpus", "expected", "generated", "dates.xlsx.json"), "utf8"))
   const want = JSON.stringify(committed.sheets.map((x) => x.rows))
-  check(`${name}1 time zone: oracle under TZ=Pacific/Auckland gives the committed dates.xlsx rows`, r.code === 0 && !!doc && JSON.stringify(doc.sheets.map((x) => x.rows)) === want, doc ? `first value ${JSON.stringify(doc.sheets[0].rows?.[0]?.[0])}` : "no result")
+  if (g1) {
+    const r = await startOracle({ TZ: "Pacific/Auckland" }, ["--source", "generated", "--format", "xlsx", "--no-probe", "--jobs", "2"]).exited
+    const dir = path.join(tmp, "expected")
+    const doc = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => !f.includes(".stream.")).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))).find((d) => d.source === "generated" && d.path === "dates.xlsx") : null
+    check(`${name}1 time zone: oracle under TZ=Pacific/Auckland gives the committed dates.xlsx rows`, r.code === 0 && !!doc && JSON.stringify(doc.sheets.map((x) => x.rows)) === want, doc ? `first value ${JSON.stringify(doc.sheets[0].rows?.[0]?.[0])}` : "no result")
+  }
+  if (!g2) return
   // G2: the JSON step alone, in a child that really runs in Pacific/Auckland (no TZ=UTC override).
   const code = `
     import fs from "node:fs"
@@ -152,10 +162,12 @@ async function timeZoneCase(name) {
   const label = `${name}2 time zone: sheet_to_json with JSON_OPTIONS in a TZ=${env.TZ} child gives the committed rows`
   let got
   try {
-    got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))
+    // a hanging child is a failed check too (ETIMEDOUT); ORACLE_SELFTEST_G2_TIMEOUT_MS is for tests
+    const timeout = G2_TIMEOUT_MS
+    got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout, killSignal: "SIGKILL" }))
   } catch (err) {
     // a failing child (or bad output) is a failed check, not a crash of the whole selftest
-    return check(label, false, (err.stderr?.toString().trim() || err.message).split("\n")[0])
+    return check(label, false, childErrorDetail(err))
   }
   check(label, JSON.stringify(got) === want, `first value ${JSON.stringify(got[0]?.[0]?.[0])}`)
 }
@@ -193,27 +205,56 @@ async function startupCase(name, body, args, expect) {
   check(`${name}: error mentions ${expect}`, r.out.includes(expect))
 }
 
+// ORACLE_SELFTEST_ONLY=G (or "A,C,G"; G1/G2 for one half of G) runs just those cases
+// (used by oracle-selftest.test.mjs). Unset or empty: the full run. Any token that isn't a
+// case (X, G3, "a b", "A;B", an empty token as in "," or " ") is an error (exit 2), so a
+// typo can't select nothing and pass.
+const CASES = ["A", "B", "C", "D", "E", "F", "G", "G1", "G2", "H"]
+// ORACLE_SELFTEST_G2_TIMEOUT_MS: a positive integer (ms), else an error; unset or empty: 60000.
+const g2TimeoutEnv = process.env.ORACLE_SELFTEST_G2_TIMEOUT_MS ?? ""
+if (g2TimeoutEnv !== "" && !(/^\d+$/.test(g2TimeoutEnv) && Number(g2TimeoutEnv) > 0)) {
+  console.error(`oracle-selftest: ORACLE_SELFTEST_G2_TIMEOUT_MS=${JSON.stringify(g2TimeoutEnv)}: expected a positive integer number of milliseconds`)
+  fs.rmSync(tmp, { recursive: true, force: true })
+  process.exit(2)
+}
+const G2_TIMEOUT_MS = g2TimeoutEnv === "" ? 60_000 : Number(g2TimeoutEnv)
+const onlyEnv = process.env.ORACLE_SELFTEST_ONLY ?? ""
+const ONLY = onlyEnv === "" ? null : new Set(onlyEnv.split(",").map((x) => x.trim().toUpperCase()))
+if (ONLY) {
+  const bad = [...ONLY].filter((x) => !CASES.includes(x))
+  if (bad.length) {
+    console.error(`oracle-selftest: ORACLE_SELFTEST_ONLY=${JSON.stringify(onlyEnv)}: unknown case ${bad.map((x) => JSON.stringify(x)).join(", ")} (cases: ${CASES.join(", ")}, comma-separated)`)
+    fs.rmSync(tmp, { recursive: true, force: true })
+    process.exit(2)
+  }
+}
+const wanted = (letter) => !ONLY || ONLY.has(letter)
+const needSheetJS = async (letter, name, fn) => {
+  if (!wanted(letter)) return
+  if (haveSheetJS) await fn()
+  else skip(name, `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+}
 try {
   execFileSync(process.execPath, [MANIFEST], { env: { ...process.env, CORPUS_CACHE_DIR: tmp }, stdio: "ignore" })
-  if (haveSheetJS) {
-    await killCase("A parent SIGKILL", "SIGKILL")
-    await killCase("B parent SIGTERM", "SIGTERM")
-  } else {
-    skip("A parent SIGKILL", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
-    skip("B parent SIGTERM", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  await needSheetJS("A", "A parent SIGKILL", () => killCase("A parent SIGKILL", "SIGKILL"))
+  await needSheetJS("B", "B parent SIGTERM", () => killCase("B parent SIGTERM", "SIGTERM"))
+  if (wanted("C")) await startupCase("C throwing xlsx.js", 'throw new Error("boom from fake xlsx.js")\n', [], "boom from fake xlsx.js")
+  if (wanted("D")) await startupCase("D hanging xlsx.js", "for (;;) {}\n", ["--ready-timeout", "2"], "no ready within 2s")
+  await needSheetJS("E", "E tooBig results", () => tooBigCase("E tooBig results"))
+  await needSheetJS("F", "F MAX_BYTES counts bytes", () => maxBytesCase("F MAX_BYTES counts bytes"))
+  const g1 = wanted("G") || wanted("G1"), g2 = wanted("G") || wanted("G2")
+  if (g1 || g2) {
+    if (haveSheetJS) await timeZoneCase("G", { g1, g2 })
+    else skip("G time zone", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
   }
-  await startupCase("C throwing xlsx.js", 'throw new Error("boom from fake xlsx.js")\n', [], "boom from fake xlsx.js")
-  await startupCase("D hanging xlsx.js", "for (;;) {}\n", ["--ready-timeout", "2"], "no ready within 2s")
-  if (haveSheetJS) await tooBigCase("E tooBig results")
-  else skip("E tooBig results", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
-  if (haveSheetJS) await maxBytesCase("F MAX_BYTES counts bytes")
-  else skip("F MAX_BYTES counts bytes", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
-  if (haveSheetJS) await timeZoneCase("G")
-  else skip("G time zone", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
-  if (haveSheetJS) await retryTimeoutCase("H timeout retried")
-  else skip("H timeout retried", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  await needSheetJS("H", "H timeout retried", () => retryTimeoutCase("H timeout retried"))
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })
 }
-console.log(failed ? `${failed} check(s) failed` : "all oracle self-tests passed")
+const only = ONLY ? ` (only: ${[...ONLY].join(",")})` : ""
+if (ran === 0) {
+  console.log(`no check ran${only}`)
+  process.exit(1)
+}
+console.log(failed ? `${failed} check(s) failed${only}` : ONLY ? `oracle self-tests passed${only}` : "all oracle self-tests passed")
 process.exit(failed ? 1 : 0)

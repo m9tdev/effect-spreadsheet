@@ -905,3 +905,25 @@ export function stripWriterBoilerplate(buf) {
   if (buf.indexOf(tag) >= 0) { const b = Buffer.from(buf); for (let i = b.indexOf(tag); i >= 0; i = b.indexOf(tag, i + 7)) b.fill(0x20, i, i + 7); return b }
   return buf
 }
+
+// ---------------------------------------------------------------- child-process errors
+
+/**
+ * One useful line from a failed child process (execFileSync error): the first stderr line
+ * that names an error ("RangeError: ...", "DOMException [AbortError]: ..."), else the last
+ * stderr line apart from Node's "Node.js vNN" footer and --trace-uncaught hint, else the
+ * error's own message. Node's first stderr line is only the throwing location. A timeout
+ * or signal (err.code, else err.signal) goes in front, e.g. "ETIMEDOUT: <line>".
+ */
+export function childErrorDetail(err) {
+  const lines = (err?.stderr?.toString() ?? "").trim().split("\n").map((l) => l.trim()).filter(Boolean)
+  // "TypeError: x", "DOMException [AbortError]: x", "MyErr [Error]: x"; not source lines such
+  // as "Error.captureStackTrace(...)" or locations such as "node:internal/...:107"
+  const named = lines.find((l) => /^[\w$]+(?: \[[^\]]*\])?: /.test(l))
+  // otherwise the last line that isn't Node's own footer (a thrown string or object ends up here)
+  const tail = lines.filter((l) => !/^Node\.js v\d/.test(l) && !/^\(Use `node --trace-uncaught/.test(l)).at(-1)
+  const line = named ?? tail ?? String(err?.message ?? err)
+  // a timeout or a signal is the real cause even when the child already wrote to stderr
+  const why = err?.code ?? err?.signal
+  return why ? `${why}: ${line}` : line
+}

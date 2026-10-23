@@ -191,3 +191,44 @@ test("zipDiff: only the local uncompressed size is wrong", async () => {
   for (const z of [a, b]) z.writeUInt32LE(5 + 1, offsets(z).local[1] + 22) // central still says 5 (b.txt)
   assert.match(zipDiff(a, b), /uncompressed size doesn't match/)
 })
+
+test("childErrorDetail: the error line, not the location line Node prints first", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  let err
+  try { execFileSync(process.execPath, ["--input-type=module", "-e", "new Date(NaN).toISOString()"], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { err = e }
+  assert.ok(err, "child should fail")
+  assert.match(err.stderr.toString().trim().split("\n")[0], /^file:|\[eval/, "Node's first stderr line is a location") // what the old code reported
+  assert.match(childErrorDetail(err), /^RangeError: Invalid time value/)
+  // no error line: the last line (e.g. a message the child printed itself before exit 3)
+  assert.equal(childErrorDetail({ stderr: Buffer.from("\nG2 child: TZ=Bogus/Zone gives a UTC offset of 0\n"), message: "Command failed" }), "G2 child: TZ=Bogus/Zone gives a UTC offset of 0")
+  // no stderr at all: the error's message
+  assert.equal(childErrorDetail({ stderr: Buffer.from(""), message: "spawnSync node ETIMEDOUT" }), "spawnSync node ETIMEDOUT")
+})
+
+test("childErrorDetail: a timeout or signal is kept when the child wrote to stderr", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  const fail = (args, opts = {}) => { try { execFileSync(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], ...opts }) } catch (e) { return e } assert.fail("child should fail") }
+  // writes a line, then hangs until the timeout kills it
+  const t = fail(["-e", 'process.stderr.write("partial output\\n"); setTimeout(() => {}, 60_000)'], { timeout: 500, killSignal: "SIGKILL" })
+  assert.equal(childErrorDetail(t), "ETIMEDOUT: partial output")
+  // killed by a signal
+  const s = fail(["-e", 'process.stderr.write("about to die\\n"); process.kill(process.pid, "SIGTERM")'])
+  assert.equal(childErrorDetail(s), "SIGTERM: about to die")
+  // a plain non-zero exit has neither: no prefix
+  const x = fail(["-e", 'process.stderr.write("bye\\n"); process.exit(3)'])
+  assert.equal(childErrorDetail(x), "bye")
+})
+
+test("childErrorDetail: thrown strings, objects, DOMException and subclassed errors", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  const detail = (code) => { try { execFileSync(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { return childErrorDetail(e) } assert.fail("child should fail") }
+  assert.equal(detail('throw "a thrown string"'), "a thrown string")
+  assert.equal(detail('throw { custom: 1 }'), "{ custom: 1 }")
+  assert.equal(detail('throw new DOMException("stop", "AbortError")'), "DOMException [AbortError]: stop")
+  assert.equal(detail('class MyErr extends Error {}; throw new MyErr("mine")'), "MyErr [Error]: mine")
+  // a source line that starts like an error name isn't taken for the error line
+  assert.equal(detail('Error.captureStackTrace({}); throw new TypeError("bad type")'), "TypeError: bad type")
+})
