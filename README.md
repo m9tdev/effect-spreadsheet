@@ -56,18 +56,8 @@ not from the workbook the rows were read from.
 - Lenient by default: text after a closing quote is appended (`"ab"c` → `abc`), an unterminated quote runs to end of input. `strict: true` makes both `MalformedFile`.
 - `inferTypes` (default `false`): booleans (any case), plain decimals (no leading zeros, ≤ 15 significant digits), Excel error literals. Never dates, `%`, currency, thousands separators or formulas.
 
-### Intended differences from SheetJS
+### Comparison with other readers
 
-Checked by `test/csv-oracle.test.ts` against `~/sheetjs`:
-
-| input | effect-spreadsheet | SheetJS |
-|---|---|---|
-| `"ab"c` | `abc` | `"ab"c` |
-| unterminated `"b…` | `b…` | `"b…` |
-| UTF-8 without BOM | decoded as UTF-8 | decoded as Latin-1 |
-| `007`, 16+ digit numbers | text | number (precision lost) |
-| `true` | `true` (boolean) | `"true"` |
-| `50%`, `$5`, `" 1"` | text | 0.5, 5, 1 |
-| `2024-01-02` | text | date serial |
-| `#N/A` | `Error` cell `"#N/A"` | dropped |
-| file starting with a space | normal CSV | PRN path, wrong values |
+The test suite compares CSV results with a widely used JavaScript spreadsheet library as a
+test-only oracle. The intended differences are listed in
+[docs/csv-oracle-differences.md](docs/csv-oracle-differences.md).

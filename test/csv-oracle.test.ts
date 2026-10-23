@@ -6,7 +6,8 @@
  * - inferTypes: false is compared with SheetJS `read({ raw: true })` (all text);
  * - inferTypes: true with SheetJS's default (inferring) read.
  *
- * The intended differences are listed (and checked) below; see README.
+ * The intended differences are listed (and checked) below; see
+ * docs/csv-oracle-differences.md.
  */
 import { describe, expect, it } from "vitest"
 import { csvAoa, enc } from "./helpers/run.ts"
