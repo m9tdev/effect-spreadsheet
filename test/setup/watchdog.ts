@@ -3,6 +3,7 @@
  * expects a heartbeat from the main thread's event loop; if none arrives for
  * HANG_MS (a synchronous infinite loop), it kills the test process, so the
  * run fails instead of hanging. Async waits are covered by testTimeout.
+ * Times use the monotonic performance.now(), so clock changes do not matter.
  */
 import { Worker } from "node:worker_threads"
 
@@ -13,11 +14,11 @@ const g = globalThis as { [key]?: Worker }
 
 if (g[key] === undefined) {
   const source = `
-    const { parentPort, workerData } = require("node:worker_threads")
-    let last = Date.now()
-    parentPort.on("message", () => { last = Date.now() })
+    const { parentPort, workerData } = process.getBuiltinModule("node:worker_threads")
+    let last = performance.now()
+    parentPort.on("message", () => { last = performance.now() })
     setInterval(() => {
-      if (Date.now() - last > workerData.hangMs) {
+      if (performance.now() - last > workerData.hangMs) {
         process._rawDebug("[watchdog] the test process' event loop was blocked for " + workerData.hangMs +
           " ms (synchronous hang?): killing it")
         process.kill(process.pid, "SIGKILL")
