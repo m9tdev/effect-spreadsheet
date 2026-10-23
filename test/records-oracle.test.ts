@@ -54,8 +54,19 @@ describe.skipIf(xlsx === undefined)("toRecords vs SheetJS oracle", () => {
       { header: "first-row" },
       [{ "1": "a", "0": "b", "1.5": "c", "1e+21": "d" }],
       [{ "1.0": "a", "-0": "b", "1.50": "c", "1e21": "d" }]
+    ],
+    "5. numeric header cells with the same number collide": [
+      "1,1.0,x\na,b,c\n",
+      { header: "first-row" },
+      [{ "1": "a", "1_1": "b", x: "c" }],
+      [{ "1": "a", "1.0": "b", x: "c" }]
     ]
   }
+  it("difference 5 lists the keys in JavaScript order, as the docs show", async () => {
+    const [record] = await ours("1.0,-0,1.50,1e21\na,b,c,d\n", { header: "first-row" })
+    expect(Object.keys(record!)).toEqual(["0", "1", "1.5", "1e+21"])
+  })
+
   for (const [name, [text, options, expectedOurs, expectedTheirs]] of Object.entries(DIFFERENT)) {
     it(`intended difference ${name}`, async () => {
       expect(await ours(text, options)).toEqual(expectedOurs)

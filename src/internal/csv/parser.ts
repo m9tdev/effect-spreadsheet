@@ -282,9 +282,9 @@ export class CsvParser {
 const ERRORS = new Set(["#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA"])
 
 /**
- * Plain decimal numbers only: optional sign, no leading zeros (so `007`
- * and zip codes stay text), optional fraction and exponent, at most 15
- * significant digits (so long IDs keep every digit).
+ * Decimal numbers: optional sign, no leading zeros (so `007` and zip codes
+ * stay text), optional fraction and exponent, at most 15 digits not
+ * counting leading zeros (so long IDs keep every digit).
  */
 const NUMBER = /^[+-]?(?:(?:0|[1-9]\d*)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/
 

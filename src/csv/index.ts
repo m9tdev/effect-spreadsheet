@@ -54,7 +54,9 @@ export interface ReadOptions {
    * Default `false`: every value is a `Text` cell. With `true`:
    * `TRUE`/`FALSE` (any case) become `Boolean`; decimal numbers (optional
    * sign, fraction and exponent, e.g. `1.`, `.5`, `1e21`; no leading zeros,
-   * at most 15 significant digits, finite; `-0` becomes `0`; no thousands
+   * at most 15 digits, not counting leading zeros (`1000000000000000` and
+   * `1.000000000000000` stay text), finite; `-0` becomes `0`, and so do
+   * values too small for a double (`1e-999`, `-1e-400`); no thousands
    * separators, currency, `%` or hex) become `Number`; the
    * Excel error literals (`#N/A`, `#DIV/0!`, ...) become `Error`. Dates and
    * formulas are never inferred (`=SUM(A1)` stays text).

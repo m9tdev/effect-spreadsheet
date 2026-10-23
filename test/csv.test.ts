@@ -272,6 +272,45 @@ describe("csv: type inference", () => {
     ])
   })
 
+  it("at most 15 digits, not counting leading zeros", async () => {
+    const inputs = ["1000000000000000", "1.000000000000000", "100000000000000", "1.00000000000000", "0.000000000000001", "-0.00000000000000123456789012345"]
+    const rows = await Effect.runPromise(csvRows(inputs.join(",") + "\n", { inferTypes: true }))
+    assert.deepStrictEqual(rows[0]!.cells.map((c) => [c._tag, Cell.value(c)]), [
+      ["Text", "1000000000000000"],
+      ["Text", "1.000000000000000"],
+      ["Number", 100000000000000],
+      ["Number", 1],
+      ["Number", 1e-15],
+      ["Number", -1.23456789012345e-15]
+    ])
+  })
+
+  it("error literals are case-sensitive and limited to the listed ones; spaces keep text, quotes don't", async () => {
+    const literals = ["#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA"]
+    const others = ["#n/a", "#div/0!", "#SPILL!", "#CALC!", "#N/A "]
+    const rows = await Effect.runPromise(csvRows([...literals, ...others.map((o) => `"${o}"`)].join(",") + "\n", { inferTypes: true }))
+    assert.deepStrictEqual(
+      rows[0]!.cells.map((c) => [c._tag, Cell.value(c)]),
+      [...literals.map((l) => ["Error", l]), ...others.map((o) => ["Text", o])]
+    )
+    const padded = await Effect.runPromise(csvRows('" 1","1 ","1",2\n', { inferTypes: true }))
+    assert.deepStrictEqual(padded[0]!.cells.map((c) => [c._tag, Cell.value(c)]), [
+      ["Text", " 1"],
+      ["Text", "1 "],
+      ["Number", 1],
+      ["Number", 2]
+    ])
+  })
+
+  it("values too small for a double become the Number 0", async () => {
+    const rows = await Effect.runPromise(csvRows("1e-999,-1e-400,5e-324\n", { inferTypes: true }))
+    const cells = rows[0]!.cells
+    assert.deepStrictEqual(cells.map((c) => c._tag), ["Number", "Number", "Number"])
+    assert.isTrue(Object.is(Cell.value(cells[0]!), 0))
+    assert.isTrue(Object.is(Cell.value(cells[1]!), 0))
+    assert.strictEqual(Cell.value(cells[2]!), 5e-324)
+  })
+
   it("negative zero is inferred as 0", async () => {
     const rows = await Effect.runPromise(csvRows("-0,-0.0,-0e5,+0\n", { inferTypes: true }))
     for (const cell of rows[0]!.cells) assert.isTrue(Object.is(Cell.value(cell), 0), String(Cell.value(cell)))
