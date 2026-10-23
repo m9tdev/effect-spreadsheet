@@ -285,6 +285,23 @@ describe("csv: type inference", () => {
     ])
   })
 
+  it("error literals are case-sensitive and limited to the listed ones; spaces keep text, quotes don't", async () => {
+    const literals = ["#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA"]
+    const others = ["#n/a", "#div/0!", "#SPILL!", "#CALC!", "#N/A "]
+    const rows = await Effect.runPromise(csvRows([...literals, ...others.map((o) => `"${o}"`)].join(",") + "\n", { inferTypes: true }))
+    assert.deepStrictEqual(
+      rows[0]!.cells.map((c) => [c._tag, Cell.value(c)]),
+      [...literals.map((l) => ["Error", l]), ...others.map((o) => ["Text", o])]
+    )
+    const padded = await Effect.runPromise(csvRows('" 1","1 ","1",2\n', { inferTypes: true }))
+    assert.deepStrictEqual(padded[0]!.cells.map((c) => [c._tag, Cell.value(c)]), [
+      ["Text", " 1"],
+      ["Text", "1 "],
+      ["Number", 1],
+      ["Number", 2]
+    ])
+  })
+
   it("values too small for a double become the Number 0", async () => {
     const rows = await Effect.runPromise(csvRows("1e-999,-1e-400,5e-324\n", { inferTypes: true }))
     const cells = rows[0]!.cells

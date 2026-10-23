@@ -79,7 +79,7 @@ a,b,c,d
 
 | | record |
 |---|---|
-| effect-spreadsheet | `{ "1": "a", "0": "b", "1.5": "c", "1e+21": "d" }` |
+| effect-spreadsheet | `{ "0": "b", "1": "a", "1.5": "c", "1e+21": "d" }` |
 | SheetJS | `{ "1.0": "a", "-0": "b", "1.50": "c", "1e21": "d" }` |
 
 Two header cells with the same number but different text then collide and
