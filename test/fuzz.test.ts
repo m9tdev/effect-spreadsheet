@@ -11,7 +11,11 @@ import type { FuzzTask } from "./fuzz/tasks.ts"
 import { enc } from "./helpers/run.ts"
 import { makeZip } from "./helpers/zip.ts"
 
-const BUDGET_MS = 2000
+// Per case, in a worker that is terminated when it overruns. The point is
+// hang detection: cases take milliseconds, the 200k-character pathological
+// inputs well under 100 ms, while a hang never ends and quadratic work on
+// those inputs takes far longer. 5 s leaves room for a loaded machine.
+const BUDGET_MS = 5000
 const host = new FuzzHost(BUDGET_MS)
 
 beforeAll(() => host.start(), 60_000)
