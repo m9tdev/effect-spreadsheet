@@ -49,3 +49,18 @@ jobs:
           SHEETJS_DIR: ${{ runner.temp }}/sheetjs
           # fail instead of skipping the oracle tests if SheetJS is missing
           REQUIRE_ORACLE: "1"
+      # Test-corpus checks: our committed fixtures, expectations and oracle scripts.
+      # They need SheetJS (above) but not the SheetJS test_files archive or a prior cache:
+      # the oracle results for our fixtures are rebuilt into test/corpus/.cache here.
+      - name: Corpus checks
+        env:
+          SHEETJS_DIR: ${{ runner.temp }}/sheetjs
+        run: |
+          node --test scripts/corpus/*.test.mjs
+          node scripts/corpus/generate.mjs --check
+          node scripts/corpus/hidden-rows/generate.mjs --check
+          node scripts/corpus/manifest.mjs
+          node scripts/corpus/oracle.mjs --source generated --no-probe
+          node scripts/corpus/oracle.mjs --source hidden-rows --no-probe
+          node scripts/corpus/expected.mjs --check
+          node scripts/corpus/oracle-selftest.mjs
