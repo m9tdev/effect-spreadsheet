@@ -1,17 +1,19 @@
-import { assert, describe, it } from "@effect/vitest"
+import { assert, describe, expect, it } from "@effect/vitest"
 import { Effect, Stream } from "effect"
 import * as Cell from "../src/Cell.ts"
 import * as Csv from "../src/csv/index.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
+import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import type { Row } from "../src/Workbook.ts"
 import { csvRows, enc } from "./helpers/run.ts"
 
 const rowsOf = (text: string) => Effect.runPromise(csvRows(text, { inferTypes: true }))
+const recs = (rows: Iterable<Row>, options: Spreadsheet.RecordsOptions) => Effect.runSync(Spreadsheet.toRecords(rows, options))
 
 describe("toRecords", () => {
   it("first-row header", async () => {
     const rows = await rowsOf("name,age\nann,31\nbob,\n")
-    assert.deepStrictEqual(Spreadsheet.toRecords(rows, { header: "first-row" }), [
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [
       { name: "ann", age: 31 },
       { name: "bob" }
     ])
@@ -19,43 +21,43 @@ describe("toRecords", () => {
 
   it("defval fills missing header columns; blank rows skipped unless blankRows", async () => {
     const rows = await rowsOf("a,b\n1\n\n,2\n")
-    assert.deepStrictEqual(Spreadsheet.toRecords(rows, { header: "first-row", defval: null }), [
+    assert.deepStrictEqual(recs(rows, { header: "first-row", defval: null }), [
       { a: 1, b: null },
       { a: null, b: 2 }
     ])
-    assert.deepStrictEqual(Spreadsheet.toRecords(rows, { header: "first-row", blankRows: true }), [{ a: 1 }, {}, { b: 2 }])
+    assert.deepStrictEqual(recs(rows, { header: "first-row", blankRows: true }), [{ a: 1 }, {}, { b: 2 }])
   })
 
   it("duplicate and empty header names are made unique like SheetJS", async () => {
     const rows = await rowsOf("a,a,,a,,a_1\n1,2,3,4,5,6\n")
-    assert.deepStrictEqual(Spreadsheet.toRecords(rows, { header: "first-row" }), [
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [
       { a: 1, a_1: 2, __EMPTY: 3, a_2: 4, __EMPTY_1: 5, a_1_1: 6 }
     ])
   })
 
   it("columns past the header get __EMPTY names", async () => {
     const rows = await rowsOf("a\n1,2,3\n")
-    assert.deepStrictEqual(Spreadsheet.toRecords(rows, { header: "first-row" }), [{ a: 1, __EMPTY: 2, __EMPTY_1: 3 }])
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [{ a: 1, __EMPTY: 2, __EMPTY_1: 3 }])
   })
 
   it("header by row index skips earlier rows", async () => {
     const rows = await rowsOf("title\n\nx,y\n1,2\n")
-    assert.deepStrictEqual(Spreadsheet.toRecords(rows, { header: 2 }), [{ x: 1, y: 2 }])
+    assert.deepStrictEqual(recs(rows, { header: 2 }), [{ x: 1, y: 2 }])
   })
 
   it("header row missing from sparse rows: columns get __EMPTY names", () => {
     const rows: Array<Row> = [{ index: 5, hidden: false, cells: [Cell.text(1, "v")] }]
-    assert.deepStrictEqual(Spreadsheet.toRecords(rows, { header: 2 }), [{ __EMPTY_1: "v" }])
+    assert.deepStrictEqual(recs(rows, { header: 2 }), [{ __EMPTY: "v" }])
   })
 
   it("explicit header names; extra columns dropped", async () => {
     const rows = await rowsOf("1,2,3\n4,5\n")
-    assert.deepStrictEqual(Spreadsheet.toRecords(rows, { header: ["x", "y"] }), [{ x: 1, y: 2 }, { x: 4, y: 5 }])
+    assert.deepStrictEqual(recs(rows, { header: ["x", "y"] }), [{ x: 1, y: 2 }, { x: 4, y: 5 }])
   })
 
   it("__proto__ header becomes an own key, not the prototype", async () => {
     const rows = await rowsOf("__proto__,b\n1,2\n")
-    const [record] = Spreadsheet.toRecords(rows, { header: "first-row" })
+    const [record] = recs(rows, { header: "first-row" })
     assert.strictEqual(Object.getPrototypeOf(record), Object.prototype)
     assert.deepStrictEqual(Object.keys(record!), ["__proto__", "b"])
     assert.strictEqual(Object.getOwnPropertyDescriptor(record, "__proto__")?.value, 1)
@@ -67,10 +69,50 @@ describe("toRecords", () => {
       { index: 0, hidden: false, cells: [Cell.date(0, d), Cell.number(1, 1)] },
       { index: 1, hidden: true, cells: [Cell.boolean(0, true), Cell.error(1, "#N/A"), Cell.empty(2)] }
     ]
-    assert.deepStrictEqual(Spreadsheet.toRecords(rows, { header: "first-row" }), [
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [
       { "2024-01-02T00:00:00.000Z": true, "1": "#N/A" }
     ])
   })
+
+  it("defval fills only header-named columns; far cells don't widen every record (B1 regression)", async () => {
+    // header `a`, one row with a cell at column 16383, then 5000 rows of `y`
+    const text = "a\n" + ",".repeat(16383) + "far\n" + "y\n".repeat(5000)
+    expect(text.length).toBeLessThan(30_000)
+    const rows = await Effect.runPromise(csvRows(text))
+    const start = performance.now()
+    const records = recs(rows, { header: "first-row", defval: null })
+    expect(performance.now() - start).toBeLessThan(1000)
+    expect(records.length).toBe(5001)
+    expect(records[0]).toEqual({ a: null, __EMPTY: "far" })
+    expect(records[1]).toEqual({ a: "y" })
+    const keys = records.reduce((n, r) => n + Object.keys(r).length, 0)
+    expect(keys).toBe(5002)
+  })
+
+  it("gap columns inside the header get no defval and are named when data appears", async () => {
+    const rows = await rowsOf("a,,c\n1\n,2\n")
+    assert.deepStrictEqual(recs(rows, { header: "first-row", defval: 0 }), [
+      { a: 1, c: 0 },
+      { a: 0, c: 0, __EMPTY: 2 }
+    ])
+  })
+
+  it.effect("keys written, defval fills included, count against maxCellsPerSheet", () =>
+    Effect.gen(function*() {
+      const rows = yield* csvRows("a,b,c\n1\n2\n3\n")
+      // 3 records x (3 fills + 1 cell) = 12 keys
+      const ok = yield* Spreadsheet.toRecords(rows, { header: "first-row", defval: null, limits: { maxCellsPerSheet: 12 } })
+      assert.strictEqual(ok.length, 3)
+      const error = yield* Effect.flip(
+        Spreadsheet.toRecords(rows, { header: "first-row", defval: null, limits: { maxCellsPerSheet: 11 } })
+      )
+      assert.deepStrictEqual([error._tag, error.limit, error.max], ["LimitExceeded", "maxCellsPerSheet", 11])
+      // the stream variant fails the same way, and the layer applies
+      const streamError = yield* Effect.flip(
+        Stream.runCollect(Spreadsheet.toRecords(Stream.fromIterable(rows), { header: "first-row", defval: null }))
+      ).pipe(Effect.provide(SpreadsheetLimits.layer({ maxCellsPerSheet: 11 })))
+      assert.strictEqual(streamError._tag === "LimitExceeded" && streamError.limit, "maxCellsPerSheet")
+    }))
 
   it.effect("works lazily on streams", () =>
     Effect.gen(function*() {

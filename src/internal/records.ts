@@ -5,6 +5,8 @@
  * @internal
  */
 import * as Cell from "../Cell.ts"
+import { LimitExceeded } from "../SpreadsheetError.ts"
+import type { LimitOverrides } from "../SpreadsheetLimits.ts"
 import type { Row } from "../Workbook.ts"
 
 export type CellValue = string | number | boolean | Date
@@ -20,6 +22,12 @@ export interface RecordsOptions {
   readonly defval?: unknown
   /** Keep rows without any value (as `{}`, or filled with `defval`). Default `false`. */
   readonly blankRows?: boolean | undefined
+  /**
+   * Overrides on top of the `SpreadsheetLimits` in context. Every key
+   * written to a record (`defval` fills included) counts against
+   * `maxCellsPerSheet`, for the whole run.
+   */
+  readonly limits?: LimitOverrides | undefined
 }
 
 /** Sets a key, also when it is `__proto__` (an own property then, never the prototype). */
@@ -36,27 +44,45 @@ const headerText = (cell: Cell.Cell): string => {
 /**
  * Stateful converter: feed rows in order, get records. Header names are made
  * unique like SheetJS: an empty header is `__EMPTY`, repeats get `_1`, `_2`, ...
+ *
+ * Cost follows the cells present: names live in a sparse map, a column the
+ * header row has no cell for is named (`__EMPTY_k`) only when a data cell
+ * shows up in it, and `defval` fills only the header-named columns. Every
+ * key written (fills included) counts against `maxFields` for the whole run.
  */
 export class RecordBuilder {
-  private names: Array<string | undefined> | undefined
+  private readonly names = new Map<number, string>()
+  /** Header-named columns in column order: where `defval` goes. */
+  private headerNames: Array<string> = []
   private readonly fixed: boolean
   private readonly used = new Map<string, number>()
   private readonly headerRow: number | undefined
   private readonly firstRow: boolean
   private headerDone: boolean
+  private fields = 0
 
   private readonly options: RecordsOptions
+  private readonly maxFields: number
 
-  constructor(options: RecordsOptions) {
+  constructor(options: RecordsOptions, maxFields: number) {
     this.options = options
+    this.maxFields = maxFields
     const header = options.header
-    this.fixed = typeof header !== "string" && typeof header !== "number"
     this.firstRow = header === "first-row"
     this.headerRow = typeof header === "number" ? header : undefined
     if (typeof header !== "string" && typeof header !== "number") {
-      this.names = [...(header as ReadonlyArray<string>)]
+      this.fixed = true
+      const given = header as ReadonlyArray<string>
+      // progress: i increases up to given.length
+      for (let i = 0; i < given.length; i++) {
+        const name = given[i]
+        if (name === undefined) continue
+        this.names.set(i, name)
+        this.headerNames.push(name)
+      }
       this.headerDone = true
     } else {
+      this.fixed = false
       this.headerDone = false
     }
   }
@@ -77,37 +103,40 @@ export class RecordBuilder {
   }
 
   private setHeader(row: Row | undefined): void {
-    const names: Array<string | undefined> = []
     if (row !== undefined) {
-      const last = row.cells.length > 0 ? row.cells[row.cells.length - 1]!.column : -1
-      let k = 0
-      // progress: c increases up to `last`; k only moves forward through cells
-      for (let c = 0; c <= last; c++) {
-        const cell = row.cells[k]
-        let text = ""
-        if (cell !== undefined && cell.column === c) {
-          text = headerText(cell)
-          k++
-        }
-        names.push(this.unique(text === "" ? "__EMPTY" : text))
+      // progress: one header cell per iteration (only cells present)
+      for (const cell of row.cells) {
+        if (this.names.has(cell.column)) continue
+        const text = headerText(cell)
+        const name = this.unique(text === "" ? "__EMPTY" : text)
+        this.names.set(cell.column, name)
+        this.headerNames.push(name)
       }
     }
-    this.names = names
     this.headerDone = true
   }
 
   private nameOf(column: number): string | undefined {
-    const names = this.names!
-    if (column < names.length) return names[column]
-    if (this.fixed) return undefined
-    // A column past the header row: named lazily, in order of appearance.
-    // progress: names grows by one per iteration up to `column`
-    while (names.length <= column) names.push(this.unique("__EMPTY"))
-    return names[column]
+    const known = this.names.get(column)
+    if (known !== undefined || this.fixed) return known
+    // A column without a header cell: named when a data cell first appears in it.
+    const name = this.unique("__EMPTY")
+    this.names.set(column, name)
+    return name
   }
 
-  /** Returns the record for `row`, or undefined if the row is the header, skipped, or blank. */
-  push(row: Row): Record<string, unknown> | undefined {
+  private count(n: number): LimitExceeded | undefined {
+    this.fields += n
+    return this.fields > this.maxFields
+      ? new LimitExceeded({ limit: "maxCellsPerSheet", max: this.maxFields, actual: this.fields })
+      : undefined
+  }
+
+  /**
+   * Returns the record for `row`; undefined if the row is the header,
+   * skipped, or blank; or the limit error.
+   */
+  push(row: Row): Record<string, unknown> | undefined | LimitExceeded {
     if (!this.headerDone) {
       if (this.firstRow) {
         this.setHeader(row)
@@ -126,13 +155,14 @@ export class RecordBuilder {
     let empty = true
     const defval = this.options.defval
     if (defval !== undefined) {
-      const names = this.names!
-      // progress: i increases up to names.length
-      for (let i = 0; i < names.length; i++) {
-        const name = names[i]
-        if (name !== undefined) set(record, name, defval)
-      }
+      const over = this.count(this.headerNames.length)
+      if (over !== undefined) return over
+      // progress: one header name per iteration
+      for (const name of this.headerNames) set(record, name, defval)
     }
+    const over = this.count(row.cells.length)
+    if (over !== undefined) return over
+    // progress: one cell per iteration
     for (const cell of row.cells) {
       const v = Cell.value(cell)
       const name = this.nameOf(cell.column)
