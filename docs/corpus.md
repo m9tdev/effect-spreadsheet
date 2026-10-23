@@ -366,21 +366,28 @@ themselves. This is a deliberate difference from SheetJS, which drops hidden row
 
 `generate.mjs` writes them. The output is deterministic (`--check` regenerates it into
 a temp dir and compares). Zips are rebuilt with fixed timestamps, and document properties
-are fixed (author `effect-spreadsheet`, 2026-01-01). They are our own files (MIT). They are
-generated with SheetJS 0.20.3 at script time (never a dependency), and the boilerplate its
-writer adds is stripped (list below).
-They are built from the SheetJS writer where it can express the case, and by hand or by patching
-where it can't. The writer's own boilerplate is stripped from every fixture
-(`stripWriterBoilerplate` in `lib.mjs`), and the SheetJS parse result is unchanged:
+are fixed (author `effect-spreadsheet`, 2026-01-01). They are our own files (MIT). They
+are generated with SheetJS 0.20.3 at script time (never a dependency). Where the SheetJS
+writer can't express a case, they are built or patched by hand.
+
+The writer's own boilerplate is stripped from every fixture (`stripWriterBoilerplate` in
+`lib.mjs`). The cell and oracle output is unchanged: cells with t/v/w/z/f, refs, hidden
+rows, merges and `rows` in `test/corpus/expected/` are identical except for the files'
+`sha256`. What does
+change is what SheetJS derives from the stripped parts: the theme-resolved font colours
+(`rgb` in its style objects) and the application name. The oracle records neither. The
+stripped parts are:
 - xlsx/xlsb: `xl/theme/theme1.xml` with its relationship and Content_Types override,
   `<Application>SheetJS</Application>` in `docProps/app.xml`, and the app/version strings in
   the xlsb BrtFileVersion record (now empty).
 - ods/fods: the `meta:generator` element and the `sh33tjs` namespace.
 - SYLK: `ID;PSheetJS;N;E` becomes `ID;PWXL;N;E`.
 - xls: the `\x01Sh33tJ5` CFB stream is unlinked and zeroed. The WRITEACCESS user name is
-  blanked, and so is the property-set SystemIdentifier. SheetJS's BIFF writers drop row properties, and its writers iterate the
-whole declared range, so far cells or huge dimensions would take forever. Each file is
-described in `generated/README.json`.
+  blanked, and so is the property-set SystemIdentifier.
+
+SheetJS's BIFF writers drop row properties, and its writers iterate the whole declared
+range, so far cells or huge dimensions would take forever. Those cases are built or patched
+by hand. Each file is described in `generated/README.json`.
 
 - **Hidden rows** (sheets `first`, `middle`, `last`, `consecutive`, `all`; 6 rows × 2 cols)
   in `hidden_rows.{xlsx,xlsb,xml,xls,biff5.xls,ods}`. The xls/biff5 files have ROW records
