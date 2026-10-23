@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, Layer, Schema, Stream } from "effect"
+import { Cause, Effect, Exit, Layer, Schema, Stream } from "effect"
+import * as Csv from "../src/csv/index.ts"
 import * as Cell from "../src/Cell.ts"
 import * as SpreadsheetError from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
@@ -72,6 +73,39 @@ describe("SpreadsheetLimits", () => {
       assert.strictEqual(perCall.maxRows, 5)
       assert.strictEqual(perCall.maxColumns, 16_384)
     }).pipe(Effect.provide(SpreadsheetLimits.layer({ maxRows: 10 }))))
+
+  const dies = <A, E>(effect: Effect.Effect<A, E>) =>
+    Effect.gen(function*() {
+      const exit = yield* Effect.exit(effect)
+      assert.isTrue(Exit.isFailure(exit) && Cause.hasDies(exit.cause), `expected a defect, got ${exit}`)
+      return Exit.isFailure(exit) ? String(Cause.squash(exit.cause)) : ""
+    })
+
+  it.effect("invalid limit values are defects, never a disabled limit", () =>
+    Effect.gen(function*() {
+      for (const bad of [NaN, -1, 1.5, -Infinity, "3" as unknown as number]) {
+        // layer construction
+        const message = yield* dies(SpreadsheetLimits.resolve().pipe(Effect.provide(SpreadsheetLimits.layer({ maxRows: bad }))))
+        assert.match(message, /maxRows must be a non-negative integer or Infinity/)
+        // per-call overrides
+        yield* dies(SpreadsheetLimits.resolve({ maxColumns: bad }))
+        yield* dies(Stream.runCollect(Csv.rows(new TextEncoder().encode("a\nb\n"), { limits: { maxRows: bad } })))
+        // a hand-made Layer.succeed bypassing layer()
+        yield* dies(SpreadsheetLimits.resolve().pipe(
+          Effect.provide(Layer.succeed(SpreadsheetLimits.SpreadsheetLimits, { ...SpreadsheetLimits.defaults, maxSheets: bad }))
+        ))
+        assert.throws(() => SpreadsheetLimits.merge(SpreadsheetLimits.defaults, { maxStringLength: bad }), TypeError)
+      }
+      // Infinity and 0 are valid
+      const limits = yield* SpreadsheetLimits.resolve({ maxRows: Infinity, maxColumns: 0 })
+      assert.deepStrictEqual([limits.maxRows, limits.maxColumns], [Infinity, 0])
+    }))
+
+  it.effect("Workbook.rows with an invalid override dies", () =>
+    Effect.gen(function*() {
+      const wb = yield* Csv.read(new TextEncoder().encode("a\nb\n"))
+      yield* dies(Stream.runCollect(Workbook.rows(wb, 0, { limits: { maxRows: NaN } })))
+    }))
 
   it("mergePartial keeps defined values", () => {
     assert.deepStrictEqual(SpreadsheetLimits.mergePartial({ maxRows: 1 }, { maxRows: undefined, maxColumns: 2 }), {

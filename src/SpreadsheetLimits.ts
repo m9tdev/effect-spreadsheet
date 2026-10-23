@@ -108,25 +108,59 @@ export const SpreadsheetLimits: Context.Reference<Limits> = Context.Reference<Li
 
 /**
  * A layer that overrides some limits; the others keep their defaults.
+ * An invalid value (see {@link validate}) makes building the layer die.
  *
  * @since 0.1.0
  * @category layers
  */
 export const layer = (overrides: LimitOverrides): Layer.Layer<never> =>
-  Layer.succeed(SpreadsheetLimits, merge(defaults, overrides))
+  Layer.sync(SpreadsheetLimits)(() => merge(defaults, overrides))
 
 /**
+ * A valid limit is a non-negative integer or `Infinity` (no limit). `NaN`,
+ * negative, fractional or non-number values would silently disable checks
+ * like `index >= max`, so they are programmer errors.
+ *
+ * @since 0.1.0
+ * @category guards
+ */
+export const isValidLimit = (value: unknown): value is number =>
+  value === Infinity || (typeof value === "number" && Number.isInteger(value) && value >= 0)
+
+/**
+ * Checks every limit; throws a `TypeError` naming the first invalid one.
+ *
+ * @since 0.1.0
+ * @category guards
+ */
+export const validate = (limits: Limits): Limits => {
+  for (const key of Object.keys(defaults) as Array<keyof Limits>) {
+    const value: unknown = limits[key]
+    if (!isValidLimit(value)) {
+      throw new TypeError(
+        `SpreadsheetLimits.${key} must be a non-negative integer or Infinity, got ${typeof value === "number" ? value : typeof value}`
+      )
+    }
+  }
+  return limits
+}
+
+/**
+ * `base` with the defined `overrides` on top, validated: throws a
+ * `TypeError` if any resulting limit is invalid (see {@link validate}).
+ *
  * @since 0.1.0
  * @category combinators
  */
 export const merge = (base: Limits, overrides: LimitOverrides | undefined): Limits => {
-  if (overrides === undefined) return base
   const out: { -readonly [K in keyof Limits]: number } = { ...base }
-  for (const key of Object.keys(base) as Array<keyof Limits>) {
-    const value = overrides[key]
-    if (value !== undefined) out[key] = value
+  if (overrides !== undefined) {
+    for (const key of Object.keys(defaults) as Array<keyof Limits>) {
+      const value = overrides[key]
+      if (value !== undefined) out[key] = value
+    }
   }
-  return out
+  return validate(out)
 }
 
 /**
@@ -151,10 +185,10 @@ export const mergePartial = (
 
 /**
  * The limits for one call: the context's limits with the call's overrides on
- * top.
+ * top. Invalid values (in the context or the overrides) make it die.
  *
  * @since 0.1.0
  * @category accessors
  */
 export const resolve = (overrides?: LimitOverrides): Effect.Effect<Limits> =>
-  Effect.map(SpreadsheetLimits, (limits) => merge(limits, overrides))
+  Effect.flatMap(SpreadsheetLimits, (limits) => Effect.sync(() => merge(limits, overrides)))

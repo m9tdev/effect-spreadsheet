@@ -162,7 +162,7 @@ export const sheet = (workbook: Workbook, sheet: string | number): Effect.Effect
 /**
  * Streams the rows of one sheet, in order. Rows come in bounded chunks, so
  * the event loop gets control back between them. Hidden rows are included
- * (`hidden: true`).
+ * (`hidden: true`). Invalid limit overrides are a defect.
  *
  * @since 0.1.0
  * @category streams
@@ -174,5 +174,6 @@ export const rows = (
 ): Stream.Stream<Row, SpreadsheetError> => {
   const found = findSheet(workbook, sheet)
   if (found === undefined) return Stream.fail(new SheetNotFound({ sheet }))
-  return workbook[RowsSource](found, merge(workbook.limits, options?.limits))
+  // suspend: invalid limit overrides (merge throws) die when the stream runs
+  return Stream.suspend(() => workbook[RowsSource](found, merge(workbook.limits, options?.limits)))
 }
