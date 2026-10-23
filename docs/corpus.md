@@ -137,7 +137,7 @@ and hidden-rows files.
   "excludedFormats": { "lotus": 33, … },          // SheetJS-corpus files of non-focus formats (not listed)
   "files": [                                        // one JSON object per line
     {"source":"sheetjs","path":"AutoFilter.xlsx","format":"xlsx","size":…,"sha256":"…",
-     "origin":"sheetjs","license":"Apache-2.0","committable":true,"sheetjsTests":true,
+     "origin":"sheetjs","license":"Apache-2.0","committable":false,"sheetjsTests":true,
      "features":{"entries":…,"mainPart":"xl/workbook.xml","sheets":…,"hiddenRows":…}}
   ]
 }
@@ -365,8 +365,9 @@ themselves. This is a deliberate difference from SheetJS, which drops hidden row
 
 `generate.mjs` writes them. The output is deterministic (`--check` regenerates it into
 a temp dir and compares). Zips are rebuilt with fixed timestamps, and document properties
-are fixed (author `effect-spreadsheet`, 2026-01-01). They are our own files (MIT); the
-SheetJS boilerplate parts that the SheetJS writer embeds stay Apache-2.0 (see NOTICE).
+are fixed (author `effect-spreadsheet`, 2026-01-01). They are our own files (MIT). They are
+generated with SheetJS 0.20.3 at script time (never a dependency), and the boilerplate its
+writer adds is stripped (list below).
 They are built from the SheetJS writer where it can express the case, and by hand or by patching
 where it can't. The writer's own boilerplate is stripped from every fixture
 (`stripWriterBoilerplate` in `lib.mjs`), and the SheetJS parse result is unchanged:
