@@ -155,13 +155,16 @@ describe("recordKeys: lazy keys with make (spec examples 20-24)", () => {
 
 describe("recordKeys: hostile inputs stay linear", () => {
   // Two checks per hostile header. The work counter is exact and doesn't
-  // depend on the machine: at most 3 `used` lookups per key. The wall clock
-  // catches quadratic work the counter can't see (say, a list scan inside a
-  // lookup): it runs the same header at 4x the size (65 536 columns) under a
-  // generous ceiling. Linear code takes ~10-50 ms there, even on a loaded
-  // machine well under a second; a quadratic version needs about 2 * 10^9
-  // steps, i.e. many seconds.
-  const CEILING_MS = 2000
+  // depend on the machine: at most 3 `used` lookups per key. Timing catches
+  // quadratic work the counter can't see (say, a list scan inside a lookup):
+  // it compares the same header at 65 536 and 262 144 columns in one process,
+  // best of 3 each, and requires the 4x larger input to take less than 10x as
+  // long. Linear code grows about 4-6x (31-48 ms vs 186-237 ms here), a
+  // quadratic version about 16x (e.g. 1.7 s vs 27 s); load slows both sizes
+  // alike, so the ratio holds where an absolute bound didn't.
+  const SMALL = 65536
+  const LARGE = 4 * SMALL
+  const MAX_RATIO = 10
   const hostile: ReadonlyArray<readonly [string, (n: number) => ReadonlyArray<string>]> = [
     ["n × a", (n) => range(n, () => "a")],
     ["n × empty", (n) => range(n, () => "")],
@@ -183,12 +186,27 @@ describe("recordKeys: hostile inputs stay linear", () => {
       expect(new Set(keys).size).toBe(names.length)
     })
 
-    it(`${name}, n = 65536: under ${CEILING_MS} ms`, () => {
-      const names = header(65536)
-      const { ms, value } = timed(() => allKeys(names))
-      expect(ms).toBeLessThan(CEILING_MS)
-      expect(value.probes()).toBeLessThanOrEqual(3 * names.length)
-    })
+    it(`${name}: ${LARGE} columns take less than ${MAX_RATIO}x the time of ${SMALL}`, async () => {
+      const small = header(SMALL)
+      const large = header(LARGE)
+      allKeys(small) // warm up the JIT
+      // Runs are separated by an event-loop turn, so a slow (quadratic) run
+      // fails here instead of tripping the hang watchdog.
+      const best = async (names: ReadonlyArray<string>, runs: number, stop?: (ms: number) => boolean) => {
+        let min = Infinity
+        // progress: r increases up to `runs`
+        for (let r = 0; r < runs; r++) {
+          await new Promise((resolve) => setImmediate(resolve))
+          min = Math.min(min, timed(() => allKeys(names)).ms)
+          if (stop?.(min)) break
+        }
+        return min
+      }
+      const smallMs = Math.max(await best(small, 3), 1)
+      // stop as soon as the ratio is met; retry once if it isn't
+      const largeMs = await best(large, 2, (ms) => ms < MAX_RATIO * smallMs)
+      expect(largeMs / smallMs, `${SMALL}: ${smallMs.toFixed(1)} ms, ${LARGE}: ${largeMs.toFixed(1)} ms`).toBeLessThan(MAX_RATIO)
+    }, 120_000)
   }
 
   it("the ladder case gives the expected keys", () => {
