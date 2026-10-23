@@ -13,7 +13,7 @@ The scripts are plain Node ESM (Node ≥ 24), with no dependencies.
 
 ```sh
 node scripts/corpus/fetch.mjs          # SheetJS test_files -> test/corpus/.cache/sheetjs (pinned, idempotent; --timeout SEC, default 900)
-node scripts/corpus/generate.mjs       # our fixtures -> test/corpus/generated (deterministic)
+node scripts/corpus/generate.mjs       # our fixtures -> test/corpus/generated (deterministic for one zlib build; see below)
 node scripts/corpus/generate.mjs --check
 node scripts/corpus/hidden-rows/generate.mjs --check   # hidden-row fixtures regenerate identically (zips by content)
 node scripts/corpus/hidden-rows/manifest.mjs    # test/corpus/hidden-rows/manifest.json
@@ -367,8 +367,12 @@ themselves. This is a deliberate difference from SheetJS, which drops hidden row
 
 ## Generated fixtures (`test/corpus/generated/`)
 
-`generate.mjs` writes them. The output is deterministic (`--check` regenerates it into
-a temp dir and compares). A caveat for zips (xlsx, xlsb, ods): deflate output depends on the
+`generate.mjs` writes them. The output is deterministic on a given Node/zlib build (`--check`
+regenerates it into a temp dir and compares). Writing (not `--check`) with another zlib build
+rewrites the zip bytes. That churns every sha256 pinned for them: in `generated/README.json`,
+`hidden-rows/manifest.json` and the docs table, and the `sha256` fields of
+`test/corpus/expected/*`. So regenerate on purpose, and commit the churn only with a real
+fixture change. A caveat for zips (xlsx, xlsb, ods): deflate output depends on the
 zlib build. Node's bundled zlib and a system zlib, or different CPUs, can compress the same
 data differently. So `--check` lets zips differ only in what compression changes: each entry's
 method, compressed size, compressed data, and therefore the offsets (`zipDiff` in `lib.mjs`).
