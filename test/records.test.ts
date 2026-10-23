@@ -187,6 +187,8 @@ describe("toRecords", () => {
       () => Effect.sync(() => emitted++)
     )))
     const elapsed = performance.now() - start
+    // let the timer fire once more, so a block at the very end is measured too
+    await new Promise((r) => setTimeout(r, 30))
     clearInterval(timer)
     // 1 048 576 fills / 16384 per record = 64 records, then maxRecordFields
     expect(exit._tag).toBe("Failure")
@@ -206,6 +208,7 @@ describe("toRecords", () => {
     const count = await Effect.runPromise(Stream.runCount(
       Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: null, limits: { maxRecordFields: Infinity } })
     ))
+    await new Promise((r) => setTimeout(r, 30))
     clearInterval(timer2)
     expect(count).toBe(1300)
     expect(maxGap).toBeLessThan(250)
