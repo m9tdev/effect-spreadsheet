@@ -285,6 +285,15 @@ describe("csv: type inference", () => {
     ])
   })
 
+  it("values too small for a double become the Number 0", async () => {
+    const rows = await Effect.runPromise(csvRows("1e-999,-1e-400,5e-324\n", { inferTypes: true }))
+    const cells = rows[0]!.cells
+    assert.deepStrictEqual(cells.map((c) => c._tag), ["Number", "Number", "Number"])
+    assert.isTrue(Object.is(Cell.value(cells[0]!), 0))
+    assert.isTrue(Object.is(Cell.value(cells[1]!), 0))
+    assert.strictEqual(Cell.value(cells[2]!), 5e-324)
+  })
+
   it("negative zero is inferred as 0", async () => {
     const rows = await Effect.runPromise(csvRows("-0,-0.0,-0e5,+0\n", { inferTypes: true }))
     for (const cell of rows[0]!.cells) assert.isTrue(Object.is(Cell.value(cell), 0), String(Cell.value(cell)))
