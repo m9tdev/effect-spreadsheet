@@ -4,24 +4,45 @@ import { periods } from "./setup/watchdog-periods.ts"
 
 const WATCHDOG = new URL("./setup/watchdog.ts", import.meta.url).pathname
 
-/** Runs `body` in a fresh node process with the watchdog loaded and a 2 s hang limit (heartbeat 500 ms). */
-const run = (body: string, hangMs = 2000) =>
-  new Promise<{ code: number | null; signal: NodeJS.Signals | null; ms: number }>((resolve) => {
+/**
+ * Runs `body` in a fresh node process with the watchdog loaded and a 2 s hang
+ * limit (heartbeat 500 ms). If the child is still running after `deadlineMs`
+ * (say, the watchdog is broken and the body loops), the test kills it, so it
+ * can never outlive the test run; `killedByTest` tells the two kills apart.
+ */
+const run = (body: string, hangMs = 2000, deadlineMs = 30_000) =>
+  new Promise<{ code: number | null; signal: NodeJS.Signals | null; ms: number; killedByTest: boolean }>((resolve) => {
     const start = performance.now()
     const child = spawn(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(WATCHDOG)}); ${body}`], {
       env: { ...process.env, TEST_HANG_MS: String(hangMs) },
       stdio: "ignore"
     })
-    child.on("exit", (code, signal) => resolve({ code, signal, ms: performance.now() - start }))
+    let killedByTest = false
+    const deadline = setTimeout(() => {
+      killedByTest = true
+      child.kill("SIGKILL")
+    }, deadlineMs)
+    child.on("exit", (code, signal) => {
+      clearTimeout(deadline)
+      resolve({ code, signal, ms: performance.now() - start, killedByTest })
+    })
   })
 
 describe("test watchdog", () => {
   it("kills a process whose event loop is blocked", async () => {
     const result = await run("while (true) {}")
     expect(result.signal).toBe("SIGKILL")
+    expect(result.killedByTest).toBe(false)
     // 2 s limit; a generous ceiling for a loaded machine
     expect(result.ms).toBeLessThan(30_000)
   }, 40_000)
+
+  it("a child the watchdog doesn't stop is killed at the test's deadline, never left running", async () => {
+    // a limit far beyond the deadline stands in for a broken watchdog
+    const result = await run("while (true) {}", 1_000_000_000, 1000)
+    expect(result.killedByTest).toBe(true)
+    expect(result.signal).toBe("SIGKILL")
+  }, 20_000)
 
   it("leaves a process alone that waits asynchronously (longer than the hang limit)", async () => {
     const result = await run("await new Promise((r) => setTimeout(r, 3000))")
