@@ -13,6 +13,8 @@
 //   F. ORACLE_MAX_BYTES counts UTF-8 bytes, not UTF-16 string length: with a cap
 //      between the two sizes of generated/features.xlsx's expected JSON (it holds
 //      non-ASCII text, so bytes > chars), the result must be tooBig.
+//   G. the oracle output doesn't depend on the time zone: generated/dates.xlsx parsed
+//      under TZ=Pacific/Auckland gives the committed rows (dates as UTC ISO strings).
 // Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B and E: they are skipped, not
 // failed, without it. Linux `ps` for the child lookup. Stale temp dirs from a SIGKILLed
 // run are removed at the next start.
@@ -119,6 +121,14 @@ async function maxBytesCase(name) {
   check(`${name}: cap ${cap} (between ${chars} chars and ${bytes} bytes) gives tooBig`, second?.d.status === "tooBig" && /over \d+ bytes/.test(second.d.reason ?? ""), `status ${second?.d.status}, reason ${second?.d.reason}`)
 }
 
+async function timeZoneCase(name) {
+  const r = await startOracle({ TZ: "Pacific/Auckland" }, ["--source", "generated", "--format", "xlsx", "--no-probe", "--jobs", "2"]).exited
+  const dir = path.join(tmp, "expected")
+  const doc = fs.readdirSync(dir).filter((f) => !f.includes(".stream.")).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))).find((d) => d.source === "generated" && d.path === "dates.xlsx")
+  const committed = JSON.parse(fs.readFileSync(path.join(HERE, "..", "..", "test", "corpus", "expected", "generated", "dates.xlsx.json"), "utf8"))
+  check(`${name}: dates.xlsx rows under TZ=Pacific/Auckland equal the committed ones`, r.code === 0 && !!doc && JSON.stringify(doc.sheets.map((x) => x.rows)) === JSON.stringify(committed.sheets.map((x) => x.rows)), doc ? `first value ${JSON.stringify(doc.sheets[0].rows?.[0]?.[0])}` : "no result")
+}
+
 async function startupCase(name, body, args, expect) {
   const dir = path.join(tmp, name.replace(/\W+/g, "_"))
   fs.mkdirSync(dir, { recursive: true })
@@ -149,6 +159,8 @@ try {
   else skip("E tooBig results", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
   if (haveSheetJS) await maxBytesCase("F MAX_BYTES counts bytes")
   else skip("F MAX_BYTES counts bytes", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  if (haveSheetJS) await timeZoneCase("G time zone")
+  else skip("G time zone", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })
 }

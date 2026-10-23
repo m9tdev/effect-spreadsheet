@@ -31,7 +31,9 @@ import { createRequire } from "node:module"
 import { fileURLToPath } from "node:url"
 import { HIDDEN_ROWS_DIR, CACHE_DIR, EXPECTED_DIR, GENERATED_DIR, MANIFEST_PATH, SHEETJS_CACHE, SHEETJS_DIR, SHEETJS_ENTRY } from "./lib.mjs"
 
-export const SCHEMA = 1
+// 2: rows use sheet_to_json UTC:true and children run with TZ=UTC (schema 1 rows held
+// local-time Dates, so they depended on the machine's time zone).
+export const SCHEMA = 2
 // Options passed to XLSX.read. Recorded in every expected file.
 export const READ_OPTIONS = {
   type: "buffer",
@@ -45,7 +47,9 @@ export const READ_OPTIONS = {
   WTF: false,
 }
 // sheet_to_json options for `rows` (only computed when the !ref area is small enough).
-export const JSON_OPTIONS = { header: 1, raw: true, defval: null, blankrows: true }
+// UTC: date-formatted cells come back as Dates built in UTC, so `rows` doesn't depend on the
+// machine's time zone (their JSON form is an ISO string).
+export const JSON_OPTIONS = { header: 1, raw: true, defval: null, blankrows: true, UTC: true }
 export const ROWS_MAX_AREA = 2_000_000
 // Caps per expected file: above these the file holds status "tooBig" and counts only.
 // ORACLE_MAX_CELLS / ORACLE_MAX_BYTES override them (oracle-selftest.mjs uses tiny caps).
@@ -439,7 +443,8 @@ function runPool(jobs, n, readyTimeout) {
       if (aborted) return
       if (next >= jobs.length) { if (active === 0) resolve(results); return }
       active++
-      const child = fork(self, ["--child"], { execArgv: ["--max-old-space-size=4096", "--stack-size=4000"], stdio: ["ignore", "ignore", "pipe", "ipc"] })
+      // TZ=UTC: nothing SheetJS derives from dates may depend on where the oracle runs.
+      const child = fork(self, ["--child"], { execArgv: ["--max-old-space-size=4096", "--stack-size=4000"], stdio: ["ignore", "ignore", "pipe", "ipc"], env: { ...process.env, TZ: "UTC" } })
       live.add(child)
       let stderr = ""
       child.stderr.on("data", (d) => { stderr = (stderr + d).slice(-2000) })

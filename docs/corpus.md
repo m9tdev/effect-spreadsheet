@@ -227,17 +227,20 @@ SheetJS calls:
 ```js
 XLSX.read(buf, { type: "buffer", dense: true, cellDates: false, cellNF: true, cellFormula: true,
                  cellText: true, cellStyles: true, sheetStubs: false, WTF: false })
-XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: true })  // only when !ref area <= 2,000,000
+XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: true, UTC: true })  // only when !ref area <= 2,000,000
 ```
 
 Why: `dense` keeps memory proportional to the cells that are present. `cellDates: false`
 keeps dates as serial numbers, plus `z`. `cellStyles: true` is **required** for SheetJS's
-xlsx reader to put hidden rows in `!rows`; without it the flag is silently dropped. We never
+xlsx reader to put hidden rows in `!rows`; without it the flag is silently dropped. In
+`rows`, `sheet_to_json` still turns date-formatted numbers into Dates. `UTC: true`, and
+children running with `TZ=UTC`, keep those (ISO strings in the JSON) independent of the
+machine's time zone. Schema 1 files had local-time Dates. We never
 use `XLSX.stream.to_json` for expected output, because that is where the hang is (below).
 
 ```jsonc
 {
-  "schema": 1, "oracle": "sheetjs", "sheetjsVersion": "0.20.3", "sheetjsCommit": "d2f2e179636b",
+  "schema": 2, "oracle": "sheetjs", "sheetjsVersion": "0.20.3", "sheetjsCommit": "d2f2e179636b",
   "sha256": "…", "path": "AutoFilter.xlsx", "source": "sheetjs", "format": "xlsx", "kind": "parse",
   "ms": 12,
   "status": "ok",                      // "ok" | "tooBig" | "error" | "timeout" | "crash"
