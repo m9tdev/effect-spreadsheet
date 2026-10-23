@@ -20,7 +20,11 @@
 //         TZ=UTC) are removed.
 //      G2 runs just the JSON step (READ_OPTIONS + JSON_OPTIONS from oracle-options.mjs)
 //         in a child with TZ=Pacific/Auckland and no TZ=UTC override. This fails when
-//         UTC:true alone is dropped.
+//         UTC:true alone is dropped. The child exits 3 when its zone gives a UTC offset of
+//         0 (an unknown TZ such as Bogus/Zone silently does), so G2 can't pass without
+//         testing anything. ORACLE_SELFTEST_G2_TZ overrides the zone; it is only there to
+//         show that guard working (e.g. ORACLE_SELFTEST_G2_TZ=Bogus/Zone makes G2 fail).
+//         A child that fails or hangs (60 s timeout) is a failed check with its error line.
 //   H. a timeout is not a cached result: after a run where every parse times out
 //      (--timeout 0.001), a run without --force parses those files again.
 // Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B and E: they are skipped, not
