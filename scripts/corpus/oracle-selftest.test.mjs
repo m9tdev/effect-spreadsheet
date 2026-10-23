@@ -65,3 +65,18 @@ test("ORACLE_SELFTEST_ONLY empty means the full run", () => {
   assert.match(r.stdout, /^skip H /m)
   assert.match(r.stdout, /^all oracle self-tests passed$/m)
 })
+
+test("ORACLE_SELFTEST_ONLY selects G1 or G2 on their own, and G skips without SheetJS", () => {
+  const fake = fs.mkdtempSync(path.join(os.tmpdir(), "selftest-fake-sheetjs-"))
+  try {
+    fs.writeFileSync(path.join(fake, "xlsx.js"), 'throw new Error("boom from fake xlsx.js")\n')
+    const run = (only, dir) => spawnSync(process.execPath, [SELFTEST], { env: { ...process.env, SHEETJS_DIR: dir, ORACLE_SELFTEST_ONLY: only }, encoding: "utf8", timeout: 120_000 }).stdout
+    const g1 = run("G1", fake)
+    assert.match(g1, /G1 time zone/)
+    assert.doesNotMatch(g1, /G2 time zone/)
+    const g2 = run("G2", fake)
+    assert.match(g2, /G2 time zone/)
+    assert.doesNotMatch(g2, /G1 time zone/)
+    assert.match(run("G", "/nonexistent-sheetjs"), /^skip G time zone /m)
+  } finally { fs.rmSync(fake, { recursive: true, force: true }) }
+})

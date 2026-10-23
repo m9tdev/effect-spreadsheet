@@ -219,7 +219,7 @@ if (ONLY) {
 }
 const wanted = (letter) => !ONLY || ONLY.has(letter)
 const needSheetJS = async (letter, name, fn) => {
-  if (!wanted(letter) && letter !== "G") return
+  if (!wanted(letter)) return
   if (haveSheetJS) await fn()
   else skip(name, `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
 }
@@ -231,7 +231,11 @@ try {
   if (wanted("D")) await startupCase("D hanging xlsx.js", "for (;;) {}\n", ["--ready-timeout", "2"], "no ready within 2s")
   await needSheetJS("E", "E tooBig results", () => tooBigCase("E tooBig results"))
   await needSheetJS("F", "F MAX_BYTES counts bytes", () => maxBytesCase("F MAX_BYTES counts bytes"))
-  if (wanted("G") || wanted("G1") || wanted("G2")) await needSheetJS("G", "G time zone", () => timeZoneCase("G", { g1: wanted("G") || wanted("G1"), g2: wanted("G") || wanted("G2") }))
+  const g1 = wanted("G") || wanted("G1"), g2 = wanted("G") || wanted("G2")
+  if (g1 || g2) {
+    if (haveSheetJS) await timeZoneCase("G", { g1, g2 })
+    else skip("G time zone", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  }
   await needSheetJS("H", "H timeout retried", () => retryTimeoutCase("H timeout retried"))
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })
