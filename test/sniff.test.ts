@@ -29,6 +29,33 @@ describe("format detection", () => {
     assert.strictEqual(await formatOf(makeZip([{ name: "hello.txt", data: enc("hi") }])), "zip")
   })
 
+  it("only exact zip signatures sniff as zip", async () => {
+    // junk that starts with PK is not a zip any more
+    for (const junk of [[0x50, 0x4B, 0x00, 0x00], [0x50, 0x4B, 0x01, 0x02], [0x50, 0x4B, 0x03, 0x03], [0x50, 0x4B, 0x08, 0x08]]) {
+      const bytes = new Uint8Array([...junk, ...new Uint8Array(40)])
+      const format = await formatOf(bytes)
+      assert.notStrictEqual(format, "zip", junk.join(","))
+      assert.isFalse(String(format).includes("MalformedFile"), `${junk.join(",")}: ${format}`)
+    }
+    // text starting with PK is CSV
+    assert.strictEqual(await formatOf(enc("PK,name\n1,a\n")), "csv")
+    // an empty archive is just its EOCD (PK 05 06)
+    const empty = new Uint8Array(22)
+    new DataView(empty.buffer).setUint32(0, 0x06054b50, true)
+    assert.strictEqual(await formatOf(empty), "zip")
+    // a spanned-archive marker (PK 07 08) in front of the first local header;
+    // offsets in the directory count the marker
+    const spanned = new Uint8Array([0x50, 0x4B, 0x07, 0x08, ...XLSX])
+    const view = new DataView(spanned.buffer)
+    const eocd = spanned.length - 22
+    const cdStart = view.getUint32(eocd + 16, true) + 4
+    view.setUint32(eocd + 16, cdStart, true)
+    for (let p = cdStart; p < eocd; p += 46 + view.getUint16(p + 28, true) + view.getUint16(p + 30, true) + view.getUint16(p + 32, true)) {
+      view.setUint32(p + 42, view.getUint32(p + 42, true) + 4, true)
+    }
+    assert.strictEqual(await formatOf(spanned), "xlsx")
+  })
+
   it("a zip with an archive comment still has its directory found", async () => {
     const zip = makeZip([{ name: "xl/workbook.xml" }])
     const withComment = new Uint8Array(zip.length + 1000)

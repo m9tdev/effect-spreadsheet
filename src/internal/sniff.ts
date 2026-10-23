@@ -19,6 +19,17 @@ const startsWith = (bytes: Uint8Array, magic: ReadonlyArray<number>): boolean =>
   return true
 }
 
+/**
+ * How a zip file can start: a local file header (PK 03 04), the
+ * end-of-central-directory record of an empty archive (PK 05 06), or the
+ * marker of a spanned/split archive (PK 07 08).
+ */
+const ZIP_MAGICS: ReadonlyArray<ReadonlyArray<number>> = [
+  [0x50, 0x4B, 0x03, 0x04],
+  [0x50, 0x4B, 0x05, 0x06],
+  [0x50, 0x4B, 0x07, 0x08]
+]
+
 const CFB_MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 const ODS_MIME = "application/vnd.oasis.opendocument.spreadsheet"
 
@@ -100,7 +111,7 @@ const isSylk = (text: string): boolean =>
 export const detect = (bytes: Uint8Array, limits: Limits): Format | MalformedFile | LimitExceeded => {
   if (bytes.length === 0) return "csv"
   if (startsWith(bytes, CFB_MAGIC)) return "cfb"
-  if (startsWith(bytes, [0x50, 0x4B]) && bytes.length >= 4 && bytes[2]! < 9 && bytes[3]! < 9) {
+  if (ZIP_MAGICS.some((magic) => startsWith(bytes, magic))) {
     return detectZip(bytes, limits)
   }
   if (isBiffBof(bytes)) return "xls"
