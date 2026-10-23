@@ -8,6 +8,13 @@
 import { Worker } from "node:worker_threads"
 
 const HANG_MS = Number(process.env["TEST_HANG_MS"] ?? 60_000)
+/**
+ * Heartbeat and check periods: at least 4 heartbeats per HANG_MS, so a
+ * healthy but busy process never looks blocked (a 500 ms beat with a 300 ms
+ * limit used to kill healthy processes under load).
+ */
+const BEAT_MS = Math.max(1, Math.min(500, Math.floor(HANG_MS / 4)))
+const CHECK_MS = Math.max(1, Math.min(250, Math.floor(HANG_MS / 4)))
 
 const key = Symbol.for("effect-spreadsheet/test-watchdog")
 const g = globalThis as { [key]?: Worker }
@@ -23,10 +30,10 @@ if (g[key] === undefined) {
           " ms (synchronous hang?): killing it")
         process.kill(process.pid, "SIGKILL")
       }
-    }, 250)
+    }, workerData.checkMs)
   `
-  const watchdog = new Worker(source, { eval: true, workerData: { hangMs: HANG_MS } })
+  const watchdog = new Worker(source, { eval: true, workerData: { hangMs: HANG_MS, checkMs: CHECK_MS } })
   watchdog.unref()
-  setInterval(() => watchdog.postMessage(0), 500).unref()
+  setInterval(() => watchdog.postMessage(0), BEAT_MS).unref()
   g[key] = watchdog
 }
