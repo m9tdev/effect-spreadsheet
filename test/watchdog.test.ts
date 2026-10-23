@@ -45,8 +45,9 @@ describe("test watchdog", () => {
   }, 20_000)
 
   it("leaves a process alone that waits asynchronously (longer than the hang limit)", async () => {
-    const result = await run("await new Promise((r) => setTimeout(r, 3000))")
-    expect([result.code, result.signal]).toEqual([0, null])
+    // the child's deadline (15 s) stays inside this test's timeout (20 s)
+    const result = await run("await new Promise((r) => setTimeout(r, 3000))", 2000, 15_000)
+    expect([result.code, result.signal, result.killedByTest]).toEqual([0, null, false])
   }, 20_000)
 
   it("this test process runs the watchdog with periods(HANG_MS)", () => {
