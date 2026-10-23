@@ -52,9 +52,10 @@ export interface ReadOptions {
   readonly delimiter?: string | undefined
   /**
    * Default `false`: every value is a `Text` cell. With `true`:
-   * `TRUE`/`FALSE` (any case) become `Boolean`; plain decimals (optional
-   * sign, fraction, exponent; no leading zeros, at most 15 significant
-   * digits, no thousands separators, currency or `%`) become `Number`; the
+   * `TRUE`/`FALSE` (any case) become `Boolean`; decimal numbers (optional
+   * sign, fraction and exponent, e.g. `1.`, `.5`, `1e21`; no leading zeros,
+   * at most 15 significant digits, finite; `-0` becomes `0`; no thousands
+   * separators, currency, `%` or hex) become `Number`; the
    * Excel error literals (`#N/A`, `#DIV/0!`, ...) become `Error`. Dates and
    * formulas are never inferred (`=SUM(A1)` stays text).
    */
