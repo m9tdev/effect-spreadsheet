@@ -184,3 +184,10 @@ test("zipDiff: junk between two entries (later offsets shifted)", async () => {
   assert.equal(zipDiff(j, j), "not a plain zip (zip64, data descriptor or bad layout)") // readable, but not back to back
   assert.match(zipDiff(base, j), /not a plain zip/)
 })
+
+test("zipDiff: only the local uncompressed size is wrong", async () => {
+  const { zipDiff, base, offsets } = await zipFixtures()
+  const a = Buffer.from(base), b = Buffer.from(base)
+  for (const z of [a, b]) z.writeUInt32LE(5 + 1, offsets(z).local[1] + 22) // central still says 5 (b.txt)
+  assert.match(zipDiff(a, b), /uncompressed size doesn't match/)
+})
