@@ -55,7 +55,7 @@ describe.skipIf(xlsx === undefined)("csv vs SheetJS oracle", () => {
     utf8WithoutBom: ["név\n", [["név"]], [["nÃ©v"]]],
     // Leading zeros stay text (zip codes, IDs); SheetJS gives 7.
     leadingZeros: ["007\n", [["007"]], [[7]]],
-    // More than 15 significant digits stay text (no precision loss).
+    // More than 15 digits (leading zeros not counted) stay text (no precision loss).
     longDigits: ["1234567890123456789\n", [["1234567890123456789"]], [[1234567890123456800]]],
     // Booleans in any case; SheetJS only TRUE/FALSE.
     lowercaseBoolean: ["true\n", [[true]], [["true"]]],
