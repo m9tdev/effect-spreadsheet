@@ -1,0 +1,44 @@
+{
+  "name": "effect-spreadsheet",
+  "version": "0.0.0",
+  "description": "Read spreadsheet files (CSV, XLSX, XLS, XLSB) with Effect v4 and pure-TypeScript parsers",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/m9tdev/effect-spreadsheet.git"
+  },
+  "packageManager": "pnpm@11.27.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "sideEffects": false,
+  "files": ["dist", "src", "LICENSE", "README.md"],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./csv": {
+      "types": "./dist/csv/index.d.ts",
+      "default": "./dist/csv/index.js"
+    }
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "effect": "^4.0.6"
+  },
+  "devDependencies": {
+    "@effect/vitest": "4.0.6",
+    "@types/node": "^24",
+    "effect": "4.0.6",
+    "fast-check": "^4.10.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

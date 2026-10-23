@@ -45,19 +45,18 @@ Read PLAN.md first. This is the project's rulebook.
   them in Effect at the boundaries. Don't allocate an Effect per cell.
 
 ## Licensing and SheetJS
-- The library is MIT (`LICENSE`). SheetJS is Apache-2.0: learn from it, but
-  don't copy its code.
+- The repo and the npm package are plain MIT (`LICENSE`), with no
+  third-party code: no Apache-2.0 code, no `NOTICE`, no `LICENSE-APACHE-2.0`.
+- SheetJS is a test oracle and a behaviour reference only, like any other
+  project: learn its behaviour (docs, running it, comparing output), but
+  never copy its code or closely follow its structure.
 - Reference clone: the SheetJS repo in `$SHEETJS_DIR` (default `~/sheetjs`),
   commit d2f2e17.
-- If code is ever derived from SheetJS, that file stays Apache-2.0. It starts
-  with
-  `// Portions derived from SheetJS (<path in the SheetJS repo>), Copyright (C) SheetJS LLC, Apache-2.0.`
-  `// Licensed under the Apache License, Version 2.0: see LICENSE-APACHE-2.0.`
-  and `NOTICE` lists it. `LICENSE-APACHE-2.0` (the full Apache-2.0 text)
-  ships in the npm package.
 - SheetJS is never a runtime or package dependency. It may only be loaded
   from `$SHEETJS_DIR` in tests/scripts as an oracle (skip those tests when
   it's absent).
+- Corpus fixtures made with the SheetJS writer are generated at script time,
+  and the writer's boilerplate parts are stripped from them.
 
 ## Privacy
 - Never put the user's private projects, companies, customers, hosts or data
