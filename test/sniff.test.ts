@@ -62,6 +62,18 @@ describe("format detection", () => {
     assert.strictEqual(await formatOf(enc("<?xml version=\"1.0\"?><foo/>")), "xml")
   })
 
+  it("a CSV whose first field starts with < is CSV; markup is html/xml", async () => {
+    assert.strictEqual(await formatOf(enc("<b>,x\n1,2\n")), "csv")
+    assert.strictEqual(await formatOf(enc("<b>name</b>;<i>x</i>\n")), "csv")
+    assert.strictEqual(await formatOf(enc("<5,x\n")), "csv")
+    assert.strictEqual(await formatOf(enc("<a\n")), "csv")
+    assert.strictEqual(await formatOf(enc("<table border=1>\n<tr><td>a, b</td></tr></table>")), "html")
+    assert.strictEqual(await formatOf(enc("<foo/>")), "xml")
+    assert.strictEqual(await formatOf(enc("<!-- c -->,x")), "xml")
+    const wb = await Effect.runPromise(Spreadsheet.read(enc("<b>,x\n")))
+    assert.strictEqual(wb.format, "csv")
+  })
+
   it("a semicolon CSV starting with ID;P is CSV, not SYLK", async () => {
     assert.strictEqual(await formatOf(enc("ID;Price;Name\n1;2;x\n")), "csv")
   })

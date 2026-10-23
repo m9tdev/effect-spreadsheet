@@ -52,6 +52,18 @@ const isBiffBof = (bytes: Uint8Array): boolean => {
   return (type === 0x0009 || type === 0x0209 || type === 0x0409 || type === 0x0809) && length >= 4 && length <= 20
 }
 
+/**
+ * Starts like markup: `<?`/`<!`, or a tag whose first line has no delimiter
+ * outside tags. `<b>,x` is a CSV whose first field happens to start with `<`.
+ */
+const looksLikeMarkup = (text: string): boolean => {
+  if (!text.startsWith("<")) return false
+  if (text.startsWith("<?") || text.startsWith("<!")) return true
+  if (!/^<\/?[A-Za-z][\w:.-]*(?:\s[^<>]*)?\/?>/.test(text)) return false
+  const firstLine = text.slice(0, 4096).split(/\r\n|\r|\n/, 1)[0]!
+  return !/[,;\t|]/.test(firstLine.replace(/<[^<>]*>/g, ""))
+}
+
 /** The decoded start of a text file, BOM and leading whitespace removed. */
 const textPrefix = (bytes: Uint8Array): string => {
   const head = bytes.subarray(0, TEXT_PREFIX_BYTES)
@@ -78,7 +90,7 @@ export const detect = (bytes: Uint8Array, limits: Limits): Format | MalformedFil
   ) return "image"
   const text = textPrefix(bytes)
   if (text.startsWith("{\\rtf")) return "rtf"
-  if (text.startsWith("<")) {
+  if (looksLikeMarkup(text)) {
     if (text.includes("urn:schemas-microsoft-com:office:spreadsheet") || /progid\s*=\s*"Excel\.Sheet"/i.test(text)) {
       return "spreadsheetml"
     }
