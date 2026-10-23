@@ -46,15 +46,17 @@ Read PLAN.md first. This is the project's rulebook.
 
 ## Licensing and SheetJS
 - The repo and the npm package are plain MIT (`LICENSE`), with no
-  third-party code.
-- SheetJS and other projects are behaviour references only: learn what they
-  do (docs, running them, comparing output), but never copy their code or
-  closely follow its structure.
+  third-party code: no Apache-2.0 code, no `NOTICE`, no `LICENSE-APACHE-2.0`.
+- SheetJS is a test oracle and a behaviour reference only, like any other
+  project: learn its behaviour (docs, running it, comparing output), but
+  never copy its code or closely follow its structure.
 - Reference clone: the SheetJS repo in `$SHEETJS_DIR` (default `~/sheetjs`),
   commit d2f2e17.
 - SheetJS is never a runtime or package dependency. It may only be loaded
   from `$SHEETJS_DIR` in tests/scripts as an oracle (skip those tests when
   it's absent).
+- Corpus fixtures made with the SheetJS writer are generated at script time,
+  and the writer's boilerplate parts are stripped from them.
 
 ## Privacy
 - Never put the user's private projects, companies, customers, hosts or data

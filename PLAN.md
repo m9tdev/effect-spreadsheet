@@ -112,9 +112,10 @@ Spreadsheet.toRecords(rows, { header: "first-row" | number | string[] }) // like
 
 ## Licensing
 
-The project is plain MIT, with no third-party code. SheetJS and other
-projects are behaviour references only: we learn what they do, but never
-copy their code or closely follow its structure. SheetJS is used only as a
-test oracle, loaded from `$SHEETJS_DIR` (default `~/sheetjs`). Test fixtures
-written by the SheetJS writer carry SheetJS boilerplate and stay in the test
-corpus, which is not part of the npm package.
+The repo and the npm package are plain MIT, with no third-party code: no
+Apache-2.0 code, no `NOTICE`, no `LICENSE-APACHE-2.0`. SheetJS is a test
+oracle and a behaviour reference only: we learn its behaviour, but never
+copy its code or closely follow its structure. It is loaded only in tests
+and corpus scripts, from `$SHEETJS_DIR` (default `~/sheetjs`). Corpus
+fixtures made with the SheetJS writer are generated at script time, with
+the writer's boilerplate parts stripped.
