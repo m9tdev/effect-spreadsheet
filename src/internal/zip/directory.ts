@@ -53,10 +53,18 @@ const findEocd = (bytes: Uint8Array, view: DataView): number => {
   return -1
 }
 
+/** The entries, plus where the central directory starts (entry data must end before it). */
+export type Directory = ReadonlyArray<ZipEntry> & { readonly directoryStart: number }
+
+/**
+ * Reads the central directory. Names are decoded as UTF-8 whatever the
+ * UTF-8 flag says: names in spreadsheet packages are ASCII, and CP437 (the
+ * zip default) isn't supported.
+ */
 export const readDirectory = (
   bytes: Uint8Array,
   limits: Limits
-): ReadonlyArray<ZipEntry> | MalformedFile | LimitExceeded => {
+): Directory | MalformedFile | LimitExceeded => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const eocd = findEocd(bytes, view)
   if (eocd < 0) return malformed("end of central directory not found (truncated?)")
@@ -129,7 +137,7 @@ export const readDirectory = (
     entries.push({ name, method, flags, crc32, compressedSize, uncompressedSize, localOffset })
     p = next
   }
-  return entries
+  return Object.assign(entries, { directoryStart: start })
 }
 
 /** Finds an extra field by id within [start, end); its data range, or undefined. */

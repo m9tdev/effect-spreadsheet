@@ -279,6 +279,14 @@ describe("zip archive: hostile input", () => {
     const farOffset = two.slice()
     new DataView(farOffset.buffer).setUint32(cd + 46 + 5 + 42, 1_000_000, true)
     expect(open(farOffset, limits)).toMatchObject({ _tag: "MalformedFile", reason: "local header out of bounds" })
+    // a local header whose method differs from the directory's
+    const badMethod = two.slice()
+    new DataView(badMethod.buffer).setUint16(8, 8, true)
+    expect(open(badMethod, limits)).toMatchObject({ _tag: "MalformedFile", reason: "local header compression method differs from the directory" })
+    // b's data grown into the central directory (still inside the buffer)
+    const intoDirectory = two.slice()
+    new DataView(intoDirectory.buffer).setUint32(cd + 46 + 5 + 20, 10, true)
+    expect(open(intoDirectory, limits)).toMatchObject({ _tag: "MalformedFile", reason: "entry data overlaps the central directory" })
     // compressed size past the buffer
     const farData = two.slice()
     new DataView(farData.buffer).setUint32(cd + 46 + 5 + 20, 1_000_000, true)

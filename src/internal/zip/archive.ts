@@ -21,7 +21,7 @@ import type * as Pull from "effect/Pull"
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import { CRC32_START, crc32Final, crc32Update } from "./crc32.ts"
-import { readDirectory, type ZipEntry } from "./directory.ts"
+import { type Directory, readDirectory, type ZipEntry } from "./directory.ts"
 import { type InflateRaw, inflateRawWeb } from "./inflate.ts"
 
 /** The ratio limit applies once an entry has inflated past this many bytes. */
@@ -63,7 +63,7 @@ interface Located {
 }
 
 /** Checks the local headers and the layout; returns where each entry's data is. */
-const locate = (bytes: Uint8Array, entries: ReadonlyArray<ZipEntry>): Map<ZipEntry, Located> | MalformedFile => {
+const locate = (bytes: Uint8Array, entries: Directory): Map<ZipEntry, Located> | MalformedFile => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const names = new TextDecoder("utf-8")
   const located = new Map<ZipEntry, Located>()
@@ -72,11 +72,16 @@ const locate = (bytes: Uint8Array, entries: ReadonlyArray<ZipEntry>): Map<ZipEnt
     const at = entry.localOffset
     if (at + 30 > bytes.length) return malformed("local header out of bounds", entry.name, at)
     if (view.getUint32(at, true) !== LOCAL) return malformed("bad local header signature", entry.name, at)
+    if (view.getUint16(at + 8, true) !== entry.method) {
+      return malformed("local header compression method differs from the directory", entry.name, at)
+    }
     const nameLength = view.getUint16(at + 26, true)
     const extraLength = view.getUint16(at + 28, true)
     const dataStart = at + 30 + nameLength + extraLength
     const dataEnd = dataStart + entry.compressedSize
     if (dataEnd > bytes.length) return malformed("entry data out of bounds", entry.name, at)
+    // entry data comes before the central directory (and so the EOCD)
+    if (dataEnd > entries.directoryStart) return malformed("entry data overlaps the central directory", entry.name, at)
     // The local name must be the directory's name (decoded the same way); a
     // mismatch means the directory points at the wrong data.
     if (names.decode(bytes.subarray(at + 30, at + 30 + nameLength)) !== entry.name) {
@@ -112,7 +117,7 @@ export const open = (
     if (byName.has(key)) return malformed("duplicate entry name", entry.name, entry.localOffset)
     byName.set(key, entry)
   }
-  const located = locate(bytes, entries as ReadonlyArray<ZipEntry>)
+  const located = locate(bytes, entries as Directory)
   if (located instanceof MalformedFile) return located
   let inflated = 0
 
