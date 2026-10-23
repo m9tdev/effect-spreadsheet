@@ -20,7 +20,7 @@ export interface SheetJS {
   }
 }
 
-export const SHEETJS_DIR = process.env["SHEETJS_DIR"] ?? join(homedir(), "sheetjs")
+export const SHEETJS_DIR = process.env["SHEETJS_DIR"] || join(homedir(), "sheetjs")
 export const SHEETJS_MJS = join(SHEETJS_DIR, "xlsx.mjs")
 
 let cached: Promise<SheetJS | undefined> | undefined
