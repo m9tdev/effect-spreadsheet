@@ -23,6 +23,7 @@ describe("src rules (AGENTS.md)", () => {
       const text = readFileSync(file, "utf8")
       if (!text.startsWith("// Portions derived from SheetJS")) continue
       expect(text.split("\n")[0], file).toMatch(/^\/\/ Portions derived from SheetJS \(bits\/[^)]+\), Copyright \(C\) SheetJS LLC, Apache-2\.0\.$/)
+      expect(text.split("\n")[1], file).toBe("// Licensed under the Apache License, Version 2.0: see LICENSE-APACHE-2.0.")
       expect(notice, file).toContain(file.slice(file.indexOf("/src/") + 1))
     }
   })

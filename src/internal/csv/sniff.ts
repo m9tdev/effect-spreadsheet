@@ -1,4 +1,5 @@
 // Portions derived from SheetJS (bits/40_harb.js), Copyright (C) SheetJS LLC, Apache-2.0.
+// Licensed under the Apache License, Version 2.0: see LICENSE-APACHE-2.0.
 /**
  * Delimiter sniffing.
  *

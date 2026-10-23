@@ -12,8 +12,8 @@ part of the npm package):
   repository.
 
 A library file that is derived from SheetJS (Copyright (C) SheetJS LLC)
-stays under the Apache License, Version 2.0, keeps its SheetJS header and is
-listed below.
+stays under the Apache License, Version 2.0 (full text in LICENSE-APACHE-2.0),
+keeps its SheetJS header and is listed below.
 
 Files derived from SheetJS:
 - src/internal/csv/sniff.ts: delimiter candidates and tie-break order follow

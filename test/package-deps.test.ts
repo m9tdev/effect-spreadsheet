@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 
 // Rule: effect and any @effect/* package used at runtime are peerDependencies
@@ -47,8 +47,17 @@ describe("package.json licence and files", () => {
 
   it("ships only the allowlisted paths", () => {
     expect(Array.isArray(pkg.files)).toBe(true)
-    const allowed = new Set(["dist", "src", "README.md", "LICENSE", "NOTICE"])
+    const allowed = new Set(["dist", "src", "README.md", "LICENSE", "LICENSE-APACHE-2.0", "NOTICE"])
     for (const entry of pkg.files ?? []) expect(allowed.has(entry.replace(/^\.\/|\/$/g, "")), entry).toBe(true)
+  })
+
+  // SheetJS-derived files stay Apache-2.0, so the package must ship its text (Apache-2.0 4(a)).
+  it("ships LICENSE, NOTICE and LICENSE-APACHE-2.0", () => {
+    for (const name of ["LICENSE", "NOTICE", "LICENSE-APACHE-2.0"]) {
+      expect(pkg.files, name).toContain(name)
+      expect(existsSync(new URL(`../${name}`, import.meta.url)), name).toBe(true)
+    }
+    expect(readFileSync(new URL("../LICENSE-APACHE-2.0", import.meta.url), "utf8")).toContain("Apache License\n                           Version 2.0, January 2004")
   })
 
   it("never ships test/, scripts/ or docs/", () => {
