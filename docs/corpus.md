@@ -290,7 +290,7 @@ fills `!rows`. That happens always for xls/xlsb/xlml/SYLK, and for xlsx only wit
 
 ### Results (2026-10-23, `oracle.mjs --jobs 8 --force`, 460 s wall)
 
-**Parse** (one job per unique sha256, 60 s limit each): 4673 jobs. 4627 are ok and 19
+**Parse** (one job per unique sha256, 60 s limit each): 4674 jobs. 4628 are ok and 19
 are `tooBig` (counts only: the large-strings, calendar-stress and datetime_8192 sets and
 the million-row files). None hit the parse timeout and none crashed. That "0 timeouts" is
 only for the parse step: every timeout of the run is in the stream probe below (211 probe
@@ -304,7 +304,7 @@ runs, by design). There are 27 errors. All of them are inputs that are meant to 
 
 The 9 unique `ooxml-encrypted` files are skipped.
 
-**stream.to_json probe**: 155 files → **107 hang**, 6 slow, 42 ok. Every hang has
+**stream.to_json probe**: 156 files → **108 hang**, 6–7 slow, 41–42 ok. Every hang has
 `control` (skipHidden:false) finishing, which confirms the hidden-row loop:
 
 | format | hang | read that hangs | examples (SheetJS-origin / ours) |
@@ -312,20 +312,23 @@ The 9 unique `ooxml-encrypted` files are skipped.
 | xls (BIFF5/8) | 35 | default | `AutoFilter.xls`, `comments_stress_test.xls` (BIFF8 and BIFF5), `generated/hidden_rows{,.biff5}.xls`, `hidden-rows/hidden-row.xls` |
 | xlml | 29 | default | `AutoFilter.xml`, Excel re-saves of `comments_stress_test`, `generated/hidden_rows.xml`, `hidden-rows/hidden-row.xml` |
 | xlsb | 17 | default | `AutoFilter.xlsb`, `comments_stress_test.xlsb`, `wtf_path.xlsb`, `generated/hidden_rows.xlsb`, `hidden-rows/hidden-row.xlsb` |
-| sylk | 5 | default | `generated/hidden_rows_{first,middle,consecutive,all}.slk`, `hidden-rows/hidden-row.slk` (`hidden_rows_last.slk` does **not** hang, as the `R-1` analysis predicts) |
+| sylk | 6 | default | `generated/hidden_rows_{first,middle,consecutive,all}.slk`, `generated/sylk_row_format_no_m.slk` (SheetJS's false hidden row), `hidden-rows/hidden-row.slk` (`hidden_rows_last.slk` does **not** hang, as the `R-1` analysis predicts) |
 | xlsx/xlsm | 21 (19 + 2) | **only `cellStyles:true`** | `AutoFilter.xlsx`, `comments_stress_test.xlsx`, `wtf_path.xlsx`, `generated/hidden_rows.xlsx`, `generated/many_empty_rows.xlsx`, `hidden-rows/hidden-row.xlsx` |
 
-The rest of the 107 are third-party corpus files; they are listed only in the cached report.
-The 6 slow ones (control times out too: a huge `!ref`, not the loop) are
+The rest of the 108 are third-party corpus files; they are listed only in the cached report.
+The slow ones (control times out too: a huge `!ref`, not the loop) are
 `generated/sparse_far.{xlsx,xlsb,xml,slk}` and `generated/huge_dimension.{xlsx,xlsb}`.
+`generated/sparse_far.xls` (a 16M-cell range) is borderline: it is "ok" on an idle machine
+and "slow" under load, because its scan takes about the 15 s probe timeout.
 
 The full list is in `test/corpus/.cache/oracle-report.json` → `streamVerdicts`.
 
 ### Committed expectations for our fixtures (`test/corpus/expected/`)
 
 `expected.mjs` copies the cached oracle result for each `generated/*` file and each of
-the 6 hidden-rows originals to `test/corpus/expected/<source>/<file>.json`. It drops `ms` and adds
-`streamProbe: {default, cellStyles, control}` (the probe statuses). hidden-rows `renamed/` copies
+the 6 hidden-rows originals to `test/corpus/expected/<source>/<file>.json`. It drops `ms`. It leaves out the stream-probe
+statuses, because whether a probe counts as "slow" depends on machine load. The hang facts
+for hidden-rows are in `hidden-rows/manifest.json` (`oldReaderHangs`). hidden-rows `renamed/` copies
 map to their original via `hidden-rows/manifest.json` `copyOf`. Each file is capped at 64 KiB:
 over the cap, `rows` is dropped first (`rowsOmitted: "size cap"`), then `cells`, while
 counts, hidden rows, merges and refs stay. At the time of writing, only

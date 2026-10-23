@@ -3,8 +3,10 @@
 // without ~/sheetjs: test/corpus/expected/{generated,hidden-rows}/<file>.json.
 //
 // Reads the oracle cache (run `node scripts/corpus/oracle.mjs --source generated`
-// and `--source hidden-rows` first): the parse result per sha256 plus the three
-// stream.to_json probe statuses. Drops volatile fields (ms). Each file is capped at
+// and `--source hidden-rows` first): the parse result per sha256. Drops volatile fields (ms).
+// The stream.to_json probe statuses are left out: "slow" vs "ok" depends on machine
+// load, so they would make the committed set non-deterministic (hidden-rows/manifest.json
+// carries the hang facts that matter). Each file is capped at
 // MAX_FILE_BYTES: over the cap, `rows` is dropped first (rows: null,
 // rowsOmitted: "size cap"), then `cells` (cells: null, cellsOmitted: "size cap"),
 // keeping counts, hidden rows, merges and refs. hidden-rows renamed/ copies have no file of
@@ -54,12 +56,6 @@ for (const src of sources) {
     delete doc.ms
     doc.path = rel
     doc.source = src.name
-    const stream = {}
-    for (const v of ["default", "cellStyles", "control"]) {
-      const p = path.join(EXPECTED_DIR, `${sha}.stream.${v}.json`)
-      if (fs.existsSync(p)) stream[v] = JSON.parse(fs.readFileSync(p, "utf8")).status
-    }
-    if (Object.keys(stream).length) doc.streamProbe = stream
     let text = stringify(doc)
     if (text.length > MAX_FILE_BYTES && doc.sheets) {
       for (const s of doc.sheets) if (s.rows) { s.rows = null; s.rowsOmitted = "size cap" }
