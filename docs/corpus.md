@@ -63,8 +63,15 @@ The download and extraction take about 10 s here.
 
 **Licence** (from `test_files/README.md` and `LICENSE`, Apache-2.0):
 
-- The files that SheetJS made itself are Apache-2.0. These include its Excel re-saves
-  (2011/2013/2016, BIFF5) of SheetJS originals.
+- The README says the root files are Apache-2.0, as are the Excel re-saves in the
+  201*/ and biff*/ directories of originals. We treat a file as **SheetJS-original
+  (Apache-2.0)** only if two things hold. First, it is at the root or directly in a 201*/
+  or biff*/ directory. Second, its name has either no `<prefix>_` or a stem that the README
+  documents (`SHEETJS_STEMS` in `manifest.mjs`, e.g. `AutoFilter`, `comments_stress_test`,
+  `number_format`).
+- The **other SheetJS subdirectories** (`1904/`, `crlf/`, `dpi/`, `wps/`, `artifacts/`,
+  `numbers/`, `duration_112/`, `datetime_8192/`, `issue*/`, …), and names with an **unknown
+  prefix**, are `unclear` and not committable. The README makes no licence statement for them.
 - **External** files carry a source prefix in their name or sit in a clone directory
   of the source project. A derivative keeps the licence of its original. The README
   gives these licences ("at the time of this writing"). `manifest.mjs` holds the prefix
@@ -72,7 +79,8 @@ The download and extraction take about 10 s here.
 
 | origin | licence | files in manifest | committable? |
 | --- | --- | --- | --- |
-| SheetJS originals | Apache-2.0 | 995 | yes (with NOTICE attribution) |
+| SheetJS originals (root + 201*/biff* re-saves, known stems) | Apache-2.0 | 864 | yes (with NOTICE attribution) |
+| other SheetJS subdirectories, unknown prefixes | unclear | 131 | **no** |
 | Apache POI | Apache-2.0 | 4299 | yes (NOTICE) |
 | spout | Apache-2.0 | 118 | yes (NOTICE) |
 | OpenOffice (oo34xml) | Apache-2.0 | 36 | yes (NOTICE) |

@@ -23,7 +23,10 @@ const NON_DATA = /(^|\/)(README\.md|LICENSE|Makefile|package\.json|requirements\
 
 // Provenance by prefix, per test_files/README.md: a derivative of an external
 // file carries the source prefix (`<prefix>_`) in its name; external clones live
-// in `<owner>_<repo>/` directories. Everything else is SheetJS-original (Apache-2.0).
+// in `<owner>_<repo>/` directories. SheetJS-original (Apache-2.0) is only claimed for
+// root files and the Excel re-saves in 201*/ and biff*/ whose name has no prefix or a
+// stem documented in the test_files README (SHEETJS_STEMS). Anything else is "unclear":
+// other subdirectories, and names with an unknown `<prefix>_`.
 // `committable` is our conclusion (docs/corpus.md); we still commit none of them for now.
 const ORIGINS = [
   { re: /^apachepoi_|^apache_spreadsheet\/|^apache_ExcelXML\//, origin: "apache-poi", license: "Apache-2.0", committable: true },
@@ -41,14 +44,33 @@ const ORIGINS = [
   { re: /^ootest_/, origin: "openoffice-testdocs", license: "unclear", committable: false },
 ]
 
+// Stems of SheetJS-original test files described in the test_files README.
+const SHEETJS_STEMS = [
+  "formula_stress_test", "comments_stress_test", "number_format", "large_strings", "RkNumber", "merge_cells",
+  "LONumbers", "rich_text_stress", "named_ranges", "custom_properties", "xlsx-stream-d-date-cell", "pivot_table",
+  "AutoFilter", "BlankSheetTypes", "ErrorTypes", "NumberFormatCondition", "protect_stress_test", "calendar_stress_test",
+  "hyperlink_stress_test", "internal_link", "hyperlink_no_rels", "text_and_numbers", "cell_style_simple",
+  "formulae_test_simple", "password", "sushi", "defined_names", "smart_tags", "A4X", "numfmt", "write",
+  "phonetic_text", "row_height", "column_width", "sized_boxen", "sheet_visibility", "page_margins", "outline",
+  "author_snowman", "wtf_path", "freeze", "types", "metadata_2019", "minimal_112", "threaded_comments",
+  "LO7322", "Attendance", "duration_112",
+]
+const UNCLEAR = { origin: "unknown", license: "unclear", committable: false }
+const SHEETJS = { origin: "sheetjs", license: "Apache-2.0", committable: true }
+
 function provenance(rel) {
-  // Check the full relative path and every component's basename-prefix.
+  // External origin: check the full relative path and every component's basename-prefix.
   const parts = rel.split("/")
   for (let i = 0; i < parts.length; i++) {
     const tail = parts.slice(i).join("/")
     for (const o of ORIGINS) if (o.re.test(tail)) return { origin: o.origin, license: o.license, committable: o.committable }
   }
-  return { origin: "sheetjs", license: "Apache-2.0", committable: true }
+  // SheetJS-original only at the root or in the Excel re-save dirs (201*/, biff*/).
+  if (parts.length > 2 || (parts.length === 2 && !/^(201\d|biff\d*)$/.test(parts[0]))) return UNCLEAR
+  const base = parts[parts.length - 1]
+  if (SHEETJS_STEMS.some((st) => base === st || base.startsWith(st + ".") || base.startsWith(st + "_") || base.startsWith(st + "-"))) return SHEETJS
+  if (/^[^_]+$/.test(base)) return SHEETJS // no prefix at all (README: root files are Apache-2.0)
+  return UNCLEAR // unknown `<prefix>_`
 }
 
 function walk(dir, base = dir, out = []) {
