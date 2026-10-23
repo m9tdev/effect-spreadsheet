@@ -6,6 +6,7 @@ import * as Spreadsheet from "../src/Spreadsheet.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import { csvAoa, csvExit, csvRows, enc, failureOf, toAoa } from "./helpers/run.ts"
+import { countYields } from "./helpers/yields.ts"
 
 describe("csv: structure", () => {
   it("empty input gives no rows", async () => {
@@ -367,19 +368,12 @@ describe("csv: streaming", () => {
     }))
 
   it("the event loop runs while a large input is parsed", async () => {
-    const bytes = enc("abcdefgh,ijklmnop,qrstuvwx\n".repeat(100_000)) // ~2.7 MB
-    let ticks = 0
-    let running = true
-    const tick = () => {
-      if (!running) return
-      ticks++
-      setImmediate(tick)
-    }
-    setImmediate(tick)
-    const count = await Effect.runPromise(Stream.runCount(Csv.rows(bytes)))
-    running = false
+    // ~2.7 MB = ~42 pieces of 64 KiB, with a yield before each; counted in
+    // event-loop turns, which machine load doesn't change
+    const bytes = enc("abcdefgh,ijklmnop,qrstuvwx\n".repeat(100_000))
+    const { value: count, yields } = await countYields(() => Effect.runPromise(Stream.runCount(Csv.rows(bytes))))
     assert.strictEqual(count, 100_000)
-    assert.isAbove(ticks, 10)
+    assert.isAtLeast(yields, 20)
   })
 
   it.effect("the error of the input stream passes through", () =>
