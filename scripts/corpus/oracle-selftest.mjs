@@ -41,6 +41,9 @@ function startOracle(env, args) {
   return { p, exited, output: () => out }
 }
 
+// Exit code the parent's own handler uses (128 + signal number); SIGKILL can't be handled.
+const HANDLED_EXIT = { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }
+
 async function killCase(name, signal) {
   // Probes on hidden-rows/hidden-row.* hang in SheetJS; give them a long timeout so they're still hanging when we kill.
   const o = startOracle({}, ["--jobs", "3", "--probe-timeout", "120", "--timeout", "120"])
@@ -50,7 +53,9 @@ async function killCase(name, signal) {
   kids = childrenOf(o.p.pid)
   check(`${name}: oracle has children`, kids.length > 0, `pids ${kids.join(",")}`)
   o.p.kill(signal)
-  await o.exited
+  const r = await o.exited
+  // The watchdogs would clean up even without the parent's handler, so check the handler ran.
+  if (HANDLED_EXIT[signal]) check(`${name}: parent's ${signal} handler ran (exit ${HANDLED_EXIT[signal]})`, r.code === HANDLED_EXIT[signal], `exit ${r.code ?? r.sig}`)
   let left = kids
   for (let i = 0; i < 20 && left.length; i++) { await sleep(250); left = left.filter(alive) }
   check(`${name}: no children left 5 s after ${signal} of the parent`, left.length === 0, left.length ? `still alive: ${left.join(",")}` : "")
