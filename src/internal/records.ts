@@ -1,7 +1,7 @@
 // Portions derived from SheetJS (bits/90_utils.js), Copyright (C) SheetJS LLC, Apache-2.0.
 // Licensed under the Apache License, Version 2.0: see LICENSE-APACHE-2.0.
 /**
- * Rows -> records (like SheetJS `sheet_to_json` with object output).
+ * Rows -> records: one object per data row, keyed by header names.
  *
  * @internal
  */
@@ -46,7 +46,7 @@ const headerText = (cell: Cell.Cell): string => {
 
 /**
  * Stateful converter: feed rows in order, get records. Header names are made
- * unique like SheetJS: an empty header is `__EMPTY`, repeats get `_1`, `_2`, ...
+ * unique: an empty header is `__EMPTY`, repeats get `_1`, `_2`, ...
  *
  * Cost follows the cells present: names live in a sparse map, a column the
  * header row has no cell for is named (`__EMPTY_k`) only when a data cell

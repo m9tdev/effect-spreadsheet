@@ -74,7 +74,7 @@ export type LimitOverrides = { readonly [K in keyof Limits]?: number | undefined
  * |---|---|---|
  * | maxInputBytes | 256 MiB | far above real uploads, below tab-crashing sizes |
  * | maxDecompressedBytes | 1 GiB | a 200k-row XLSX inflates to a few hundred MiB |
- * | maxCompressionRatio | 100 | the Apache POI zip-bomb default (1 / MIN_INFLATE_RATIO 0.01) |
+ * | maxCompressionRatio | 100 | the common 1% minimum inflate-ratio zip-bomb default |
  * | maxZipEntries | 10 000 | real workbooks have tens to hundreds |
  * | maxSheets | 1 024 | |
  * | maxRows | 1 048 576 | Excel's row limit |
