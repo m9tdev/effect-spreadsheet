@@ -3,6 +3,7 @@ import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import { type Archive, open, RATIO_GRACE_BYTES } from "../src/internal/zip/archive.ts"
 import { crc32 } from "../src/internal/zip/crc32.ts"
+import { readDirectory, type ZipEntry } from "../src/internal/zip/directory.ts"
 import type { Inflater, InflateRaw } from "../src/internal/zip/inflate.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import { failureOf } from "./helpers/run.ts"
@@ -135,6 +136,44 @@ describe("zip archive: reading entries", () => {
     expect(Array.from(first).length).toBe(2)
     expect(pulls).toBe(2)
     expect(cancelled).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe("zip64 extra field bounds", () => {
+  /** A one-entry archive whose directory entry uses a ZIP64 extra field; returns the bytes and where the field is. */
+  const zip64Archive = async () => {
+    const bytes = await buildZip([{ name: "a.xml", data: enc("hello"), zip64: true }])
+    const view = new DataView(bytes.buffer)
+    const cd = view.getUint32(bytes.length - 22 + 16, true)
+    const extra = cd + 46 + "a.xml".length // header id, size, then usize, csize, offset
+    return { bytes, view, extra }
+  }
+  const reasonOf = (result: unknown) => (result as { _tag?: string; reason?: string }).reason ?? (result as { _tag?: string })._tag
+
+  it("a ZIP64 field too short for the values it must hold is MalformedFile", async () => {
+    const { bytes, view, extra } = await zip64Archive()
+    view.setUint16(extra + 2, 8, true) // room for the uncompressed size only
+    expect(reasonOf(readDirectory(bytes, limits))).toBe("bad ZIP64 extra field")
+  })
+
+  it("an extra field longer than the extra area is ignored, so the ZIP64 values are missing", async () => {
+    const { bytes, view, extra } = await zip64Archive()
+    view.setUint16(extra + 2, 100, true)
+    expect(reasonOf(readDirectory(bytes, limits))).toBe("ZIP64 sizes without a ZIP64 extra field")
+  })
+
+  it("a ZIP64 offset of 2^60 can't be a buffer offset", async () => {
+    const { bytes, view, extra } = await zip64Archive()
+    view.setBigUint64(extra + 4 + 16, 1n << 60n, true)
+    expect(reasonOf(readDirectory(bytes, limits))).toBe("bad ZIP64 extra field")
+  })
+
+  it("a ZIP64 compressed size of 2^53-1 is read exactly and fails as out of bounds", async () => {
+    const { bytes, view, extra } = await zip64Archive()
+    view.setBigUint64(extra + 4 + 8, (1n << 53n) - 1n, true)
+    const entries = readDirectory(bytes, limits) as ReadonlyArray<ZipEntry>
+    expect(entries[0]!.compressedSize).toBe(Number.MAX_SAFE_INTEGER)
+    expect(open(bytes, limits)).toMatchObject({ _tag: "MalformedFile", reason: "entry data out of bounds" })
   })
 })
 
