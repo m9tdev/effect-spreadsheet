@@ -109,6 +109,39 @@ describe("zip central directory", () => {
     expect(reason(readDirectory(zip, limits))).toBe("central directory out of bounds")
   })
 
+  it("with ZIP64, the central directory must end before the ZIP64 record", () => {
+    const patched = zip64Patched()
+    const view = new DataView(patched.buffer)
+    const locator = eocdOf(patched) - 20
+    const at = Number(view.getBigUint64(locator + 8, true))
+    const start = Number(view.getBigUint64(at + 48, true))
+    const size = Number(view.getBigUint64(at + 40, true))
+    expect(start + size).toBe(at)
+    // 10 bytes more still ends before the classic EOCD, but runs into the ZIP64 record
+    view.setBigUint64(at + 40, BigInt(size + 10), true)
+    expect(start + size + 10).toBeLessThan(eocdOf(patched))
+    expect(reason(readDirectory(patched, limits))).toBe("central directory out of bounds")
+  })
+
+  it("an entry whose name runs past the end of the central directory is MalformedFile", () => {
+    const zip = makeZip([{ name: "first" }, { name: "second" }])
+    const eocd = eocdOf(zip)
+    const view = new DataView(zip.buffer)
+    // shrink the directory by 1 byte: the last entry's header fits, its name doesn't
+    view.setUint32(eocd + 12, view.getUint32(eocd + 12, true) - 1, true)
+    expect(reason(readDirectory(zip, limits))).toBe("central directory entry out of bounds")
+  })
+
+  it("an EOCD at offset 0 asking for ZIP64 is a typed error, not a RangeError", async () => {
+    const bytes = new Uint8Array(22)
+    const view = new DataView(bytes.buffer)
+    view.setUint32(0, 0x06054b50, true)
+    view.setUint16(8, 0xFFFF, true)
+    view.setUint16(10, 0xFFFF, true)
+    expect(reason(readDirectory(bytes, limits))).toBe("ZIP64 locator missing")
+    expect(detect(bytes, limits)).toMatchObject({ _tag: "MalformedFile", format: "zip" })
+  })
+
   it("an archive with both workbook parts is xlsb (the binary part wins)", () => {
     expect(detect(makeZip([{ name: "xl/workbook.xml" }, { name: "xl/workbook.bin" }]), limits)).toBe("xlsb")
     expect(detect(makeZip([{ name: "xl/workbook.bin" }, { name: "xl/workbook.xml" }]), limits)).toBe("xlsb")

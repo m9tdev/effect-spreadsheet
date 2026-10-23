@@ -116,6 +116,12 @@ describe("csv: delimiters", () => {
     assert.deepStrictEqual(rows[0], ["a," + "x".repeat(290), "c", "d"])
   })
 
+  it("equal consistent counts: the tie-break order , \\t ; | decides", async () => {
+    assert.deepStrictEqual(await csvAoa("a,b;c\nd,e;f\n"), [["a", "b;c"], ["d", "e;f"]])
+    assert.deepStrictEqual(await csvAoa("a;b|c\nd;e|f\n"), [["a", "b|c"], ["d", "e|f"]])
+    assert.deepStrictEqual(await csvAoa("a|b\tc\nd|e\tf\n"), [["a|b", "c"], ["d|e", "f"]])
+  })
+
   it("no candidate: comma", async () => {
     assert.deepStrictEqual(await csvAoa("abc\ndef\n"), [["abc"], ["def"]])
   })

@@ -66,8 +66,14 @@ describe("format detection", () => {
     const utf16le = (text: string) => new Uint8Array([...text].flatMap((c) => [c.charCodeAt(0), 0]))
     assert.strictEqual(await formatOf(utf16le("\t\tname\tx\n1\t2\t3\n")), "csv")
     assert.strictEqual(await formatOf(utf16le("\t\na\tb\n")), "csv")
-    // BIFF5/8 BOF: version 0x0600, workbook globals
+    // BIFF8 BOF: length 16, version 0x0600, workbook globals; BIFF5: length 8, version 0x0500
     assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x08, 0x10, 0x00, 0x00, 0x06, 0x05, 0x00, ...new Uint8Array(12)])), "xls")
+    assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x08, 0x08, 0x00, 0x00, 0x05, 0x10, 0x00, ...new Uint8Array(8)])), "xls")
+    // any other BIFF5/8 BOF length is not xls
+    for (const length of [4, 6, 12, 20]) {
+      const bof = new Uint8Array([0x09, 0x08, length, 0x00, 0x00, 0x06, 0x05, 0x00, ...new Uint8Array(16)])
+      assert.notStrictEqual(await formatOf(bof), "xls", `length ${length}`)
+    }
     // right type, wrong length or unknown data type
     assert.notStrictEqual(await formatOf(new Uint8Array([0x09, 0x00, 0x06, 0x00, 0x02, 0x00, 0x10, 0x00])), "xls")
     assert.notStrictEqual(await formatOf(new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x33, 0x00])), "xls")
