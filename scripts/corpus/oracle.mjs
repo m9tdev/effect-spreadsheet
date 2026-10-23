@@ -443,7 +443,9 @@ function runPool(jobs, n, readyTimeout) {
       if (aborted) return
       if (next >= jobs.length) { if (active === 0) resolve(results); return }
       active++
-      // TZ=UTC: nothing SheetJS derives from dates may depend on where the oracle runs.
+      // TZ=UTC: a safety net so nothing SheetJS derives from dates depends on where the oracle
+      // runs. JSON_OPTIONS.UTC alone already covers every TZ-dependent output we found
+      // (see oracle-selftest.mjs case G).
       const child = fork(self, ["--child"], { execArgv: ["--max-old-space-size=4096", "--stack-size=4000"], stdio: ["ignore", "ignore", "pipe", "ipc"], env: { ...process.env, TZ: "UTC" } })
       live.add(child)
       let stderr = ""

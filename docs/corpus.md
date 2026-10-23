@@ -233,9 +233,12 @@ XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: tr
 Why: `dense` keeps memory proportional to the cells that are present. `cellDates: false`
 keeps dates as serial numbers, plus `z`. `cellStyles: true` is **required** for SheetJS's
 xlsx reader to put hidden rows in `!rows`; without it the flag is silently dropped. In
-`rows`, `sheet_to_json` still turns date-formatted numbers into Dates. `UTC: true`, and
-children running with `TZ=UTC`, keep those (ISO strings in the JSON) independent of the
-machine's time zone. Schema 1 files had local-time Dates. We never
+`rows`, `sheet_to_json` still turns date-formatted numbers into Dates. `UTC: true` makes
+those (ISO strings in the JSON) independent of the machine's time zone. It is enough on
+its own: those Dates are the only time-zone-dependent output we found, and the
+expectations come out the same in three other zones without any `TZ` setting. The oracle
+children also run with `TZ=UTC`, as a safety net. Selftest G fails without `UTC: true`.
+Schema 1 files had local-time Dates. We never
 use `XLSX.stream.to_json` for expected output, because that is where the hang is (below).
 
 ```jsonc

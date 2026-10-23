@@ -15,6 +15,13 @@
 //      non-ASCII text, so bytes > chars), the result must be tooBig.
 //   G. the oracle output doesn't depend on the time zone: generated/dates.xlsx parsed
 //      under TZ=Pacific/Auckland gives the committed rows (dates as UTC ISO strings).
+//      This fails when sheet_to_json's UTC:true is dropped. It does not fail when only the
+//      children's TZ=UTC is dropped: UTC:true alone already makes the output time-zone
+//      independent. sheet_to_json's local-time Dates are the only TZ-dependent output we
+//      found, and the committed expectations are identical under Pacific/Auckland,
+//      America/Los_Angeles and Asia/Kathmandu without TZ=UTC. SheetJS reads ODS date-values
+//      without a zone and CSV date text the same in every zone. TZ=UTC stays as a safety net
+//      for paths we haven't seen.
 // Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B and E: they are skipped, not
 // failed, without it. Linux `ps` for the child lookup. Stale temp dirs from a SIGKILLed
 // run are removed at the next start.
