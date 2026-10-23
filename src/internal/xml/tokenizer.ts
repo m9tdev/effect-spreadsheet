@@ -23,6 +23,9 @@
  * tab, LF and CR become a space); characters written as references are
  * kept.
  *
+ * Errors carry the offset (in characters) of the tag or text run they are
+ * about, the same however the input is split.
+ *
  * Cost: every character is examined a bounded number of times (the
  * `work` counter); a token split across many pieces is collected in parts
  * and joined once.
@@ -117,8 +120,12 @@ export class XmlTokenizer {
   private readonly stack: Array<string> = []
   private rootSeen = false
   private rootClosed = false
-  /** Characters fed before the current piece (for error offsets). */
+  /** Characters fed before the current piece. */
   private consumed = 0
+  /** Offset of the current markup's '<' (for errors). */
+  private markupStart = 0
+  /** Offset of the current text run's first character (for errors). */
+  private textStart = 0
   private failure: SpreadsheetError | undefined
 
   constructor(handler: XmlHandler, limits: XmlLimits, part?: string) {
@@ -151,11 +158,15 @@ export class XmlTokenizer {
         const lt = chunk.indexOf("<", i)
         const end = lt < 0 ? n : lt
         this.work += end - i + 1
-        if (end > i) this.addText(chunk.slice(i, end))
+        if (end > i) {
+          if (this.textLength === 0) this.textStart = this.consumed + i
+          this.addText(chunk.slice(i, end))
+        }
         if (lt < 0) {
           i = n
         } else {
           this.flushText()
+          this.markupStart = this.consumed + lt
           this.inMarkup = true
           this.kind = Kind.Unknown
           this.markup = []
@@ -204,14 +215,14 @@ export class XmlTokenizer {
       // progress: k increases up to raw.length
       for (let k = 0; k < raw.length; k++) {
         if (!isSpace(raw.charCodeAt(k))) {
-          this.fail(this.malformed("text outside the root element", this.consumed))
+          this.fail(this.malformed("text outside the root element", this.textStart))
           return
         }
       }
       return
     }
     // line ends are normalized first (XML 1.0 §2.11), so &#13; survives
-    const value = this.decode(normalizeLineEnds(raw))
+    const value = this.decode(normalizeLineEnds(raw), this.textStart)
     if (value === undefined) return
     this.emit(this.handler.text(value))
   }
@@ -250,7 +261,7 @@ export class XmlTokenizer {
               head.startsWith("!DOCTYPE") || "!DOCTYPE".startsWith(head)
                 ? "DTDs (<!DOCTYPE>) are not supported"
                 : "unsupported declaration",
-              this.consumed + i
+              this.markupStart
             )
           )
           return i + 1
@@ -336,7 +347,7 @@ export class XmlTokenizer {
         return
       case Kind.Cdata: {
         if (this.stack.length === 0) {
-          this.fail(this.malformed("CDATA outside the root element", this.consumed))
+          this.fail(this.malformed("CDATA outside the root element", this.markupStart))
           return
         }
         // markup is "![CDATA[" + content + "]]>"
@@ -365,11 +376,11 @@ export class XmlTokenizer {
     while (p < n && !isSpace(body.charCodeAt(p))) p++
     const qname = body.slice(0, p)
     if (!NAME.test(qname)) {
-      this.fail(this.malformed(`bad element name ${JSON.stringify(qname.slice(0, 40))}`, this.consumed))
+      this.fail(this.malformed(`bad element name ${JSON.stringify(qname.slice(0, 40))}`, this.markupStart))
       return
     }
     if (this.rootClosed) {
-      this.fail(this.malformed("more than one root element", this.consumed))
+      this.fail(this.malformed("more than one root element", this.markupStart))
       return
     }
     const attributes: Array<readonly [string, string]> = []
@@ -381,7 +392,7 @@ export class XmlTokenizer {
       if (p >= n) break
       const eq = body.indexOf("=", p)
       if (eq < 0) {
-        this.fail(this.malformed(`attribute without a value in <${qname}>`, this.consumed))
+        this.fail(this.malformed(`attribute without a value in <${qname}>`, this.markupStart))
         return
       }
       const name = body.slice(p, eq).trim()
@@ -389,16 +400,16 @@ export class XmlTokenizer {
       while (q < n && isSpace(body.charCodeAt(q))) q++
       const quote = body.charCodeAt(q)
       if (quote !== 0x22 && quote !== 0x27) {
-        this.fail(this.malformed(`unquoted attribute value in <${qname}>`, this.consumed))
+        this.fail(this.malformed(`unquoted attribute value in <${qname}>`, this.markupStart))
         return
       }
       const close = body.indexOf(String.fromCharCode(quote), q + 1)
       if (close < 0 || !NAME.test(name)) {
-        this.fail(this.malformed(`bad attribute in <${qname}>`, this.consumed))
+        this.fail(this.malformed(`bad attribute in <${qname}>`, this.markupStart))
         return
       }
       if (seen.has(name)) {
-        this.fail(this.malformed(`duplicate attribute ${name} in <${qname}>`, this.consumed))
+        this.fail(this.malformed(`duplicate attribute ${name} in <${qname}>`, this.markupStart))
         return
       }
       seen.add(name)
@@ -415,7 +426,7 @@ export class XmlTokenizer {
       }
       // literal whitespace becomes a space (XML 1.0 §3.3.3) before references
       // are decoded, so &#10; and &#9; survive
-      const value = this.decode(normalizeAttribute(raw))
+      const value = this.decode(normalizeAttribute(raw), this.markupStart)
       if (value === undefined) return
       attributes.push([name, value])
       p = close + 1
@@ -435,11 +446,11 @@ export class XmlTokenizer {
     const qname = markup.slice(1).trim()
     const top = this.stack[this.stack.length - 1]
     if (top === undefined) {
-      this.fail(this.malformed(`end tag </${qname}> without a start tag`, this.consumed))
+      this.fail(this.malformed(`end tag </${qname}> without a start tag`, this.markupStart))
       return
     }
     if (top !== qname) {
-      this.fail(this.malformed(`end tag </${qname}> does not match <${top}>`, this.consumed))
+      this.fail(this.malformed(`end tag </${qname}> does not match <${top}>`, this.markupStart))
       return
     }
     this.closeElement(qname)
@@ -452,7 +463,7 @@ export class XmlTokenizer {
   }
 
   /** Decodes entities and character references; undefined (and a failure) if one is invalid. */
-  private decode(raw: string): string | undefined {
+  private decode(raw: string, offset: number): string | undefined {
     let amp = raw.indexOf("&")
     if (amp < 0) return raw
     const parts: Array<string> = []
@@ -461,7 +472,7 @@ export class XmlTokenizer {
     while (amp >= 0) {
       const semi = raw.indexOf(";", amp + 1)
       if (semi < 0 || semi - amp > 12) {
-        this.fail(this.malformed("bad entity reference", this.consumed))
+        this.fail(this.malformed("bad entity reference", offset))
         return undefined
       }
       const name = raw.slice(amp + 1, semi)
@@ -482,7 +493,7 @@ export class XmlTokenizer {
         ) ch = String.fromCodePoint(code)
       }
       if (ch === undefined) {
-        this.fail(this.malformed(`unknown or invalid entity &${name.slice(0, 12)};`, this.consumed))
+        this.fail(this.malformed(`unknown or invalid entity &${name.slice(0, 12)};`, offset))
         return undefined
       }
       parts.push(raw.slice(from, amp), ch)

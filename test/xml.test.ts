@@ -152,7 +152,7 @@ const errorKey = (error: SpreadsheetError | undefined) =>
   error === undefined
     ? undefined
     : error._tag === "MalformedFile"
-    ? [error._tag, error.reason]
+    ? [error._tag, error.reason, error.offset]
     : error._tag === "LimitExceeded"
     ? [error._tag, error.limit]
     : [error._tag]
@@ -184,6 +184,15 @@ describe("xml tokenizer: split invariance and cost", () => {
       }),
       { numRuns: 3000 }
     )
+  })
+
+  it("errors carry the offset of the tag or text they are about", () => {
+    expect(one("<a></b>").error).toMatchObject({ _tag: "MalformedFile", offset: 3 })
+    expect(one("<a/>  junk").error).toMatchObject({ _tag: "MalformedFile", offset: 4 })
+    expect(one("<a>x &bad; y</a>").error).toMatchObject({ _tag: "MalformedFile", offset: 3 })
+    expect(one('<a><b c="&bad;"/></a>').error).toMatchObject({ _tag: "MalformedFile", offset: 3 })
+    expect(one("<a/><!DOCTYPE x>").error).toMatchObject({ _tag: "MalformedFile", offset: 4 })
+    expect(tokenize(["<a/><!DOC", "TYPE x>"]).error).toMatchObject({ _tag: "MalformedFile", offset: 4 })
   })
 
   it("many comments, PIs and CDATA sections in one piece cost linear work", () => {
