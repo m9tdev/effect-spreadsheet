@@ -23,6 +23,13 @@
  * tab, LF and CR become a space); characters written as references are
  * kept.
  *
+ * Lenient on purpose (spreadsheet writers don't produce these, and
+ * rejecting them buys no safety): control characters in text, `<` inside
+ * attribute values, no space between attributes, a space after `</`, names
+ * with more than one colon (the part after the first colon is the local
+ * name), and an `<?xml ...?>` declaration anywhere (it is skipped like any
+ * processing instruction).
+ *
  * Errors carry the offset (in characters) of the tag or text run they are
  * about, the same however the input is split.
  *
