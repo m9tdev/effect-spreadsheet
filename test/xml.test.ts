@@ -333,6 +333,17 @@ describe("xml bytes", () => {
     expect(events.join("")).toBe("<a>é😀z</a>")
   })
 
+  it("a trailing incomplete UTF-8 sequence or odd UTF-16 byte is MalformedFile (the final flush catches it)", async () => {
+    const utf8 = await run([bytes("<a/>"), new Uint8Array([0xC3])])
+    expect(failureOf(utf8.exit)).toMatchObject({ _tag: "MalformedFile", reason: "invalid text encoding" })
+    const le = new Uint8Array([0xFF, 0xFE, 0x3C, 0x00, 0x61, 0x00, 0x2F, 0x00, 0x3E, 0x00, 0x20])
+    const utf16 = await run([le])
+    expect(failureOf(utf16.exit)).toMatchObject({ _tag: "MalformedFile", reason: "invalid text encoding" })
+    // the same documents without the extra byte are fine
+    expect(Exit.isSuccess((await run([bytes("<a/>")])).exit)).toBe(true)
+    expect(Exit.isSuccess((await run([le.subarray(0, 10)])).exit)).toBe(true)
+  })
+
   it("invalid or truncated UTF-8 is MalformedFile", async () => {
     for (const chunks of [[new Uint8Array([0x3C, 0x61, 0x3E, 0xFF, 0x3C, 0x2F, 0x61, 0x3E])], [bytes("<a>"), new Uint8Array([0xC3])]]) {
       const { exit } = await run(chunks)
