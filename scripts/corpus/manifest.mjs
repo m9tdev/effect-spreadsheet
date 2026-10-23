@@ -19,7 +19,7 @@ const t0 = Date.now()
 const SHEETJS_ROOT = path.join(SHEETJS_CACHE, "test_files")
 
 // Tooling/docs in test_files that are not corpus data (excluded by name, not sniffed).
-const NON_DATA = /(^|\/)(README\.md|LICENSE|Makefile|package\.json|requirements\.txt|\.rooster\.yaml|\.DS_Store|\.fetched\.json)$|\.(sheetnames|sh|scpt|rb|py|md)$|^(tests|misc)\//
+const NON_DATA = /(^|\/)(README\.md|LICENSE|Makefile|package\.json|requirements\.txt|\.rooster\.yaml|\.travis\.yml|\.gitignore|tests\.skip|\.DS_Store|\.fetched\.json)$|\.(sheetnames|sh|scpt|rb|py|md)$|^(tests|misc)\//
 
 // Provenance by prefix, per test_files/README.md: a derivative of an external
 // file carries the source prefix (`<prefix>_`) in its name; external clones live
@@ -68,7 +68,8 @@ function provenance(rel) {
   // SheetJS-original only at the root or in the Excel re-save dirs (201*/, biff*/).
   if (parts.length > 2 || (parts.length === 2 && !/^(201\d|biff\d*)$/.test(parts[0]))) return UNCLEAR
   const base = parts[parts.length - 1]
-  if (SHEETJS_STEMS.some((st) => base === st || base.startsWith(st + ".") || base.startsWith(st + "_") || base.startsWith(st + "-"))) return SHEETJS
+  // stem followed by end, ".", "_", "-" or digits (e.g. a numbered variant like `<stem>5.xls`)
+  if (SHEETJS_STEMS.some((st) => base === st || (base.startsWith(st) && /^[._\-\d]/.test(base.slice(st.length))))) return SHEETJS
   if (/^[^_]+$/.test(base)) return SHEETJS // no prefix at all (README: root files are Apache-2.0)
   return UNCLEAR // unknown `<prefix>_`
 }

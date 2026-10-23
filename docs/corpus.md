@@ -87,8 +87,8 @@ The download and extraction take about 10 s here.
 
 | origin | licence | files in manifest | committable? |
 | --- | --- | --- | --- |
-| SheetJS originals (root + 201*/biff* re-saves, known stems) | Apache-2.0 | 864 | yes (with NOTICE attribution) |
-| other SheetJS subdirectories, unknown prefixes | unclear | 131 | **no** |
+| SheetJS originals (root + 201*/biff* re-saves, known stems) | Apache-2.0 | 866 | yes (with NOTICE attribution) |
+| other SheetJS subdirectories, unknown prefixes | unclear | 126 | **no** |
 | Apache POI | Apache-2.0 | 4299 | yes (NOTICE) |
 | spout | Apache-2.0 | 118 | yes (NOTICE) |
 | OpenOffice (oo34xml) | Apache-2.0 | 36 | yes (NOTICE) |
@@ -167,7 +167,7 @@ Counts from the manifest at the time of writing (sheetjs + generated + hidden-ro
 
 | format | files | unique | with hidden rows | encrypted | generated | hidden-rows |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| csv | 4327 | 1965 | – | – | 12 | 0 |
+| csv | 4324 | 1962 | – | – | 12 | 0 |
 | xlsx | 1019 | 564 | 33 | – | 10 | 4 |
 | xlsm | 45 | 27 | 4 | – | 0 | 0 |
 | xltx | 2 | 1 | 0 | – | 0 | 0 |
