@@ -102,17 +102,18 @@ describe("toRecords", () => {
   it.effect("cells count against maxCellsPerSheet, defval fills against maxRecordFields", () =>
     Effect.gen(function*() {
       const rows = yield* csvRows("a,b,c\n1\n2\n3\n")
-      // 3 records x (3 fills + 1 cell): 9 fills, 3 cells
+      // 3 records x (1 value in "a" + 2 fills for "b", "c"): 6 fills, 3 cells
       const ok = yield* Spreadsheet.toRecords(rows, {
         header: "first-row",
         defval: null,
-        limits: { maxCellsPerSheet: 3, maxRecordFields: 9 }
+        limits: { maxCellsPerSheet: 3, maxRecordFields: 6 }
       })
       assert.strictEqual(ok.length, 3)
+      assert.deepStrictEqual(ok[0], { a: "1", b: null, c: null })
       const fills = yield* Effect.flip(
-        Spreadsheet.toRecords(rows, { header: "first-row", defval: null, limits: { maxRecordFields: 8 } })
+        Spreadsheet.toRecords(rows, { header: "first-row", defval: null, limits: { maxRecordFields: 5 } })
       )
-      assert.deepStrictEqual([fills._tag, fills.limit, fills.max], ["LimitExceeded", "maxRecordFields", 8])
+      assert.deepStrictEqual([fills._tag, fills.limit, fills.max, fills.actual], ["LimitExceeded", "maxRecordFields", 5, 6])
       const cells = yield* Effect.flip(
         Spreadsheet.toRecords(rows, { header: "first-row", limits: { maxCellsPerSheet: 2 } })
       )
@@ -120,9 +121,30 @@ describe("toRecords", () => {
       // the stream variant fails the same way, and the layer applies
       const streamError = yield* Effect.flip(
         Stream.runCollect(Spreadsheet.toRecords(Stream.fromIterable(rows), { header: "first-row", defval: null }))
-      ).pipe(Effect.provide(SpreadsheetLimits.layer({ maxRecordFields: 8 })))
+      ).pipe(Effect.provide(SpreadsheetLimits.layer({ maxRecordFields: 5 })))
       assert.strictEqual(streamError._tag === "LimitExceeded" && streamError.limit, "maxRecordFields")
     }))
+
+  it.effect("a dense file with defval needs no fills: 60 000 x 20 values stay under maxRecordFields", () =>
+    Effect.gen(function*() {
+      const header = Array.from({ length: 20 }, (_, i) => `h${i}`).join(",")
+      const row = Array.from({ length: 20 }, (_, i) => `v${i}`).join(",")
+      const bytes = enc(header + "\n" + (row + "\n").repeat(60_000))
+      const count = yield* Stream.runCount(Spreadsheet.toRecords(Csv.rows(bytes), { header: "first-row", defval: "" }))
+      assert.strictEqual(count, 60_000)
+      // Empty cells and missing columns are fills: 1 value + 1 Empty + 1 missing = 2 fills per record
+      const sparse: Array<Row> = [
+        { index: 0, hidden: false, cells: [Cell.text(0, "a"), Cell.text(1, "b"), Cell.text(2, "c")] },
+        { index: 1, hidden: false, cells: [Cell.text(0, "x"), Cell.empty(1)] },
+        { index: 2, hidden: false, cells: [Cell.text(0, "y"), Cell.empty(1)] }
+      ]
+      const ok = yield* Spreadsheet.toRecords(sparse, { header: "first-row", defval: 0, limits: { maxRecordFields: 4 } })
+      assert.deepStrictEqual(ok, [{ a: "x", b: 0, c: 0 }, { a: "y", b: 0, c: 0 }])
+      const over = yield* Effect.flip(
+        Spreadsheet.toRecords(sparse, { header: "first-row", defval: 0, limits: { maxRecordFields: 3 } })
+      )
+      assert.strictEqual(over.limit, "maxRecordFields")
+    }), 30_000)
 
   it.effect("Empty cells count against maxCellsPerSheet", () =>
     Effect.gen(function*() {

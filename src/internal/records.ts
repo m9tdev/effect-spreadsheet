@@ -58,6 +58,8 @@ export class RecordBuilder {
   private readonly names = new Map<number, string>()
   /** Header-named columns in column order: where `defval` goes. */
   private headerNames: Array<string> = []
+  /** Columns that have a header name (so a value there needs no fill). */
+  private readonly headerColumns = new Set<number>()
   private readonly fixed: boolean
   private readonly used = new Map<string, number>()
   private readonly headerRow: number | undefined
@@ -88,6 +90,7 @@ export class RecordBuilder {
         if (name === undefined) continue
         this.names.set(i, name)
         this.headerNames.push(name)
+        this.headerColumns.add(i)
       }
       this.headerDone = true
     } else {
@@ -120,6 +123,7 @@ export class RecordBuilder {
         const name = this.unique(text === "" ? "__EMPTY" : text)
         this.names.set(cell.column, name)
         this.headerNames.push(name)
+        this.headerColumns.add(cell.column)
       }
     }
     this.headerDone = true
@@ -173,8 +177,16 @@ export class RecordBuilder {
     let empty = true
     const defval = this.options.defval
     if (defval !== undefined) {
-      const over = this.countFills(this.headerNames.length)
+      // Only header columns without a value in this row are fills; count
+      // them before writing anything. progress: one cell per iteration.
+      let valued = 0
+      for (const cell of row.cells) {
+        if (cell._tag !== "Empty" && this.headerColumns.has(cell.column)) valued++
+      }
+      const over = this.countFills(Math.max(0, this.headerNames.length - valued))
       if (over !== undefined) return over
+      // every header name is written once below (values overwrite): batch by writes
+      this.keys += Math.min(valued, this.headerNames.length)
       // progress: one header name per iteration
       for (const name of this.headerNames) set(record, name, defval)
     }
