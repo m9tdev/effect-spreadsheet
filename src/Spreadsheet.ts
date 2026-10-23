@@ -7,10 +7,10 @@
 import { Effect, Stream } from "effect"
 import * as Csv from "./csv/index.ts"
 import { RecordBuilder, type RecordsOptions } from "./internal/records.ts"
-import { detect, type Format } from "./internal/sniff.ts"
+import { detect } from "./internal/sniff.ts"
 import { LimitExceeded, type SpreadsheetError, UnsupportedFormat } from "./SpreadsheetError.ts"
 import * as SpreadsheetLimits from "./SpreadsheetLimits.ts"
-import type { Row, Workbook } from "./Workbook.ts"
+import type { Format, Row, Workbook } from "./Workbook.ts"
 
 export type {
   /** @since 0.1.0 */

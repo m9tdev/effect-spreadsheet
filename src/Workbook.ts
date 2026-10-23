@@ -77,6 +77,34 @@ export const SheetInfo = Schema.Struct({
 export type SheetInfo = typeof SheetInfo.Type
 
 /**
+ * A file format, as detected from the bytes (`Spreadsheet.detectFormat`)
+ * and as reported by `Workbook.format`. Spreadsheet formats are named after
+ * the reader that handles them; the others say what was found instead.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export type Format =
+  | "csv"
+  | "xlsx"
+  | "xlsb"
+  | "xls"
+  | "ods"
+  | "spreadsheetml"
+  | "sylk"
+  /** OLE compound file: legacy .xls, or an encrypted OOXML workbook (told apart once the CFB reader exists). */
+  | "cfb"
+  /** A zip that isn't a known workbook. */
+  | "zip"
+  | "html"
+  | "xml"
+  | "pdf"
+  | "image"
+  | "rtf"
+  /** Binary data of no known kind. */
+  | "unknown"
+
+/**
  * Options for {@link rows}.
  *
  * @since 0.1.0
@@ -103,7 +131,7 @@ export const RowsSource: unique symbol = Symbol.for("effect-spreadsheet/Workbook
  */
 export interface Workbook {
   /** The format the workbook was read from, e.g. `"csv"`, `"xlsx"`. */
-  readonly format: string
+  readonly format: Format
   readonly sheets: ReadonlyArray<SheetInfo>
   /** The limits resolved when the workbook was read; {@link rows} applies its overrides on top. */
   readonly limits: Limits
@@ -122,7 +150,7 @@ export interface Workbook {
  * @category constructors
  */
 export const make = (options: {
-  readonly format: string
+  readonly format: Format
   readonly sheets: ReadonlyArray<SheetInfo>
   readonly limits: Limits
   readonly rows: (sheet: SheetInfo, limits: Limits) => Stream.Stream<Row, SpreadsheetError>

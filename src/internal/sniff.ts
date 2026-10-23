@@ -6,32 +6,9 @@
  */
 import { LimitExceeded, MalformedFile } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
+import type { Format } from "../Workbook.ts"
 import { detectEncoding } from "./csv/decode.ts"
 import { readDirectory, storedData } from "./zip/directory.ts"
-
-/**
- * What the bytes look like. Spreadsheet formats are named after the reader
- * that handles them; the others say what was found instead.
- */
-export type Format =
-  | "csv"
-  | "xlsx"
-  | "xlsb"
-  | "xls"
-  | "ods"
-  | "spreadsheetml"
-  | "sylk"
-  /** OLE compound file: legacy .xls, or an encrypted OOXML workbook (told apart once the CFB reader exists). */
-  | "cfb"
-  /** A zip that isn't a known workbook. */
-  | "zip"
-  | "html"
-  | "xml"
-  | "pdf"
-  | "image"
-  | "rtf"
-  /** Binary data of no known kind. */
-  | "unknown"
 
 const TEXT_PREFIX_BYTES = 8 * 1024
 

@@ -125,7 +125,7 @@ describe("SpreadsheetLimits", () => {
 
 describe("Workbook", () => {
   const wb = Workbook.make({
-    format: "test",
+    format: "csv",
     limits: SpreadsheetLimits.defaults,
     sheets: [
       { name: "Data", index: 0, visibility: "visible" },
