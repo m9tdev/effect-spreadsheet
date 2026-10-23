@@ -108,6 +108,14 @@ describe("SpreadsheetLimits", () => {
       yield* dies(Stream.runCollect(Workbook.rows(wb, 0, { limits: { maxRows: NaN } })))
     }))
 
+  it.effect("bad options are typed InvalidOption errors, bad limits are defects (as documented)", () =>
+    Effect.gen(function*() {
+      const bytes = new TextEncoder().encode("a\n")
+      const option = yield* Effect.flip(Stream.runCollect(Csv.rows(bytes, { delimiter: "ab" })))
+      assert.strictEqual(option._tag, "InvalidOption")
+      yield* dies(Stream.runCollect(Csv.rows(bytes, { limits: { maxRows: NaN } })))
+    }))
+
   it("mergePartial keeps defined values", () => {
     assert.deepStrictEqual(SpreadsheetLimits.mergePartial({ maxRows: 1 }, { maxRows: undefined, maxColumns: 2 }), {
       maxRows: 1,

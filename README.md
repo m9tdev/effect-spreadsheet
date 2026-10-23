@@ -39,6 +39,15 @@ Errors: `UnsupportedFormat { format, reason }`, `MalformedFile { format, part?, 
 `LimitExceeded { limit, max, actual }`, `Encrypted { format }`, `SheetNotFound { sheet }`,
 `InvalidOption { option, reason }` (e.g. a bad delimiter or encoding label).
 
+Bad input and bad reader options are typed errors; bad limits are not. A delimiter that isn't
+one usable character or an unknown encoding label fails with `InvalidOption`, but a limit that
+isn't a non-negative integer or `Infinity` (e.g. `maxRows: NaN`) is a defect (it dies), because
+it would otherwise silently switch the check off.
+
+`Spreadsheet.toRecords` takes its limits (`maxCellsPerSheet` for cells, `maxRecordFields` for
+`defval` fills) from the context where the records are produced, plus its own `limits` option,
+not from the workbook the rows were read from.
+
 ## CSV behaviour
 
 - Encoding: a BOM (UTF-8, UTF-16LE/BE) always wins, even over a forced `encoding`, and is dropped; otherwise `"auto"` decides on the first 64 KiB: UTF-16 by NUL pattern, else UTF-8 if valid, else windows-1252. `encoding` forces any `TextDecoder` label for input without a BOM.
