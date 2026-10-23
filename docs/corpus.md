@@ -19,6 +19,8 @@ node scripts/corpus/hidden-rows/manifest.mjs    # test/corpus/hidden-rows/manife
 node scripts/corpus/manifest.mjs       # full manifest -> test/corpus/.cache/manifest.json (gitignored)
 node scripts/corpus/oracle.mjs         # expected output -> test/corpus/.cache/expected/<sha256>.json
 node scripts/corpus/oracle-selftest.mjs   # oracle process hygiene (orphans, startup deaths), ~10 s
+node scripts/corpus/expected.mjs       # committed SheetJS expectations for generated + hidden-rows (after oracle --source generated/hidden-rows)
+node scripts/corpus/expected.mjs --check
 ```
 
 Oracle options: `--force`, `--jobs N` (default min(10, cores/2)), `--timeout SEC` (parse,
@@ -41,6 +43,7 @@ covers that run. Run without filters at the end: it reuses the cache and writes 
 | `test/corpus/sources.json` | yes | pin of the external corpus: URL, archive sha256/size, file count (no per-file details) |
 | `test/corpus/generated/` | yes | our fixtures (~150 KB), with `README.json` (name, sniffed format, size, sha256, description) |
 | `test/corpus/hidden-rows/` | yes | Synthetic hidden-row fixtures + `manifest.json` |
+| `test/corpus/expected/{generated,hidden-rows}/<file>.json` | yes | SheetJS expected output for our fixtures, so CI can compare without `~/sheetjs` (58 files, ~152 KiB, each ≤ 64 KiB) |
 | `test/corpus/.cache/` | **no** (gitignored) | `sheetjs/test_files` (fetched, 1.9 GB), `manifest.json` (full manifest), `expected/` (oracle output, ~1.3 GB), `oracle-report.json`; about **3.2 GB** in all (apparent size; plus 341 MB with `fetch --keep-zip`) |
 
 **Nothing committed lists third-party corpus files.** GitHub blocked `SheetJS/test_files`
@@ -314,6 +317,17 @@ The 6 slow ones (control times out too: a huge `!ref`, not the loop) are
 `generated/sparse_far.{xlsx,xlsb,xml,slk}` and `generated/huge_dimension.{xlsx,xlsb}`.
 
 The full list is in `test/corpus/.cache/oracle-report.json` → `streamVerdicts`.
+
+### Committed expectations for our fixtures (`test/corpus/expected/`)
+
+`expected.mjs` copies the cached oracle result for each `generated/*` file and each of
+the 6 hidden-rows originals to `test/corpus/expected/<source>/<file>.json`. It drops `ms` and adds
+`streamProbe: {default, cellStyles, control}` (the probe statuses). hidden-rows `renamed/` copies
+map to their original via `hidden-rows/manifest.json` `copyOf`. Each file is capped at 64 KiB:
+over the cap, `rows` is dropped first (`rowsOmitted: "size cap"`), then `cells`, while
+counts, hidden rows, merges and refs stay. At the time of writing, only
+`many_empty_rows_implicit.xlsx` hits the cap (1,048,576 dense rows). `--check` regenerates
+the set into a temp dir and compares it both ways.
 
 ## Hidden rows: our reader's contract
 
