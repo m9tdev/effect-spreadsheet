@@ -1,0 +1,11 @@
+effect-spreadsheet
+Copyright 2026 m9tdev
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes or is derived from portions of SheetJS (https://sheetjs.com,
+https://git.sheetjs.com/sheetjs/sheetjs, commit d2f2e17),
+Copyright (C) SheetJS LLC, licensed under the Apache License, Version 2.0.
+
+Files derived from SheetJS:
+(none yet)

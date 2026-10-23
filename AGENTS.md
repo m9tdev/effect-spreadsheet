@@ -1,0 +1,63 @@
+# AGENTS.md: effect-spreadsheet rules
+
+Read PLAN.md first. This is the project's rulebook.
+
+## Stack
+- Effect v4 only (`effect@^4`). No Effect 3 APIs, no `@effect/*` v3 packages.
+- TypeScript strict (incl. `exactOptionalPropertyTypes`), ESM, Node ≥24 for
+  dev. The library has to run in Node, in workers, and in browsers: no
+  `node:` imports and no native deps under `src/`. Use web-standard APIs
+  (`TextDecoder`, `DecompressionStream`, `Uint8Array`/`DataView`).
+- Package manager: pnpm. Test runner: vitest + `@effect/vitest`.
+  Property/fuzz tests use fast-check.
+
+## Safety (non-negotiable)
+1. **Every loop must provably advance.** Each `while`/`for`/recursive
+   descent has a cursor that strictly increases, or a counter bounded by a
+   limit. Write the progress measure in a short comment when it isn't
+   obvious. `continue` must not skip the advance.
+2. Hidden rows/columns/sheets are reported (`hidden`/`visibility`). They are
+   never a reason to skip work.
+3. Cost goes with the cells actually present, never with the declared
+   dimension or range. Sparse rows don't allocate dense arrays up to
+   the max column.
+4. All input is untrusted. Lengths, offsets, counts, sector chains and zip
+   sizes are checked against the buffer and against `SpreadsheetLimits`
+   before use. Chains are cycle-checked.
+5. Bad input → typed `SpreadsheetError` (Schema.TaggedError), never a
+   thrown exception/defect and never a hang. Fuzz tests enforce this with a
+   time budget.
+6. Long work yields: rows are emitted in bounded chunks through `Stream`.
+
+## Code
+- Public API in `src/*.ts` modules (`Spreadsheet`, `Workbook`, `Cell`,
+  `SpreadsheetError`, `SpreadsheetLimits`) and per-format subpaths. Internals
+  go in `src/internal/**`.
+- Names have to leave room for writing later: readers are `read*`, and the
+  model doesn't depend on any format.
+- Keep hot parsing loops in plain imperative TS over `Uint8Array`, and wrap
+  them in Effect at the boundaries. Don't allocate an Effect per cell.
+
+## SheetJS (Apache-2.0)
+- Reference clone: `~/sheetjs` (d2f2e17). Learn from it, port where it helps.
+- Any file that ports or closely follows SheetJS code starts with:
+  `// Portions derived from SheetJS (<path in ~/sheetjs>), Copyright (C) SheetJS LLC, Apache-2.0.`
+  and gets listed in `NOTICE`.
+- SheetJS is never a runtime or package dependency. It may only be loaded
+  from `~/sheetjs` in tests/scripts as an oracle (skip those tests when it's
+  absent).
+
+## Tests
+- Every format comes with: oracle comparison on corpus files, hidden rows,
+  sparse/far cells (e.g. XFD1048576), huge declared dimensions,
+  truncated/malformed files, and fuzzing (truncation, bit flips).
+- Corpus files are committed only if their license allows it. Everything
+  else goes in the gitignored `test/corpus/.cache`. Committed fixtures are
+  synthetic (made-up content) and must stay that way.
+- `pnpm check` (tsc) and `pnpm test` must pass before any merge.
+
+## Process
+- Work on a branch in a git worktree. Main only moves by merges after a
+  fresh review.
+- No `npm publish` without the user's OK.
+- Commit messages: imperative, with the scope (`csv: handle CRLF in quotes`).
