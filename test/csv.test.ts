@@ -274,7 +274,7 @@ describe("csv: type inference", () => {
     ])
   })
 
-  it("at most 15 digits before the exponent, not counting leading zeros", async () => {
+  it("at most 15 digits before the exponent, not counting zeros before the first non-zero digit", async () => {
     const inputs = ["1000000000000000", "1.000000000000000", "100000000000000", "1.00000000000000", "0.000000000000001", "-0.00000000000000123456789012345"]
     const rows = await Effect.runPromise(csvRows(inputs.join(",") + "\n", { inferTypes: true }))
     assert.deepStrictEqual(rows[0]!.cells.map((c) => [c._tag, Cell.value(c)]), [
@@ -303,12 +303,16 @@ describe("csv: type inference", () => {
     const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8")
     expect(listed(jsdoc)).toEqual(literals)
     expect(listed(readme)).toEqual(literals)
-    for (const text of [jsdoc, readme]) expect(text).toMatch(/case-sensitive/)
-    expect(jsdoc).toMatch(/surrounding whitespace stay text/)
-    expect(jsdoc).toMatch(/quoted\s+\*?\s*values are inferred too/)
+    for (const text of [jsdoc, readme]) {
+      expect(text).toMatch(/case-sensitive/)
+      expect(text).toMatch(/surrounding whitespace stay text/)
+      expect(text).toMatch(/quoted\s+\*?\s*values are inferred too/)
+      expect(text).toMatch(/rounds to 0 as a double/)
+      expect(text).not.toMatch(/too small for a double|Spaces around/)
+    }
   })
 
-  it("error literals are case-sensitive and limited to the listed ones; spaces keep text, quotes don't", async () => {
+  it("error literals are case-sensitive and limited to the listed ones; surrounding whitespace keeps text, quotes don't", async () => {
     const literals = ["#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA"]
     const others = ["#n/a", "#div/0!", "#SPILL!", "#CALC!", "#N/A "]
     const rows = await Effect.runPromise(csvRows([...literals, ...others.map((o) => `"${o}"`)].join(",") + "\n", { inferTypes: true }))
@@ -325,7 +329,7 @@ describe("csv: type inference", () => {
     ])
   })
 
-  it("values too small for a double become the Number 0", async () => {
+  it("values that round to 0 as a double become the Number 0", async () => {
     const rows = await Effect.runPromise(csvRows("1e-999,-1e-400,5e-324\n", { inferTypes: true }))
     const cells = rows[0]!.cells
     assert.deepStrictEqual(cells.map((c) => c._tag), ["Number", "Number", "Number"])
