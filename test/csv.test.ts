@@ -113,9 +113,13 @@ describe("csv: delimiters", () => {
     assert.deepStrictEqual(await csvAoa("sep=;\na,b\n", { delimiter: "," }), [["sep=;"], ["a", "b"]])
   })
 
-  it("invalid delimiter option is a typed error", async () => {
-    assert.strictEqual(failureOf(await csvExit("a", { delimiter: '"' }))?._tag, "UnsupportedFormat")
-    assert.strictEqual(failureOf(await csvExit("a", { delimiter: ";;" }))?._tag, "UnsupportedFormat")
+  it("invalid delimiter option is an InvalidOption error", async () => {
+    for (const delimiter of ['"', ";;", "", "\n", "\r"]) {
+      const error = failureOf(await csvExit("a", { delimiter }))
+      assert.deepStrictEqual(error?._tag === "InvalidOption" && error.option, "delimiter")
+    }
+    const atRead = await Effect.runPromise(Effect.flip(Csv.read(enc("a"), { delimiter: ";;" })))
+    assert.deepStrictEqual(atRead._tag === "InvalidOption" && atRead.option, "delimiter")
   })
 })
 
@@ -158,8 +162,11 @@ describe("csv: encodings", () => {
     assert.deepStrictEqual(await csvAoa(utf16("a,b", false, true), { encoding: "utf-16le" }), [["a", "b"]])
   })
 
-  it("unknown encoding label is a typed error", async () => {
-    assert.strictEqual(failureOf(await csvExit("a", { encoding: "klingon" }))?._tag, "UnsupportedFormat")
+  it("unknown encoding label is an InvalidOption error (when streaming and at read)", async () => {
+    const error = failureOf(await csvExit("a", { encoding: "klingon" }))
+    assert.deepStrictEqual(error?._tag === "InvalidOption" && error.option, "encoding")
+    const atRead = await Effect.runPromise(Effect.flip(Csv.read(enc("a"), { encoding: "klingon" })))
+    assert.deepStrictEqual(atRead._tag === "InvalidOption" && atRead.option, "encoding")
   })
 
   it("truncated multibyte character at EOF: U+FFFD in UTF-8, windows-1252 if it makes the whole input invalid", async () => {

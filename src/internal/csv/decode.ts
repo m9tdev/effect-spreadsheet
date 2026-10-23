@@ -5,7 +5,7 @@
  *
  * @internal
  */
-import { UnsupportedFormat } from "../../SpreadsheetError.ts"
+import { InvalidOption } from "../../SpreadsheetError.ts"
 
 /** Bytes buffered before deciding the encoding in `"auto"` mode. */
 export const DETECT_BYTES = 64 * 1024
@@ -41,12 +41,19 @@ export const detectEncoding = (head: Uint8Array, complete: boolean): string => {
   }
 }
 
-const makeDecoder = (label: string): TextDecoder | UnsupportedFormat => {
+/** An error if `label` isn't `"auto"` or a label `TextDecoder` knows. */
+export const validateEncoding = (label: string): InvalidOption | undefined => {
+  if (label === "auto") return undefined
+  const decoder = makeDecoder(label)
+  return decoder instanceof InvalidOption ? decoder : undefined
+}
+
+const makeDecoder = (label: string): TextDecoder | InvalidOption => {
   try {
     // ignoreBOM: false makes the decoder drop a BOM of its own encoding.
     return new TextDecoder(label, { ignoreBOM: false })
   } catch {
-    return new UnsupportedFormat({ format: "csv", reason: `text encoding ${JSON.stringify(label)} is not supported` })
+    return new InvalidOption({ option: "encoding", reason: `text encoding ${JSON.stringify(label)} is not supported` })
   }
 }
 
@@ -69,7 +76,7 @@ export class ByteDecoder {
   }
 
   /** Decodes a chunk. Returns the text available so far, or an error. */
-  push(bytes: Uint8Array): string | UnsupportedFormat {
+  push(bytes: Uint8Array): string | InvalidOption {
     if (this.decoder === undefined) {
       if (this.requested === "auto") {
         this.head.push(bytes)
@@ -78,7 +85,7 @@ export class ByteDecoder {
         return this.start(false)
       }
       const decoder = makeDecoder(this.requested)
-      if (decoder instanceof UnsupportedFormat) return decoder
+      if (decoder instanceof InvalidOption) return decoder
       this.decoder = decoder
       this.encoding = this.requested
     }
@@ -86,7 +93,7 @@ export class ByteDecoder {
   }
 
   /** Flushes at end of input (an incomplete trailing sequence becomes U+FFFD). */
-  end(): string | UnsupportedFormat {
+  end(): string | InvalidOption {
     let text = ""
     if (this.decoder === undefined) {
       const started = this.start(true)
@@ -96,7 +103,7 @@ export class ByteDecoder {
     return text + this.decoder!.decode()
   }
 
-  private start(complete: boolean): string | UnsupportedFormat {
+  private start(complete: boolean): string | InvalidOption {
     const head = concat(this.head, this.headBytes)
     this.head = []
     // Detect on exactly the first DETECT_BYTES, so the choice doesn't depend
@@ -107,7 +114,7 @@ export class ByteDecoder {
         : detectEncoding(head, complete)
       : this.requested
     const decoder = makeDecoder(label)
-    if (decoder instanceof UnsupportedFormat) return decoder
+    if (decoder instanceof InvalidOption) return decoder
     this.decoder = decoder
     this.encoding = label
     return decoder.decode(head, { stream: true })

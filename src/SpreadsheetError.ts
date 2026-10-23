@@ -93,10 +93,33 @@ export class SheetNotFound extends Schema.TaggedError<SheetNotFound>()("SheetNot
 }
 
 /**
+ * A reader option has a value it can't use, e.g. a delimiter that isn't one
+ * character or an encoding label `TextDecoder` doesn't know. `option` names
+ * it (e.g. `"delimiter"`, `"encoding"`).
+ *
  * @since 0.1.0
  * @category errors
  */
-export type SpreadsheetError = UnsupportedFormat | MalformedFile | LimitExceeded | Encrypted | SheetNotFound
+export class InvalidOption extends Schema.TaggedError<InvalidOption>()("InvalidOption", {
+  option: Schema.String,
+  reason: Schema.String
+}) {
+  override get message(): string {
+    return `Invalid option ${this.option}: ${this.reason}`
+  }
+}
+
+/**
+ * @since 0.1.0
+ * @category errors
+ */
+export type SpreadsheetError =
+  | UnsupportedFormat
+  | MalformedFile
+  | LimitExceeded
+  | Encrypted
+  | SheetNotFound
+  | InvalidOption
 
 /**
  * Schema of the whole union, e.g. to send errors across a worker boundary.
@@ -104,7 +127,14 @@ export type SpreadsheetError = UnsupportedFormat | MalformedFile | LimitExceeded
  * @since 0.1.0
  * @category schemas
  */
-export const SpreadsheetError = Schema.Union([UnsupportedFormat, MalformedFile, LimitExceeded, Encrypted, SheetNotFound])
+export const SpreadsheetError = Schema.Union([
+  UnsupportedFormat,
+  MalformedFile,
+  LimitExceeded,
+  Encrypted,
+  SheetNotFound,
+  InvalidOption
+])
 
 /**
  * @since 0.1.0
@@ -112,4 +142,4 @@ export const SpreadsheetError = Schema.Union([UnsupportedFormat, MalformedFile, 
  */
 export const isSpreadsheetError = (u: unknown): u is SpreadsheetError =>
   u instanceof UnsupportedFormat || u instanceof MalformedFile || u instanceof LimitExceeded ||
-  u instanceof Encrypted || u instanceof SheetNotFound
+  u instanceof Encrypted || u instanceof SheetNotFound || u instanceof InvalidOption

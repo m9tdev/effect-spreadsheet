@@ -39,7 +39,8 @@ describe("SpreadsheetError", () => {
         new SpreadsheetError.MalformedFile({ format: "zip", part: "xl/workbook.xml", offset: 12, reason: "bad" }),
         new SpreadsheetError.LimitExceeded({ limit: "maxRows", max: 1, actual: 2 }),
         new SpreadsheetError.Encrypted({ format: "xlsx" }),
-        new SpreadsheetError.SheetNotFound({ sheet: "x" })
+        new SpreadsheetError.SheetNotFound({ sheet: "x" }),
+        new SpreadsheetError.InvalidOption({ option: "delimiter", reason: "too long" })
       ]
       for (const e of errors) {
         const flipped = yield* Effect.flip(Effect.fail(e))

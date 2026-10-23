@@ -26,6 +26,7 @@
  * @since 0.1.0
  */
 import { Effect, Stream } from "effect"
+import { validateEncoding } from "../internal/csv/decode.ts"
 import { rowsFromByteStream, validateDelimiter } from "../internal/csv/reader.ts"
 import { LimitExceeded, type SpreadsheetError } from "../SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../SpreadsheetLimits.ts"
@@ -118,7 +119,7 @@ export const read = (
     if (input instanceof Uint8Array && input.length > limits.maxInputBytes) {
       return yield* new LimitExceeded({ limit: "maxInputBytes", max: limits.maxInputBytes, actual: input.length })
     }
-    const invalid = validateDelimiter(options?.delimiter)
+    const invalid = validateDelimiter(options?.delimiter) ?? validateEncoding(options?.encoding ?? "auto")
     if (invalid !== undefined) return yield* invalid
     const sheet: Workbook.SheetInfo = { name: options?.sheetName ?? "Sheet1", index: 0, visibility: "visible" }
     return Workbook.make({

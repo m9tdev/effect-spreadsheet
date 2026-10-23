@@ -5,7 +5,7 @@
  */
 import { Cause, Effect, Pull, Stream } from "effect"
 import type * as Arr from "effect/Array"
-import { LimitExceeded, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
+import { InvalidOption, LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
 import { ByteDecoder } from "./decode.ts"
@@ -25,12 +25,12 @@ export interface ResolvedOptions {
   readonly limits: Limits
 }
 
-export const validateDelimiter = (delimiter: string | undefined): UnsupportedFormat | undefined =>
+export const validateDelimiter = (delimiter: string | undefined): InvalidOption | undefined =>
   delimiter === undefined || (delimiter.length === 1 && delimiter !== '"' && delimiter !== "\r" && delimiter !== "\n")
     ? undefined
-    : new UnsupportedFormat({
-      format: "csv",
-      reason: `delimiter ${JSON.stringify(delimiter)} must be one character other than a quote, CR or LF`
+    : new InvalidOption({
+      option: "delimiter",
+      reason: `${JSON.stringify(delimiter)} must be one character other than a quote, CR or LF`
     })
 
 const isError = (u: Array<Row> | SpreadsheetError): u is SpreadsheetError => !Array.isArray(u)

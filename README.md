@@ -36,7 +36,8 @@ A `Row` is `{ index, hidden, cells }`; each cell is a tagged object
 `formula` / `numFmt` when the file has them.
 
 Errors: `UnsupportedFormat { format, reason }`, `MalformedFile { format, part?, offset?, reason }`,
-`LimitExceeded { limit, max, actual }`, `Encrypted { format }`, `SheetNotFound { sheet }`.
+`LimitExceeded { limit, max, actual }`, `Encrypted { format }`, `SheetNotFound { sheet }`,
+`InvalidOption { option, reason }` (e.g. a bad delimiter or encoding label).
 
 ## CSV behaviour
 
