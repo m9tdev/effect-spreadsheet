@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "description": "Read spreadsheet files (CSV, XLSX, XLS, XLSB) with Effect v4 and pure-TypeScript parsers",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/m9tdev/effect-spreadsheet.git"
