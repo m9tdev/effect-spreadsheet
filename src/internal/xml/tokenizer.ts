@@ -57,6 +57,13 @@ const Kind = {
 } as const
 type Kind = typeof Kind[keyof typeof Kind]
 
+/** Length of the opener ("?", "!--", "![CDATA[") that a terminator may not overlap. */
+const OPENER: Record<number, number> = {
+  [Kind.Pi]: 1,
+  [Kind.Comment]: 3,
+  [Kind.Cdata]: 8
+}
+
 const TERMINATOR: Record<number, string> = {
   [Kind.Pi]: "?>",
   [Kind.Comment]: "-->",
@@ -265,20 +272,35 @@ export class XmlTokenizer {
       return j + 1
     }
     // PI, comment, CDATA: a multi-character terminator, possibly split
+    // across pieces. It may not reuse characters of the opener ("<!-->" is
+    // not a comment), so only markup positions past the opener count, and
+    // the same holds whatever the splitting.
     const terminator = TERMINATOR[this.kind]!
-    const window = this.tail + chunk.slice(i)
-    // a comment's "-->" may not reuse the dashes of its opening "!--"
-    const from = this.kind === Kind.Comment ? Math.max(0, 3 - this.markupLength) : 0
-    const at = window.indexOf(terminator, from)
-    this.work += window.length
-    if (at < 0) {
-      this.addMarkup(chunk.slice(i))
-      const all = this.tail + chunk.slice(i)
-      this.tail = all.slice(Math.max(0, all.length - (terminator.length - 1)))
-      return n
+    const opener = OPENER[this.kind]!
+    let endInChunk = -1
+    if (this.tail.length > 0) {
+      // a terminator that starts in the tail ends within the next few characters
+      const joint = this.tail + chunk.slice(i, i + terminator.length - 1)
+      const k = joint.indexOf(terminator)
+      this.work += joint.length
+      if (k >= 0) endInChunk = i + k + terminator.length - this.tail.length
     }
-    // `at` counts from the start of the tail; the terminator ends in this chunk
-    const endInChunk = i + (at - this.tail.length) + terminator.length
+    if (endInChunk < 0) {
+      const from = i + Math.max(0, opener - this.markupLength)
+      const at = from <= n ? chunk.indexOf(terminator, from) : -1
+      if (at < 0) {
+        this.work += n - i
+        this.addMarkup(chunk.slice(i))
+        // keep the last characters past the opener, for a terminator split
+        // across pieces
+        const keep = Math.min(terminator.length - 1, Math.max(0, this.markupLength - opener))
+        const last = (this.tail + chunk.slice(Math.max(i, n - keep))).slice(-keep)
+        this.tail = keep === 0 ? "" : last
+        return n
+      }
+      endInChunk = at + terminator.length
+      this.work += endInChunk - i
+    }
     this.addMarkup(chunk.slice(i, endInChunk))
     this.finishMarkup()
     return endInChunk

@@ -147,6 +147,55 @@ describe("xml tokenizer: documents", () => {
   })
 })
 
+/** The parts of an error that must not depend on how the input was split. */
+const errorKey = (error: SpreadsheetError | undefined) =>
+  error === undefined
+    ? undefined
+    : error._tag === "MalformedFile"
+    ? [error._tag, error.reason]
+    : error._tag === "LimitExceeded"
+    ? [error._tag, error.limit]
+    : [error._tag]
+
+const XMLISH = fc.constantFrom(
+  "<", ">", "/", "a", "b", " ", "=", '"', "'", "&", ";", "#", "x", "!", "-", "[", "?", "]", "\r", "\n", "\t",
+  "amp", "<a>", "</a>", "<![CDATA[", "-->", "<!--", "<?", "?>", "]]>", "é", "&#10;", "&#13;", "&lt;"
+)
+
+describe("xml tokenizer: split invariance and cost", () => {
+  it("a comment opener at the end of a piece can't close the comment (<!--> stays open)", () => {
+    const doc = "<a><!-->x--></a>"
+    const whole = one(doc)
+    expect(whole.error).toBeUndefined()
+    expect(whole.events).toEqual([["open", "a", []], ["close", "a"]])
+    for (let cut = 0; cut <= doc.length; cut++) {
+      const split = tokenize([doc.slice(0, cut), doc.slice(cut)])
+      expect([split.events, errorKey(split.error)], `cut at ${cut}`).toEqual([whole.events, errorKey(whole.error)])
+    }
+  })
+
+  it("random XML-ish input gives the same events and error however it is split", () => {
+    fc.assert(
+      fc.property(fc.array(XMLISH, { maxLength: 120 }), fc.array(fc.nat(800), { maxLength: 12 }), (parts, cuts) => {
+        const doc = parts.join("")
+        const whole = one(doc)
+        const split = tokenize(splitAt(doc, cuts))
+        expect([split.events, errorKey(split.error)]).toEqual([whole.events, errorKey(whole.error)])
+      }),
+      { numRuns: 3000 }
+    )
+  })
+
+  it("many comments, PIs and CDATA sections in one piece cost linear work", () => {
+    const doc = "<a>" + "<!-- c --><?p i?><![CDATA[d]]>".repeat(20_000) + "</a>"
+    const { error, work, events } = one(doc)
+    expect(error).toBeUndefined()
+    expect(events.filter((e) => e[0] === "text").length).toBe(1)
+    expect(work).toBeLessThanOrEqual(6 * doc.length)
+  })
+
+})
+
 describe("xml tokenizer: rejected input", () => {
   const malformed: Record<string, ReadonlyArray<string>> = {
     "a DTD": [`<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]><x>&a;</x>`],
