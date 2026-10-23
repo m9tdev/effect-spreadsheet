@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { assert, describe, expect, it } from "@effect/vitest"
 import { Effect, Stream } from "effect"
 import * as Cell from "../src/Cell.ts"
@@ -284,6 +285,21 @@ describe("csv: type inference", () => {
       ["Number", 1e-15],
       ["Number", -1.23456789012345e-15]
     ])
+  })
+
+  it("the README and the inferTypes doc list exactly the parser's error literals", () => {
+    const literals = ["#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA"]
+    const parser = readFileSync(new URL("../src/internal/csv/parser.ts", import.meta.url), "utf8")
+    const set = /const ERRORS = new Set\(\[([^\]]*)\]\)/.exec(parser)![1]!
+    expect(set.split(",").map((s) => JSON.parse(s.trim()))).toEqual(literals)
+    const listed = (text: string) => [...text.matchAll(/`(#[A-Z0-9/!?_]+)`/g)].map((m) => m[1])
+    const jsdoc = readFileSync(new URL("../src/csv/index.ts", import.meta.url), "utf8")
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8")
+    expect(listed(jsdoc)).toEqual(literals)
+    expect(listed(readme)).toEqual(literals)
+    for (const text of [jsdoc, readme]) expect(text).toMatch(/case-sensitive/)
+    expect(jsdoc).toMatch(/surrounding whitespace stay text/)
+    expect(jsdoc).toMatch(/quoted\s+\*?\s*values are inferred too/)
   })
 
   it("error literals are case-sensitive and limited to the listed ones; spaces keep text, quotes don't", async () => {

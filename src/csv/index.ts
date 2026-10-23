@@ -57,9 +57,12 @@ export interface ReadOptions {
    * at most 15 digits, not counting leading zeros (`1000000000000000` and
    * `1.000000000000000` stay text), finite; `-0` becomes `0`, and so do
    * values too small for a double (`1e-999`, `-1e-400`); no thousands
-   * separators, currency, `%` or hex) become `Number`; the
-   * Excel error literals (`#N/A`, `#DIV/0!`, ...) become `Error`. Dates and
-   * formulas are never inferred (`=SUM(A1)` stays text).
+   * separators, currency, `%` or hex) become `Number`; the Excel error
+   * literals `#NULL!`, `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`,
+   * `#N/A` and `#GETTING_DATA` become `Error` (case-sensitive: `#n/a` stays
+   * text). Values with surrounding whitespace stay text (`" 1"`); quoted
+   * values are inferred too (`"1"` gives `1`). Dates and formulas are never
+   * inferred (`=SUM(A1)` stays text).
    */
   readonly inferTypes?: boolean | undefined
   /** Default `false`. See the module docs. */
