@@ -2,12 +2,20 @@
 import { Effect, Stream } from "effect"
 import * as Csv from "../../src/csv/index.ts"
 import * as Spreadsheet from "../../src/Spreadsheet.ts"
+import { open } from "../../src/internal/zip/archive.ts"
+import { parse } from "../../src/internal/xml/parse.ts"
+import type { XmlHandler } from "../../src/internal/xml/tokenizer.ts"
+import * as SpreadsheetLimits from "../../src/SpreadsheetLimits.ts"
 import type { LimitOverrides } from "../../src/SpreadsheetLimits.ts"
 import * as Workbook from "../../src/Workbook.ts"
+
+const ignore: XmlHandler = { open: () => undefined, close: () => undefined, text: () => undefined }
 
 export type FuzzTask =
   | { readonly op: "read"; readonly bytes: Uint8Array; readonly limits?: LimitOverrides | undefined }
   | { readonly op: "detect"; readonly bytes: Uint8Array }
+  | { readonly op: "zip"; readonly bytes: Uint8Array; readonly limits?: LimitOverrides | undefined }
+  | { readonly op: "xml"; readonly chunks: ReadonlyArray<Uint8Array>; readonly limits?: LimitOverrides | undefined }
   | {
     readonly op: "csv"
     readonly chunks: ReadonlyArray<Uint8Array>
@@ -24,5 +32,18 @@ export const effectOf = (task: FuzzTask): Effect.Effect<unknown, unknown> => {
       return Spreadsheet.detectFormat(task.bytes)
     case "csv":
       return Stream.runDrain(Csv.rows(Stream.fromIterable(task.chunks), task.options))
+    case "zip":
+      // open the archive, inflate every entry and tokenize the XML ones
+      return Effect.flatMap(SpreadsheetLimits.resolve(task.limits), (limits) => {
+        const archive = open(task.bytes, limits)
+        if ("_tag" in archive) return Effect.fail(archive)
+        return Effect.forEach(archive.entries, (entry) =>
+          /\.(xml|rels)$/i.test(entry.name)
+            ? parse(archive.read(entry), ignore, limits, entry.name)
+            : Stream.runDrain(archive.read(entry)), { discard: true })
+      })
+    case "xml":
+      return Effect.flatMap(SpreadsheetLimits.resolve(task.limits), (limits) =>
+        parse(Stream.fromIterable(task.chunks), ignore, limits, "fuzz.xml"))
   }
 }

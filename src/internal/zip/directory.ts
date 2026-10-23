@@ -12,12 +12,18 @@ export interface ZipEntry {
   readonly name: string
   /** 0 = stored, 8 = deflate. */
   readonly method: number
+  /** General-purpose flags: bit 0 = encrypted, bit 3 = data descriptor, bit 11 = UTF-8 name. */
   readonly flags: number
+  /** CRC-32 of the uncompressed data, from the central directory. */
+  readonly crc32: number
   readonly compressedSize: number
   readonly uncompressedSize: number
   /** Offset of the local file header. */
   readonly localOffset: number
 }
+
+const ZIP64_EXTRA = 0x0001
+const MAX32 = 0xFFFFFFFF
 
 const EOCD = 0x06054b50
 const ZIP64_LOCATOR = 0x07064b50
@@ -47,10 +53,18 @@ const findEocd = (bytes: Uint8Array, view: DataView): number => {
   return -1
 }
 
+/** The entries, plus where the central directory starts (entry data must end before it). */
+export type Directory = ReadonlyArray<ZipEntry> & { readonly directoryStart: number }
+
+/**
+ * Reads the central directory. Names are decoded as UTF-8 whatever the
+ * UTF-8 flag says: names in spreadsheet packages are ASCII, and CP437 (the
+ * zip default) isn't supported.
+ */
 export const readDirectory = (
   bytes: Uint8Array,
   limits: Limits
-): ReadonlyArray<ZipEntry> | MalformedFile | LimitExceeded => {
+): Directory | MalformedFile | LimitExceeded => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const eocd = findEocd(bytes, view)
   if (eocd < 0) return malformed("end of central directory not found (truncated?)")
@@ -90,20 +104,60 @@ export const readDirectory = (
     if (view.getUint32(p, true) !== CENTRAL) return malformed("bad central directory entry signature", p)
     const flags = view.getUint16(p + 8, true)
     const method = view.getUint16(p + 10, true)
-    const compressedSize = view.getUint32(p + 20, true)
-    const uncompressedSize = view.getUint32(p + 24, true)
+    const crc32 = view.getUint32(p + 16, true)
+    let compressedSize: number | undefined = view.getUint32(p + 20, true)
+    let uncompressedSize: number | undefined = view.getUint32(p + 24, true)
     const nameLength = view.getUint16(p + 28, true)
     const extraLength = view.getUint16(p + 30, true)
     const commentLength = view.getUint16(p + 32, true)
-    const localOffset = view.getUint32(p + 42, true)
+    let localOffset: number | undefined = view.getUint32(p + 42, true)
     const next = p + 46 + nameLength + extraLength + commentLength
     if (next > end) return malformed("central directory entry out of bounds", p)
     const name = names.decode(bytes.subarray(p + 46, p + 46 + nameLength))
-    // ZIP64 extra fields (sizes/offsets of 0xFFFFFFFF) are left to the full zip reader.
-    entries.push({ name, method, flags, compressedSize, uncompressedSize, localOffset })
+    if (uncompressedSize === MAX32 || compressedSize === MAX32 || localOffset === MAX32) {
+      // The real values are in the ZIP64 extra field, in this order, each
+      // present only when the 32-bit field is 0xFFFFFFFF.
+      const extraStart = p + 46 + nameLength
+      const zip64 = findExtra(view, extraStart, extraStart + extraLength, ZIP64_EXTRA)
+      if (zip64 === undefined) return malformed("ZIP64 sizes without a ZIP64 extra field", p)
+      let at = zip64.start
+      const take = (): number | undefined => {
+        if (at + 8 > zip64.end) return undefined
+        const value = u64(view, at)
+        at += 8
+        return value
+      }
+      if (uncompressedSize === MAX32) uncompressedSize = take()
+      if (compressedSize === MAX32) compressedSize = take()
+      if (localOffset === MAX32) localOffset = take()
+      if (uncompressedSize === undefined || compressedSize === undefined || localOffset === undefined) {
+        return malformed("bad ZIP64 extra field", zip64.start)
+      }
+    }
+    entries.push({ name, method, flags, crc32, compressedSize, uncompressedSize, localOffset })
     p = next
   }
-  return entries
+  return Object.assign(entries, { directoryStart: start })
+}
+
+/** Finds an extra field by id within [start, end); its data range, or undefined. */
+const findExtra = (
+  view: DataView,
+  start: number,
+  end: number,
+  id: number
+): { readonly start: number; readonly end: number } | undefined => {
+  let p = start
+  // progress: p grows by 4 + size (>= 4) per field
+  while (p + 4 <= end) {
+    const fieldId = view.getUint16(p, true)
+    const size = view.getUint16(p + 2, true)
+    const dataEnd = p + 4 + size
+    if (dataEnd > end) return undefined
+    if (fieldId === id) return { start: p + 4, end: dataEnd }
+    p = dataEnd
+  }
+  return undefined
 }
 
 /**
