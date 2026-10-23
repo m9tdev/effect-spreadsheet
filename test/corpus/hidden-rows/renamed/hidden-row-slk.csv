@@ -1,0 +1,19 @@
+ID;PSheetJS;N;E
+P;PGeneral
+F;P0;DG0G8;M255
+F;M0;R3
+B;Y4;X3;D0 0 2 3
+O;L;D;B;K47;G100 0.001
+C;Y1;X1;K"Product"
+C;Y1;X2;K"Qty"
+C;Y1;X3;K"Price"
+C;Y2;X1;K"Product A"
+C;Y2;X2;K1
+C;Y2;X3;K2.5
+C;Y3;X1;K"Product B"
+C;Y3;X2;K2
+C;Y3;X3;K3.75
+C;Y4;X1;K"Product C"
+C;Y4;X2;K3
+C;Y4;X3;K4
+E

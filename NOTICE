@@ -9,3 +9,11 @@ Copyright (C) SheetJS LLC, licensed under the Apache License, Version 2.0.
 
 Files derived from SheetJS:
 (none yet)
+
+Test corpus (test/corpus, scripts/corpus; not part of the library):
+- test/corpus/generated and test/corpus/hidden-rows contain files written with the
+  SheetJS 0.20.3 writer (Copyright (C) SheetJS LLC, Apache-2.0), which embeds
+  SheetJS boilerplate parts (e.g. xl/theme/theme1.xml).
+- The SheetJS test_files corpus (https://test-files.sheetjs.com) is fetched
+  into the gitignored test/corpus/.cache and is not distributed with this
+  repository; see docs/corpus.md for its licensing.
