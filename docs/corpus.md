@@ -3,7 +3,10 @@
 Everything here is test/script code. Nothing under `scripts/corpus` or
 `test/corpus` is imported from `src/`, and SheetJS is never a package
 dependency: the scripts load it from the local clone `~/sheetjs` (d2f2e17,
-SheetJS 0.20.3; override with `SHEETJS_DIR`).
+SheetJS 0.20.3). The convention is shared with the test-side oracle: env
+`SHEETJS_DIR` is the SheetJS **repo directory**, default `path.join(os.homedir(), "sheetjs")`,
+and each side picks its own entry file inside it. These scripts use `xlsx.js`
+(`SHEETJS_ENTRY` in `lib.mjs`).
 
 The scripts are plain Node ESM (Node ≥ 24), with no dependencies.
 

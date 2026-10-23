@@ -10,6 +10,7 @@
 
 import { createHash } from "node:crypto"
 import fs from "node:fs"
+import os from "node:os"
 import { inflateRawSync } from "node:zlib"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -26,7 +27,10 @@ export const MANIFEST_PATH = path.join(CACHE_DIR, "manifest.json")
 // Committed pin of the external corpus (URL + archive sha256), no per-file details.
 export const SOURCES_PATH = path.join(CORPUS_DIR, "sources.json")
 export const EXPECTED_DIR = path.join(CACHE_DIR, "expected")
-export const SHEETJS_DIR = process.env.SHEETJS_DIR ?? path.join(process.env.HOME ?? "", "sheetjs")
+// Shared convention with the test oracle: SHEETJS_DIR is the SheetJS repo dir,
+// default ~/sheetjs. Each side picks its own entry file in it (here: SHEETJS_ENTRY, xlsx.js).
+export const SHEETJS_DIR = process.env.SHEETJS_DIR || path.join(os.homedir(), "sheetjs")
+export const SHEETJS_ENTRY = path.join(SHEETJS_DIR, "xlsx.js")
 
 export const sha256 = (buf) => createHash("sha256").update(buf).digest("hex")
 

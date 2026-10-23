@@ -19,10 +19,10 @@ import os from "node:os"
 import path from "node:path"
 import { createRequire } from "node:module"
 import { crc32, deflateRawSync } from "node:zlib"
-import { GENERATED_DIR, SHEETJS_DIR, compareDirs, reportCompare, sha256, sniff, zipEntries, zipRead } from "./lib.mjs"
+import { GENERATED_DIR, SHEETJS_DIR, SHEETJS_ENTRY, compareDirs, reportCompare, sha256, sniff, zipEntries, zipRead } from "./lib.mjs"
 
 const require = createRequire(import.meta.url)
-const XLSX = require(path.join(SHEETJS_DIR, "xlsx.js"))
+const XLSX = require(SHEETJS_ENTRY)
 
 const check = process.argv.includes("--check")
 const OUT = check ? fs.mkdtempSync(path.join(os.tmpdir(), "corpus-gen-")) : GENERATED_DIR

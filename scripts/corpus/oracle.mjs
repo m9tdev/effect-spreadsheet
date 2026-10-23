@@ -23,7 +23,7 @@ import os from "node:os"
 import path from "node:path"
 import { createRequire } from "node:module"
 import { fileURLToPath } from "node:url"
-import { HIDDEN_ROWS_DIR, CACHE_DIR, EXPECTED_DIR, GENERATED_DIR, MANIFEST_PATH, SHEETJS_CACHE, SHEETJS_DIR } from "./lib.mjs"
+import { HIDDEN_ROWS_DIR, CACHE_DIR, EXPECTED_DIR, GENERATED_DIR, MANIFEST_PATH, SHEETJS_CACHE, SHEETJS_DIR, SHEETJS_ENTRY } from "./lib.mjs"
 
 export const SCHEMA = 1
 // Options passed to XLSX.read. Recorded in every expected file.
@@ -82,7 +82,7 @@ if (process.argv[2] === "--child") {
   // If the IPC channel closes while we're idle, leave at once.
   process.on("disconnect", () => process.exit(0))
   const require = createRequire(import.meta.url)
-  const XLSX = require(path.join(SHEETJS_DIR, "xlsx.js"))
+  const XLSX = require(SHEETJS_ENTRY)
   const meta = { oracle: "sheetjs", sheetjsVersion: XLSX.version, sheetjsCommit: sheetjsCommit() }
   process.on("message", async (job) => {
     watchdog.postMessage({ deadline: Date.now() + job.timeout + HARD_GRACE_MS })
@@ -290,7 +290,7 @@ if (process.argv[2] !== "--child") await main()
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
-  if (!fs.existsSync(path.join(SHEETJS_DIR, "xlsx.js"))) {
+  if (!fs.existsSync(SHEETJS_ENTRY)) {
     console.error(`SheetJS not found at ${SHEETJS_DIR} (set SHEETJS_DIR); skipping oracle`)
     process.exit(0)
   }

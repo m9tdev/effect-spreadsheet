@@ -15,11 +15,11 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { createRequire } from "node:module"
-import { HIDDEN_ROWS_DIR, SHEETJS_DIR, compareDirs, reportCompare, sha256 } from "../lib.mjs"
+import { HIDDEN_ROWS_DIR, SHEETJS_DIR, SHEETJS_ENTRY, compareDirs, reportCompare, sha256 } from "../lib.mjs"
 import { NAMES, RENAMED } from "./names.mjs"
 
 const require = createRequire(import.meta.url)
-const XLSX = require(path.join(SHEETJS_DIR, "xlsx.js"))
+const XLSX = require(SHEETJS_ENTRY)
 
 const args = process.argv.slice(2)
 const check = args.includes("--check")
