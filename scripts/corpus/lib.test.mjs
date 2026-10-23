@@ -145,3 +145,23 @@ test("zipDiff: junk at the end of the central directory", async () => {
   j.writeUInt32LE(j.readUInt32LE(o.eocd + 4 + 12) + 4, o.eocd + 4 + 12)
   assert.match(zipDiff(base, j), /not a plain zip/)
 })
+
+test("zipDiff: EOCD disk number changed", async () => {
+  const { zipDiff, base, offsets } = await zipFixtures()
+  const d = Buffer.from(base); d.writeUInt16LE(1, offsets(d).eocd + 4) // number of this disk
+  assert.match(zipDiff(base, d), /end-of-central-directory fields/)
+})
+
+test("zipDiff: junk between the entries and the central directory (offset moved)", async () => {
+  const { zipDiff, base, offsets } = await zipFixtures()
+  const o = offsets(base), cd = base.readUInt32LE(o.eocd + 16)
+  const j = Buffer.concat([base.subarray(0, cd), Buffer.from("JUNK"), base.subarray(cd)])
+  j.writeUInt32LE(cd + 4, o.eocd + 4 + 16) // central directory offset, now 4 bytes later
+  assert.match(zipDiff(base, j), /not a plain zip/)
+})
+
+test("zipDiff: archive comment length past the end of the file", async () => {
+  const { zipDiff, base, offsets } = await zipFixtures()
+  const c = Buffer.from(base); c.writeUInt16LE(10, offsets(c).eocd + 20) // claims 10 bytes; none follow
+  assert.match(zipDiff(base, c), /archive comment runs past the end/)
+})
