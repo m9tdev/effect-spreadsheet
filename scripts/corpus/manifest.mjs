@@ -10,7 +10,7 @@
 
 import fs from "node:fs"
 import path from "node:path"
-import { HIDDEN_ROWS_DIR, GENERATED_DIR, MANIFEST_PATH, SHEETJS_CACHE, SHEETJS_DIR, sha256, sniff } from "./lib.mjs"
+import { HIDDEN_ROWS_DIR, CACHE_DIR, GENERATED_DIR, MANIFEST_PATH, SHEETJS_CACHE, SHEETJS_DIR, sha256, sniff } from "./lib.mjs"
 
 export const FOCUS = new Set(["csv", "xlsx", "xlsm", "xltx", "xls", "xlsb", "xlml", "ods", "fods", "sylk", "ooxml-encrypted"])
 
@@ -135,6 +135,7 @@ const manifest = {
 }
 // One file per line keeps diffs readable.
 const json = JSON.stringify({ ...manifest, files: [] }, null, 2).replace(/"files": \[\]/, `"files": [\n${entries.map((e) => "    " + JSON.stringify(e)).join(",\n")}\n  ]`)
+fs.mkdirSync(CACHE_DIR, { recursive: true }) // a fresh clone has no .cache yet
 fs.writeFileSync(MANIFEST_PATH, json + "\n")
 console.log(`manifest: ${entries.length} files in ${((Date.now() - t0) / 1000).toFixed(1)}s -> ${path.relative(process.cwd(), MANIFEST_PATH)}`)
 console.table(summary)
