@@ -206,19 +206,27 @@ describe("recordKeys: hostile inputs stay linear", () => {
 
     it(`${name}, n = ${N}: at most ${MAX_RELATIVE}x the time of linear reference work`, async () => {
       const names = header(N)
-      allKeys(names) // warm up the JIT
+      // untimed warm-up of both, so neither minimum includes JIT work
+      allKeys(names)
       reference(names)
       let keysMs = Infinity
       let referenceMs = Infinity
-      // progress: r increases up to 3. Runs are separated by an event-loop
-      // turn, so a slow (quadratic) run fails here instead of tripping the
-      // hang watchdog; stop once the bound is met, or far off.
+      // progress: r increases up to 3. All 3 attempts count toward both
+      // minimums, and the order alternates (reference first, then keys
+      // first), so neither side always runs right after the other's garbage.
+      // Runs are separated by an event-loop turn, so a slow (quadratic) run
+      // fails here instead of tripping the hang watchdog; the only early exit
+      // is when the ratio is far off.
       for (let r = 0; r < 3; r++) {
         await new Promise((resolve) => setImmediate(resolve))
-        referenceMs = Math.min(referenceMs, timed(() => reference(names)).ms)
-        keysMs = Math.min(keysMs, timed(() => allKeys(names)).ms)
-        const relative = keysMs / Math.max(referenceMs, 0.5)
-        if (relative < MAX_RELATIVE || relative > 4 * MAX_RELATIVE) break
+        if (r % 2 === 0) {
+          referenceMs = Math.min(referenceMs, timed(() => reference(names)).ms)
+          keysMs = Math.min(keysMs, timed(() => allKeys(names)).ms)
+        } else {
+          keysMs = Math.min(keysMs, timed(() => allKeys(names)).ms)
+          referenceMs = Math.min(referenceMs, timed(() => reference(names)).ms)
+        }
+        if (keysMs / Math.max(referenceMs, 0.5) > 4 * MAX_RELATIVE) break
       }
       expect(
         keysMs / Math.max(referenceMs, 0.5),

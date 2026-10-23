@@ -11,12 +11,16 @@ const WATCHDOG = new URL("./setup/watchdog.ts", import.meta.url).pathname
  * can never outlive the test run; `killedByTest` tells the two kills apart.
  */
 const run = (body: string, hangMs = 2000, deadlineMs = 30_000) =>
-  new Promise<{ code: number | null; signal: NodeJS.Signals | null; ms: number; killedByTest: boolean }>((resolve) => {
+  new Promise<
+    { code: number | null; signal: NodeJS.Signals | null; ms: number; killedByTest: boolean; stdout: string }
+  >((resolve) => {
     const start = performance.now()
     const child = spawn(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(WATCHDOG)}); ${body}`], {
       env: { ...process.env, TEST_HANG_MS: String(hangMs) },
-      stdio: "ignore"
+      stdio: ["ignore", "pipe", "ignore"]
     })
+    let stdout = ""
+    child.stdout.on("data", (d) => (stdout += String(d)))
     let killedByTest = false
     const deadline = setTimeout(() => {
       killedByTest = true
@@ -24,7 +28,7 @@ const run = (body: string, hangMs = 2000, deadlineMs = 30_000) =>
     }, deadlineMs)
     child.on("exit", (code, signal) => {
       clearTimeout(deadline)
-      resolve({ code, signal, ms: performance.now() - start, killedByTest })
+      resolve({ code, signal, ms: performance.now() - start, killedByTest, stdout })
     })
   })
 
@@ -32,9 +36,8 @@ describe("test watchdog", () => {
   it("kills a process whose event loop is blocked", async () => {
     const result = await run("while (true) {}")
     expect(result.signal).toBe("SIGKILL")
+    // the watchdog did it (2 s limit), not the helper's 30 s deadline
     expect(result.killedByTest).toBe(false)
-    // 2 s limit; a generous ceiling for a loaded machine
-    expect(result.ms).toBeLessThan(30_000)
   }, 40_000)
 
   it("a child the watchdog doesn't stop is killed at the test's deadline, never left running", async () => {
@@ -45,8 +48,9 @@ describe("test watchdog", () => {
   }, 20_000)
 
   it("leaves a process alone that waits asynchronously (longer than the hang limit)", async () => {
-    const result = await run("await new Promise((r) => setTimeout(r, 3000))")
-    expect([result.code, result.signal]).toEqual([0, null])
+    // the child's deadline (15 s) stays inside this test's timeout (20 s)
+    const result = await run("await new Promise((r) => setTimeout(r, 3000))", 2000, 15_000)
+    expect([result.code, result.signal, result.killedByTest]).toEqual([0, null, false])
   }, 20_000)
 
   it("this test process runs the watchdog with periods(HANG_MS)", () => {
@@ -58,17 +62,14 @@ describe("test watchdog", () => {
   })
 
   it("a process with a 300 ms limit runs the watchdog with periods(300)", async () => {
-    const out = await new Promise<string>((resolve) => {
-      const child = spawn(process.execPath, [
-        "--input-type=module",
-        "-e",
-        `await import(${JSON.stringify(WATCHDOG)}); console.log(JSON.stringify(globalThis[Symbol.for("effect-spreadsheet/test-watchdog-settings")]))`
-      ], { env: { ...process.env, TEST_HANG_MS: "300" }, stdio: ["ignore", "pipe", "ignore"] })
-      let text = ""
-      child.stdout.on("data", (d) => (text += String(d)))
-      child.on("exit", () => resolve(text))
-    })
-    expect(JSON.parse(out)).toEqual({ hangMs: 300, ...periods(300) })
+    // through the same helper, so the child has a deadline too
+    const result = await run(
+      `console.log(JSON.stringify(globalThis[Symbol.for("effect-spreadsheet/test-watchdog-settings")]))`,
+      300,
+      15_000
+    )
+    expect([result.code, result.killedByTest]).toEqual([0, false])
+    expect(JSON.parse(result.stdout)).toEqual({ hangMs: 300, ...periods(300) })
   }, 20_000)
 
   it("the heartbeat comes at least 4 times per hang limit (pure check, no timing)", () => {
