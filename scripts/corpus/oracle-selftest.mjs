@@ -149,9 +149,15 @@ async function timeZoneCase(name) {
     process.stdout.write(JSON.stringify(wb.SheetNames.map((n) => XLSX.utils.sheet_to_json(wb.Sheets[n], { ...JSON_OPTIONS }))))
   `
   const env = { ...process.env, TZ: process.env.ORACLE_SELFTEST_G2_TZ || "Pacific/Auckland" } // override only to prove the offset guard
-  const out = execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8" })
-  const got = JSON.parse(out)
-  check(`${name}2 time zone: sheet_to_json with JSON_OPTIONS in a TZ=${env.TZ} child gives the committed rows`, JSON.stringify(got) === want, `first value ${JSON.stringify(got[0]?.[0]?.[0])}`)
+  const label = `${name}2 time zone: sheet_to_json with JSON_OPTIONS in a TZ=${env.TZ} child gives the committed rows`
+  let got
+  try {
+    got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))
+  } catch (err) {
+    // a failing child (or bad output) is a failed check, not a crash of the whole selftest
+    return check(label, false, (err.stderr?.toString().trim() || err.message).split("\n")[0])
+  }
+  check(label, JSON.stringify(got) === want, `first value ${JSON.stringify(got[0]?.[0]?.[0])}`)
 }
 
 async function retryTimeoutCase(name) {
