@@ -136,3 +136,12 @@ test("zipDiff: a local header whose method or compressed size disagrees with its
   const c = Buffer.from(base); c.writeUInt32LE(c.readUInt32LE(offsets(c).local[0] + 18) + 1, offsets(c).local[0] + 18)
   assert.match(zipDiff(base, c), /not a plain zip/)
 })
+
+test("zipDiff: junk at the end of the central directory", async () => {
+  const { zipDiff, base, offsets } = await zipFixtures()
+  const o = offsets(base)
+  // 4 junk bytes between the last central header and the EOCD; the EOCD's size grows to cover them
+  const j = Buffer.concat([base.subarray(0, o.eocd), Buffer.from("JUNK"), base.subarray(o.eocd)])
+  j.writeUInt32LE(j.readUInt32LE(o.eocd + 4 + 12) + 4, o.eocd + 4 + 12)
+  assert.match(zipDiff(base, j), /not a plain zip/)
+})

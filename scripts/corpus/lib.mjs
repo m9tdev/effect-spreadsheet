@@ -606,6 +606,7 @@ function zipLayout(buf) {
     })
     p += 46 + nlen + xlen + clen
   }
+  if (p !== eocd) return null // junk at the end of the central directory
   // local entries must sit back to back from offset 0 up to the central directory, in central order
   let at = 0
   for (const x of entries) { if (x.lho !== at) return null; at = x.dataEnd }
