@@ -44,14 +44,23 @@ Read PLAN.md first. This is the project's rulebook.
 - Keep hot parsing loops in plain imperative TS over `Uint8Array`, and wrap
   them in Effect at the boundaries. Don't allocate an Effect per cell.
 
-## SheetJS (Apache-2.0)
-- Reference clone: `~/sheetjs` (d2f2e17). Learn from it, port where it helps.
-- Any file that ports or closely follows SheetJS code starts with:
-  `// Portions derived from SheetJS (<path in ~/sheetjs>), Copyright (C) SheetJS LLC, Apache-2.0.`
-  and gets listed in `NOTICE`.
+## Licensing and SheetJS
+- The repo and the npm package are plain MIT (`LICENSE`), with no
+  third-party code.
+- SheetJS and other projects are behaviour references only: learn what they
+  do (docs, running them, comparing output), but never copy their code or
+  closely follow its structure.
+- Reference clone: the SheetJS repo in `$SHEETJS_DIR` (default `~/sheetjs`),
+  commit d2f2e17.
 - SheetJS is never a runtime or package dependency. It may only be loaded
-  from `~/sheetjs` in tests/scripts as an oracle (skip those tests when it's
-  absent).
+  from `$SHEETJS_DIR` in tests/scripts as an oracle (skip those tests when
+  it's absent).
+
+## Privacy
+- Never put the user's private projects, companies, customers, hosts or data
+  in this repo: not in files, commit messages or PR text. Describe
+  motivations generically (e.g. "a hidden-row loop in SheetJS's reader can
+  hang a server").
 
 ## Tests
 - Every format comes with: oracle comparison on corpus files, hidden rows,

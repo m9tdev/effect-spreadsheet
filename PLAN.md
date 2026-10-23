@@ -27,7 +27,7 @@ API, harness and limits end to end.
 Not in v1: formula evaluation, charts, images, cell styling beyond number
 formats, and encrypted files (they get a typed `Encrypted` error). Full
 SSF-style formatted text (`w`) comes later: v1 gives the typed value plus the
-number-format code and a date flag. A port of SSF, with attribution, can follow.
+number-format code and a date flag. Our own number-format renderer can follow (SSF is a behaviour reference only).
 
 ## API sketch (names final, details may move)
 
@@ -112,7 +112,9 @@ Spreadsheet.toRecords(rows, { header: "first-row" | number | string[] }) // like
 
 ## Licensing
 
-The project is licensed Apache-2.0, which is the same as SheetJS and keeps
-ported code simple. Files that port or closely follow SheetJS code keep a
-header naming the source file and the SheetJS copyright, and `NOTICE` lists
-them.
+The project is plain MIT, with no third-party code. SheetJS and other
+projects are behaviour references only: we learn what they do, but never
+copy their code or closely follow its structure. SheetJS is used only as a
+test oracle, loaded from `$SHEETJS_DIR` (default `~/sheetjs`). Test fixtures
+written by the SheetJS writer carry SheetJS boilerplate and stay in the test
+corpus, which is not part of the npm package.
