@@ -1,6 +1,7 @@
 // Tests for scripts/corpus/lib.mjs helpers. Run: node --test scripts/corpus/lib.test.mjs
 import assert from "node:assert/strict"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { GENERATED_DIR, biffVersion, sniff } from "./lib.mjs"
@@ -59,4 +60,71 @@ test("sameZipContent: equal content with other deflate bytes, not when content o
   assert.ok(!sameZipContent(ours, zip([parts[1], parts[0]])), "order change")
   assert.ok(!sameZipContent(ours, zip([parts[0]])), "missing entry")
   assert.ok(!sameZipContent(Buffer.from("not a zip"), ours))
+})
+
+// ---- zipDiff: only compressed bytes may differ (method, compressed size, data, offsets)
+async function zipFixtures() {
+  const { zip, zipDiff, sameZipContent, compareDirs, zipEntries } = await import("./lib.mjs")
+  const parts = [["xl/a.xml", Buffer.from("<a>" + "xy".repeat(3000) + "</a>")], ["b.txt", Buffer.from("hello")]]
+  const base = zip(parts)
+  const offsets = (buf) => {
+    const ents = zipEntries(buf)
+    const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]))
+    const cd = buf.readUInt32LE(eocd + 16)
+    const central = []
+    for (let p = cd, i = 0; i < ents.length; i++) { central.push(p); p += 46 + buf.readUInt16LE(p + 28) + buf.readUInt16LE(p + 30) + buf.readUInt16LE(p + 32) }
+    return { local: ents.map((e) => e.lho), central, eocd }
+  }
+  return { zip, zipDiff, sameZipContent, compareDirs, parts, base, offsets }
+}
+
+test("zipDiff: recompressed zip (other deflate level) is the same", async () => {
+  const { zip, zipDiff, parts, base } = await zipFixtures()
+  assert.equal(zipDiff(base, zip(parts, { level: 1 })), null)
+})
+
+test("zipDiff: changed DOS timestamps in the headers are a difference", async () => {
+  const { zipDiff, sameZipContent, base, offsets } = await zipFixtures()
+  const t = Buffer.from(base), o = offsets(t)
+  for (const p of o.local) { t.writeUInt16LE(0x6000, p + 10); t.writeUInt16LE(0x5a21, p + 12) }
+  for (const p of o.central) { t.writeUInt16LE(0x6000, p + 12); t.writeUInt16LE(0x5a21, p + 14) }
+  assert.match(zipDiff(base, t), /header fields/)
+  assert.equal(sameZipContent(base, t), false)
+  // central only, or local only, is caught as well
+  const c = Buffer.from(base); c.writeUInt16LE(0x5a21, offsets(c).central[0] + 14)
+  assert.match(zipDiff(base, c), /central header fields/)
+  const l = Buffer.from(base); l.writeUInt16LE(0x5a21, offsets(l).local[1] + 12)
+  assert.match(zipDiff(base, l), /local header fields/)
+})
+
+test("zipDiff: a CRC32 that doesn't match the data is a difference", async () => {
+  const { zipDiff, base, offsets } = await zipFixtures()
+  // both zips carry the same bogus CRC (header fields equal), so only the data check catches it
+  const a = Buffer.from(base), b = Buffer.from(base)
+  for (const z of [a, b]) { const o = offsets(z); for (const p of o.local) z.writeUInt32LE(0xdeadbeef, p + 14); for (const p of o.central) z.writeUInt32LE(0xdeadbeef, p + 16) }
+  assert.match(zipDiff(a, b), /CRC32 doesn't match/)
+  assert.match(zipDiff(base, a), /header fields|CRC32/)
+})
+
+test("zipDiff: an archive comment or trailing bytes are a difference", async () => {
+  const { zipDiff, base, offsets } = await zipFixtures()
+  const withComment = Buffer.concat([base, Buffer.from("hi")])
+  withComment.writeUInt16LE(2, offsets(withComment).eocd + 20)
+  assert.match(zipDiff(base, withComment), /archive comment/)
+  const trailing = Buffer.concat([base, Buffer.from("junk")])
+  assert.match(zipDiff(base, trailing), /trailing bytes/)
+})
+
+test("compareDirs reports tampered zips as DIFF with the reason, recompressed ones as same", async () => {
+  const { zip, compareDirs, parts, base, offsets } = await zipFixtures()
+  const g = fs.mkdtempSync(path.join(os.tmpdir(), "zipdiff-g-")), c = fs.mkdtempSync(path.join(os.tmpdir(), "zipdiff-c-"))
+  try {
+    const t = Buffer.from(base); t.writeUInt16LE(0x5a21, offsets(t).central[0] + 14)
+    fs.writeFileSync(path.join(g, "re.xlsx"), base); fs.writeFileSync(path.join(c, "re.xlsx"), zip(parts, { level: 1 }))
+    fs.writeFileSync(path.join(g, "ts.xlsx"), base); fs.writeFileSync(path.join(c, "ts.xlsx"), t)
+    const r = compareDirs(g, c)
+    assert.deepEqual(r.zipRecompressed, ["re.xlsx"])
+    assert.deepEqual(r.differ, ["ts.xlsx"])
+    assert.match(r.reasons["ts.xlsx"], /central header fields/)
+  } finally { fs.rmSync(g, { recursive: true, force: true }); fs.rmSync(c, { recursive: true, force: true }) }
 })

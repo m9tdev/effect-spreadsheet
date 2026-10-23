@@ -370,10 +370,14 @@ themselves. This is a deliberate difference from SheetJS, which drops hidden row
 `generate.mjs` writes them. The output is deterministic (`--check` regenerates it into
 a temp dir and compares). A caveat for zips (xlsx, xlsb, ods): deflate output depends on the
 zlib build. Node's bundled zlib and a system zlib, or different CPUs, can compress the same
-data differently. So `--check` compares zips by content: the same entries in the same order,
-with identical uncompressed bytes. It reports how many differ only in their deflate bytes.
-Every other file, and the committed `README.json` against the committed bytes, must match
-exactly. Zips are rebuilt with fixed timestamps, and document properties
+data differently. So `--check` lets zips differ only in what compression changes: each entry's
+method, compressed size, compressed data, and therefore the offsets (`zipDiff` in `lib.mjs`).
+Everything else must be equal: every other local and central header field (timestamps, CRC32,
+sizes, flags, attributes, names, extra fields, comments), the entry order, the archive comment
+and any trailing bytes. Each entry's CRC32 must also match its uncompressed bytes. `--check`
+reports how many zips differ only in compressed bytes; any other difference is a DIFF, with
+the reason. Every other file, and the committed `README.json` against the committed bytes,
+must match exactly. Zips are rebuilt with fixed timestamps, and document properties
 are fixed (author `effect-spreadsheet`, 2026-01-01). They are our own files (MIT). They
 are generated with SheetJS 0.20.3 at script time (never a dependency). Where the SheetJS
 writer can't express a case, they are built or patched by hand.
