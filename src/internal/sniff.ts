@@ -21,13 +21,15 @@ const startsWith = (bytes: Uint8Array, magic: ReadonlyArray<number>): boolean =>
 
 /**
  * How a zip file can start: a local file header (PK 03 04), the
- * end-of-central-directory record of an empty archive (PK 05 06), or the
- * marker of a spanned/split archive (PK 07 08).
+ * end-of-central-directory record of an empty archive (PK 05 06), the
+ * marker of a spanned/split archive (PK 07 08), or the single-segment
+ * marker "PK00" (PK 30 30) followed by a local file header.
  */
 const ZIP_MAGICS: ReadonlyArray<ReadonlyArray<number>> = [
   [0x50, 0x4B, 0x03, 0x04],
   [0x50, 0x4B, 0x05, 0x06],
-  [0x50, 0x4B, 0x07, 0x08]
+  [0x50, 0x4B, 0x07, 0x08],
+  [0x50, 0x4B, 0x30, 0x30, 0x50, 0x4B, 0x03, 0x04]
 ]
 
 const CFB_MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]

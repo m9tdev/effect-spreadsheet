@@ -54,6 +54,14 @@ describe("format detection", () => {
       view.setUint32(p + 42, view.getUint32(p + 42, true) + 4, true)
     }
     assert.strictEqual(await formatOf(spanned), "xlsx")
+    // the single-segment marker "PK00" (PK 30 30) in front of a local header
+    const singleSegment = spanned.slice()
+    singleSegment[2] = 0x30
+    singleSegment[3] = 0x30
+    assert.strictEqual(await formatOf(singleSegment), "xlsx")
+    // "PK00" without a local header after it is not a zip
+    assert.notStrictEqual(await formatOf(enc("PK00,name\n1,a\n")), "zip")
+    assert.strictEqual(await formatOf(enc("PK00,name\n1,a\n")), "csv")
   })
 
   it("a zip with an archive comment still has its directory found", async () => {
