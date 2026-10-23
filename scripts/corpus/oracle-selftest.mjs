@@ -129,13 +129,16 @@ async function maxBytesCase(name) {
   check(`${name}: cap ${cap} (between ${chars} chars and ${bytes} bytes) gives tooBig`, second?.d.status === "tooBig" && /over \d+ bytes/.test(second.d.reason ?? ""), `status ${second?.d.status}, reason ${second?.d.reason}`)
 }
 
-async function timeZoneCase(name) {
-  const r = await startOracle({ TZ: "Pacific/Auckland" }, ["--source", "generated", "--format", "xlsx", "--no-probe", "--jobs", "2"]).exited
-  const dir = path.join(tmp, "expected")
-  const doc = fs.readdirSync(dir).filter((f) => !f.includes(".stream.")).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))).find((d) => d.source === "generated" && d.path === "dates.xlsx")
+async function timeZoneCase(name, { g1 = true, g2 = true } = {}) {
   const committed = JSON.parse(fs.readFileSync(path.join(HERE, "..", "..", "test", "corpus", "expected", "generated", "dates.xlsx.json"), "utf8"))
   const want = JSON.stringify(committed.sheets.map((x) => x.rows))
-  check(`${name}1 time zone: oracle under TZ=Pacific/Auckland gives the committed dates.xlsx rows`, r.code === 0 && !!doc && JSON.stringify(doc.sheets.map((x) => x.rows)) === want, doc ? `first value ${JSON.stringify(doc.sheets[0].rows?.[0]?.[0])}` : "no result")
+  if (g1) {
+    const r = await startOracle({ TZ: "Pacific/Auckland" }, ["--source", "generated", "--format", "xlsx", "--no-probe", "--jobs", "2"]).exited
+    const dir = path.join(tmp, "expected")
+    const doc = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => !f.includes(".stream.")).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))).find((d) => d.source === "generated" && d.path === "dates.xlsx") : null
+    check(`${name}1 time zone: oracle under TZ=Pacific/Auckland gives the committed dates.xlsx rows`, r.code === 0 && !!doc && JSON.stringify(doc.sheets.map((x) => x.rows)) === want, doc ? `first value ${JSON.stringify(doc.sheets[0].rows?.[0]?.[0])}` : "no result")
+  }
+  if (!g2) return
   // G2: the JSON step alone, in a child that really runs in Pacific/Auckland (no TZ=UTC override).
   const code = `
     import fs from "node:fs"
@@ -152,7 +155,9 @@ async function timeZoneCase(name) {
   const label = `${name}2 time zone: sheet_to_json with JSON_OPTIONS in a TZ=${env.TZ} child gives the committed rows`
   let got
   try {
-    got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))
+    // a hanging child is a failed check too (ETIMEDOUT); ORACLE_SELFTEST_G2_TIMEOUT_MS is for tests
+    const timeout = Number(process.env.ORACLE_SELFTEST_G2_TIMEOUT_MS) > 0 ? Number(process.env.ORACLE_SELFTEST_G2_TIMEOUT_MS) : 60_000
+    got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout, killSignal: "SIGKILL" }))
   } catch (err) {
     // a failing child (or bad output) is a failed check, not a crash of the whole selftest
     return check(label, false, childErrorDetail(err))
@@ -193,11 +198,12 @@ async function startupCase(name, body, args, expect) {
   check(`${name}: error mentions ${expect}`, r.out.includes(expect))
 }
 
-// ORACLE_SELFTEST_ONLY=G (or "A,C,G") runs just those cases (used by lib.test.mjs).
+// ORACLE_SELFTEST_ONLY=G (or "A,C,G"; G1/G2 for one half of G) runs just those cases
+// (used by oracle-selftest.test.mjs).
 const ONLY = process.env.ORACLE_SELFTEST_ONLY ? new Set(process.env.ORACLE_SELFTEST_ONLY.split(",").map((x) => x.trim().toUpperCase())) : null
 const wanted = (letter) => !ONLY || ONLY.has(letter)
 const needSheetJS = async (letter, name, fn) => {
-  if (!wanted(letter)) return
+  if (!wanted(letter) && letter !== "G") return
   if (haveSheetJS) await fn()
   else skip(name, `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
 }
@@ -209,7 +215,7 @@ try {
   if (wanted("D")) await startupCase("D hanging xlsx.js", "for (;;) {}\n", ["--ready-timeout", "2"], "no ready within 2s")
   await needSheetJS("E", "E tooBig results", () => tooBigCase("E tooBig results"))
   await needSheetJS("F", "F MAX_BYTES counts bytes", () => maxBytesCase("F MAX_BYTES counts bytes"))
-  await needSheetJS("G", "G time zone", () => timeZoneCase("G"))
+  if (wanted("G") || wanted("G1") || wanted("G2")) await needSheetJS("G", "G time zone", () => timeZoneCase("G", { g1: wanted("G") || wanted("G1"), g2: wanted("G") || wanted("G2") }))
   await needSheetJS("H", "H timeout retried", () => retryTimeoutCase("H timeout retried"))
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })

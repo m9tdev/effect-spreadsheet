@@ -21,3 +21,14 @@ test("G2 reports the child's error line (not Node's location line) as a failed c
     assert.match(g2, /^FAIL .* — Error: boom from fake xlsx\.js$/)
   } finally { fs.rmSync(fake, { recursive: true, force: true }) }
 })
+
+test("a hanging G2 child is a failed check after the timeout, not a hung selftest", () => {
+  const fake = fs.mkdtempSync(path.join(os.tmpdir(), "selftest-fake-sheetjs-"))
+  try {
+    fs.writeFileSync(path.join(fake, "xlsx.js"), "for (;;) {}\n")
+    const r = spawnSync(process.execPath, [SELFTEST], { env: { ...process.env, SHEETJS_DIR: fake, ORACLE_SELFTEST_ONLY: "G2", ORACLE_SELFTEST_G2_TIMEOUT_MS: "1000" }, encoding: "utf8", timeout: 30_000, killSignal: "SIGKILL" })
+    assert.notEqual(r.signal, "SIGKILL", "the selftest itself hung")
+    assert.equal(r.status, 1, r.stdout + r.stderr)
+    assert.match(r.stdout, /^FAIL G2 time zone: .* — .*ETIMEDOUT/m)
+  } finally { fs.rmSync(fake, { recursive: true, force: true }) }
+})
