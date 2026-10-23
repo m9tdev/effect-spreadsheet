@@ -69,6 +69,11 @@ describe("toRecords", () => {
     assert.deepStrictEqual(recs(await rowsOf("1\n"), { header: sparse, defval: 0 }), [{ x: 1, y: 0 }])
   })
 
+  it("an explicit \"\" entry is like a blank header cell: __EMPTY key, no defval fill", async () => {
+    assert.deepStrictEqual(recs(await rowsOf("1\n"), { header: ["x", "", "y"], defval: 0 }), [{ x: 1, y: 0 }])
+    assert.deepStrictEqual(recs(await rowsOf("1,2\n"), { header: ["x", "", "y"], defval: 0 }), [{ x: 1, __EMPTY: 2, y: 0 }])
+  })
+
   it("explicit header names are de-duplicated too, so no column is lost", async () => {
     const rows = await rowsOf("1,2,3,4\n")
     assert.deepStrictEqual(recs(rows, { header: ["x", "x", "", "x_1"] }), [{ x: 1, x_1: 2, __EMPTY: 3, x_1_1: 4 }])

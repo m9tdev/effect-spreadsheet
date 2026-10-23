@@ -16,7 +16,10 @@ export interface RecordsOptions<D = never> {
    * - `"first-row"`: the first row is the header.
    * - a number: the row with that `index` is the header; earlier rows are skipped.
    * - an array: column `i` is named `header[i]` (repeats made unique the same
-   *   way); columns past its end are dropped.
+   *   way); columns past its end, and columns whose entry is a hole,
+   *   `undefined` or `null`, are dropped. An entry `""` is treated like a
+   *   blank header cell: the column gets an `__EMPTY…` key when data appears
+   *   in it, and no `defval` fill.
    */
   readonly header: "first-row" | number | ReadonlyArray<string>
   /** Value for header-named columns the row has no value in. Default: no key. */

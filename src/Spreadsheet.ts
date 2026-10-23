@@ -107,7 +107,10 @@ export const readCsv: (
  * - `header: n`: the row with index `n` gives the names; rows before it are
  *   skipped.
  * - `header: [...]`: the given names, by column (repeats made unique the
- *   same way); every row is data and columns past the array are dropped.
+ *   same way); every row is data. Columns past the array, and columns whose
+ *   entry is a hole, `undefined` or `null`, are dropped. An entry `""` is
+ *   treated like a blank header cell (an `__EMPTY…` key when data appears,
+ *   no `defval` fill).
  *
  * Header names are made unique (`name`, `name_1`, `name_2`, ...); an empty
  * or Empty header cell leaves its column unnamed.
