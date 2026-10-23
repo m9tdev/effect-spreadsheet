@@ -350,8 +350,9 @@ themselves. This is a deliberate difference from SheetJS, which drops hidden row
 
 `generate.mjs` writes them. The output is deterministic (`--check` regenerates it into
 a temp dir and compares). Zips are rebuilt with fixed timestamps, and document properties
-are fixed (author `effect-spreadsheet`, 2026-01-01). We own them (Apache-2.0). They are
-built from the SheetJS writer where it can express the case, and by hand or by patching
+are fixed (author `effect-spreadsheet`, 2026-01-01). They are our own files (MIT); the
+SheetJS boilerplate parts that the SheetJS writer embeds stay Apache-2.0 (see NOTICE).
+They are built from the SheetJS writer where it can express the case, and by hand or by patching
 where it can't. SheetJS's BIFF writers drop row properties, and its writers iterate the
 whole declared range, so far cells or huge dimensions would take forever. Each file is
 described in `generated/README.json`.

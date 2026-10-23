@@ -109,12 +109,12 @@ const add = (source, root, rel) => {
     if (/\.[A-Za-z0-9]+\.(\d+\.(csv|json|rawjson)|xml)$/.test(rel)) e.derived = true
   } else if (source === "hidden-rows") {
     e.origin = "effect-spreadsheet"
-    e.license = "Apache-2.0"
+    e.license = "MIT"
     e.committable = true
     if (rel.startsWith("renamed/")) e.extensionMismatch = true
   } else {
     e.origin = "effect-spreadsheet"
-    e.license = "Apache-2.0"
+    e.license = "MIT"
     e.committable = true
   }
   const f = Object.fromEntries(Object.entries(s.features).filter(([, v]) => v !== false && v !== 0 && v != null))
