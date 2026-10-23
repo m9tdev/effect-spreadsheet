@@ -469,7 +469,7 @@ Value formats depend on `field`:
 - `ref`: an A1 range.
 - `cells`: an array of `[r, c, v]` triples. `v: null` means "no cell", e.g.
   `csv-empty-quoted-field-no-cell` has `sheetjs: [[5, 1, null]]`.
-- `dimension`: `{cells, declaredRows, declaredCols}`.
+- `dimension`: `sheetjs` is `{ref}` (SheetJS's `!ref`); `correct` is `{cells, declaredRows, declaredCols}` (the span of the cells and the declared size).
 
 Every value is checked; none is marked unchecked. `expected.mjs` (through `quirks.mjs`)
 checks each `sheetjs` value against the oracle result. It checks each `correct` value against
