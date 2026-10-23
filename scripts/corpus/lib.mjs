@@ -905,3 +905,15 @@ export function stripWriterBoilerplate(buf) {
   if (buf.indexOf(tag) >= 0) { const b = Buffer.from(buf); for (let i = b.indexOf(tag); i >= 0; i = b.indexOf(tag, i + 7)) b.fill(0x20, i, i + 7); return b }
   return buf
 }
+
+// ---------------------------------------------------------------- child-process errors
+
+/**
+ * One useful line from a failed child process (execFileSync error): the first stderr line
+ * that names an error ("RangeError: ..."), else the last non-empty stderr line, else the
+ * error's own message. Node's first stderr line is only the throwing location.
+ */
+export function childErrorDetail(err) {
+  const lines = (err?.stderr?.toString() ?? "").trim().split("\n").map((l) => l.trim()).filter(Boolean)
+  return lines.find((l) => /^\w*Error\b/.test(l)) ?? lines.at(-1) ?? String(err?.message ?? err)
+}

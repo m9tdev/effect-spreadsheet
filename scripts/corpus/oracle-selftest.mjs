@@ -26,7 +26,7 @@
 // Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B and E: they are skipped, not
 // failed, without it. Linux `ps` for the child lookup. Stale temp dirs from a SIGKILLed
 // run are removed at the next start.
-// Usage: node scripts/corpus/oracle-selftest.mjs
+// Usage: node scripts/corpus/oracle-selftest.mjs   (ORACLE_SELFTEST_ONLY=G,H runs only those cases)
 
 import { execFileSync, spawn } from "node:child_process"
 import fs from "node:fs"
@@ -35,7 +35,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const { parseFlags, SHEETJS_ENTRY } = await import(path.join(HERE, "lib.mjs"))
+const { childErrorDetail, parseFlags, SHEETJS_ENTRY } = await import(path.join(HERE, "lib.mjs"))
 parseFlags(process.argv.slice(2), []) // no arguments
 const ORACLE = path.join(HERE, "oracle.mjs")
 const MANIFEST = path.join(HERE, "manifest.mjs")
@@ -155,7 +155,7 @@ async function timeZoneCase(name) {
     got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))
   } catch (err) {
     // a failing child (or bad output) is a failed check, not a crash of the whole selftest
-    return check(label, false, (err.stderr?.toString().trim() || err.message).split("\n")[0])
+    return check(label, false, childErrorDetail(err))
   }
   check(label, JSON.stringify(got) === want, `first value ${JSON.stringify(got[0]?.[0]?.[0])}`)
 }
@@ -193,25 +193,24 @@ async function startupCase(name, body, args, expect) {
   check(`${name}: error mentions ${expect}`, r.out.includes(expect))
 }
 
+// ORACLE_SELFTEST_ONLY=G (or "A,C,G") runs just those cases (used by lib.test.mjs).
+const ONLY = process.env.ORACLE_SELFTEST_ONLY ? new Set(process.env.ORACLE_SELFTEST_ONLY.split(",").map((x) => x.trim().toUpperCase())) : null
+const wanted = (letter) => !ONLY || ONLY.has(letter)
+const needSheetJS = async (letter, name, fn) => {
+  if (!wanted(letter)) return
+  if (haveSheetJS) await fn()
+  else skip(name, `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+}
 try {
   execFileSync(process.execPath, [MANIFEST], { env: { ...process.env, CORPUS_CACHE_DIR: tmp }, stdio: "ignore" })
-  if (haveSheetJS) {
-    await killCase("A parent SIGKILL", "SIGKILL")
-    await killCase("B parent SIGTERM", "SIGTERM")
-  } else {
-    skip("A parent SIGKILL", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
-    skip("B parent SIGTERM", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
-  }
-  await startupCase("C throwing xlsx.js", 'throw new Error("boom from fake xlsx.js")\n', [], "boom from fake xlsx.js")
-  await startupCase("D hanging xlsx.js", "for (;;) {}\n", ["--ready-timeout", "2"], "no ready within 2s")
-  if (haveSheetJS) await tooBigCase("E tooBig results")
-  else skip("E tooBig results", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
-  if (haveSheetJS) await maxBytesCase("F MAX_BYTES counts bytes")
-  else skip("F MAX_BYTES counts bytes", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
-  if (haveSheetJS) await timeZoneCase("G")
-  else skip("G time zone", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
-  if (haveSheetJS) await retryTimeoutCase("H timeout retried")
-  else skip("H timeout retried", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  await needSheetJS("A", "A parent SIGKILL", () => killCase("A parent SIGKILL", "SIGKILL"))
+  await needSheetJS("B", "B parent SIGTERM", () => killCase("B parent SIGTERM", "SIGTERM"))
+  if (wanted("C")) await startupCase("C throwing xlsx.js", 'throw new Error("boom from fake xlsx.js")\n', [], "boom from fake xlsx.js")
+  if (wanted("D")) await startupCase("D hanging xlsx.js", "for (;;) {}\n", ["--ready-timeout", "2"], "no ready within 2s")
+  await needSheetJS("E", "E tooBig results", () => tooBigCase("E tooBig results"))
+  await needSheetJS("F", "F MAX_BYTES counts bytes", () => maxBytesCase("F MAX_BYTES counts bytes"))
+  await needSheetJS("G", "G time zone", () => timeZoneCase("G"))
+  await needSheetJS("H", "H timeout retried", () => retryTimeoutCase("H timeout retried"))
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })
 }
