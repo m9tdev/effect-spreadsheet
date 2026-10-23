@@ -83,3 +83,14 @@ test("ORACLE_SELFTEST_ONLY selects G1 or G2 on their own, and G skips without Sh
     assert.match(run("G", "/nonexistent-sheetjs"), /^skip G time zone /m)
   } finally { fs.rmSync(fake, { recursive: true, force: true }) }
 })
+
+test("ORACLE_SELFTEST_G2_TIMEOUT_MS: garbage or a non-integer is an error, not a quiet fallback", () => {
+  for (const v of ["abc", "1.5", "-5", "0", "1e3", " 100", "100ms"]) {
+    const r = spawnSync(process.execPath, [SELFTEST], { env: env({ ORACLE_SELFTEST_G2_TIMEOUT_MS: v, ORACLE_SELFTEST_ONLY: "C" }), encoding: "utf8", timeout: 30_000 })
+    assert.equal(r.status, 2, `${JSON.stringify(v)}: ${r.stdout}${r.stderr}`)
+    assert.match(r.stderr, /ORACLE_SELFTEST_G2_TIMEOUT_MS=.*positive integer/, JSON.stringify(v))
+  }
+  // empty means the default
+  const ok = spawnSync(process.execPath, [SELFTEST], { env: env({ ORACLE_SELFTEST_G2_TIMEOUT_MS: "", ORACLE_SELFTEST_ONLY: "C" }), encoding: "utf8", timeout: 60_000 })
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr)
+})

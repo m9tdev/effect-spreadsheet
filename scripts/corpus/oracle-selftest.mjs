@@ -160,7 +160,7 @@ async function timeZoneCase(name, { g1 = true, g2 = true } = {}) {
   let got
   try {
     // a hanging child is a failed check too (ETIMEDOUT); ORACLE_SELFTEST_G2_TIMEOUT_MS is for tests
-    const timeout = Number(process.env.ORACLE_SELFTEST_G2_TIMEOUT_MS) > 0 ? Number(process.env.ORACLE_SELFTEST_G2_TIMEOUT_MS) : 60_000
+    const timeout = G2_TIMEOUT_MS
     got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout, killSignal: "SIGKILL" }))
   } catch (err) {
     // a failing child (or bad output) is a failed check, not a crash of the whole selftest
@@ -207,6 +207,14 @@ async function startupCase(name, body, args, expect) {
 // case (X, G3, "a b", "A;B", an empty token as in "," or " ") is an error (exit 2), so a
 // typo can't select nothing and pass.
 const CASES = ["A", "B", "C", "D", "E", "F", "G", "G1", "G2", "H"]
+// ORACLE_SELFTEST_G2_TIMEOUT_MS: a positive integer (ms), else an error; unset or empty: 60000.
+const g2TimeoutEnv = process.env.ORACLE_SELFTEST_G2_TIMEOUT_MS ?? ""
+if (g2TimeoutEnv !== "" && !(/^\d+$/.test(g2TimeoutEnv) && Number(g2TimeoutEnv) > 0)) {
+  console.error(`oracle-selftest: ORACLE_SELFTEST_G2_TIMEOUT_MS=${JSON.stringify(g2TimeoutEnv)}: expected a positive integer number of milliseconds`)
+  fs.rmSync(tmp, { recursive: true, force: true })
+  process.exit(2)
+}
+const G2_TIMEOUT_MS = g2TimeoutEnv === "" ? 60_000 : Number(g2TimeoutEnv)
 const onlyEnv = process.env.ORACLE_SELFTEST_ONLY ?? ""
 const ONLY = onlyEnv === "" ? null : new Set(onlyEnv.split(",").map((x) => x.trim().toUpperCase()))
 if (ONLY) {
