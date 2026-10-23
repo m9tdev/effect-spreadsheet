@@ -9,6 +9,7 @@
 // classify corpus files. Every loop is bounded by the buffer length or a counter.
 
 import { createHash } from "node:crypto"
+import fs from "node:fs"
 import { inflateRawSync } from "node:zlib"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -511,4 +512,37 @@ function sniffCfb(buf) {
   if (names.has("worddocument")) return { format: "cfb-doc", features: {} }
   if ([...names.keys()].some((n) => n.startsWith("ole10native") || n.includes("\u0001ole10native"))) return { format: "cfb", features: {} }
   return { format: "cfb", features: { streams: [...names.keys()].slice(0, 8) } }
+}
+
+// ---------------------------------------------------------------- dir compare (for --check modes)
+
+function listFiles(dir, base = dir, out = []) {
+  if (!fs.existsSync(dir)) return out
+  for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, d.name)
+    if (d.isDirectory()) listFiles(p, base, out)
+    else out.push(path.relative(base, p).split(path.sep).join("/"))
+  }
+  return out
+}
+
+/**
+ * Compare two directory trees both ways by sha256. `ignore` holds relative paths
+ * that may exist only in `committed`. Returns { same, missing, extra, differ, files }.
+ */
+export function compareDirs(generated, committed, ignore = []) {
+  const g = new Set(listFiles(generated)), c = new Set(listFiles(committed))
+  const skip = new Set(ignore)
+  const missing = [...g].filter((f) => !c.has(f)).sort() // generated but not committed
+  const extra = [...c].filter((f) => !g.has(f) && !skip.has(f)).sort() // committed but not generated (stale)
+  const differ = [...g].filter((f) => c.has(f) && sha256(fs.readFileSync(path.join(generated, f))) !== sha256(fs.readFileSync(path.join(committed, f)))).sort()
+  return { same: !missing.length && !extra.length && !differ.length, missing, extra, differ, files: g.size }
+}
+
+export function reportCompare(r, label) {
+  for (const f of r.differ) console.log(`DIFF    ${f}`)
+  for (const f of r.missing) console.log(`MISSING ${f} (generated, not committed)`)
+  for (const f of r.extra) console.log(`EXTRA   ${f} (committed, not generated: stale?)`)
+  console.log(r.same ? `${label}: ${r.files} files byte-identical, no missing or extra files` : `${label}: ${r.differ.length} differ, ${r.missing.length} missing, ${r.extra.length} extra`)
+  return r.same
 }

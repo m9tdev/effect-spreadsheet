@@ -5,16 +5,18 @@
 // All content is made up. Document properties are set to empty values.
 //
 // Usage:
-//   node scripts/corpus/hidden-rows/generate.mjs           # (re)write test/corpus/hidden-rows/*.{xls,xml,slk,xlsb,xlsx}
-//   node scripts/corpus/hidden-rows/generate.mjs --check   # generate to a temp dir and compare sha256 with
-//                                                 # the committed files and test/corpus/hidden-rows/manifest.json
+//   node scripts/corpus/hidden-rows/generate.mjs           # (re)write test/corpus/hidden-rows/*.{xls,xml,slk,xlsb,xlsx} and renamed/
+//   node scripts/corpus/hidden-rows/generate.mjs --check   # generate to a temp dir; compare the whole directory both
+//                                                 # ways with test/corpus/hidden-rows (manifest.json is hidden-rows/manifest.mjs's)
+//                                                 # and the sha256s pinned in test/corpus/hidden-rows/manifest.json
 //   node scripts/corpus/hidden-rows/generate.mjs --out DIR # write somewhere else
 
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { createRequire } from "node:module"
-import { HIDDEN_ROWS_DIR, SHEETJS_DIR, sha256 } from "../lib.mjs"
+import { HIDDEN_ROWS_DIR, SHEETJS_DIR, compareDirs, reportCompare, sha256 } from "../lib.mjs"
+import { NAMES, RENAMED } from "./names.mjs"
 
 const require = createRequire(import.meta.url)
 const XLSX = require(path.join(SHEETJS_DIR, "xlsx.js"))
@@ -93,21 +95,25 @@ write("hidden-row.xlsb", workbook({ hidden: true }), { bookType: "xlsb" })
 write("hidden-row.xlsx", workbook({ hidden: true }), { bookType: "xlsx" })
 write("plain.xlsx", workbook({ hidden: false }), { bookType: "xlsx" })
 
-const NAMES = ["hidden-row.xls", "hidden-row.xml", "hidden-row.slk", "hidden-row.xlsb", "hidden-row.xlsx", "plain.xlsx"]
-console.log(`SheetJS ${XLSX.version} (${SHEETJS_DIR}): wrote ${NAMES.length} fixtures to ${OUT}`)
+// Misleading-extension byte copies.
+for (const [rel, of] of Object.entries(RENAMED)) {
+  fs.mkdirSync(path.join(OUT, path.dirname(rel)), { recursive: true })
+  fs.copyFileSync(path.join(OUT, of), path.join(OUT, rel))
+}
+console.log(`SheetJS ${XLSX.version} (${SHEETJS_DIR}): wrote ${NAMES.length} fixtures + ${Object.keys(RENAMED).length} renamed copies to ${OUT}`)
 
 if (check) {
+  let ok = reportCompare(compareDirs(OUT, HIDDEN_ROWS_DIR, ["manifest.json"]), "test/corpus/hidden-rows")
+  // The pinned sha256s in hidden-rows/manifest.json must match too (every entry, renamed copies included).
   const manifest = JSON.parse(fs.readFileSync(path.join(HIDDEN_ROWS_DIR, "manifest.json"), "utf8"))
-  const pinned = new Map(manifest.files.filter((f) => !f.copyOf).map((f) => [f.path, f.sha256]))
-  let bad = 0
-  for (const n of NAMES) {
-    const got = sha256(fs.readFileSync(path.join(OUT, n)))
-    const committed = sha256(fs.readFileSync(path.join(HIDDEN_ROWS_DIR, n)))
-    const ok = got === committed && got === pinned.get(n)
-    if (!ok) bad++
-    console.log(`${ok ? "same" : "DIFF"}  ${n.padEnd(16)} ${got}`)
+  const listed = new Set(manifest.files.map((f) => f.path))
+  for (const f of manifest.files) {
+    const p = path.join(OUT, f.path)
+    const got = fs.existsSync(p) ? sha256(fs.readFileSync(p)) : null
+    if (got !== f.sha256) { ok = false; console.log(`PIN     ${f.path}: manifest ${f.sha256.slice(0, 12)}…, generated ${got?.slice(0, 12) ?? "missing"}`) }
   }
+  for (const n of [...NAMES, ...Object.keys(RENAMED)]) if (!listed.has(n)) { ok = false; console.log(`UNLISTED ${n} (not in hidden-rows/manifest.json)`) }
   fs.rmSync(OUT, { recursive: true, force: true })
-  if (bad) { console.error(`${bad} file(s) differ from the committed fixtures`); process.exit(1) }
-  console.log("byte-identical to the committed fixtures")
+  if (!ok) process.exit(1)
+  console.log("byte-identical to the committed fixtures and their manifest pins")
 }

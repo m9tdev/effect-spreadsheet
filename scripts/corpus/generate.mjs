@@ -11,14 +11,15 @@
 // these files at test time (see docs/corpus.md).
 //
 // Usage: node scripts/corpus/generate.mjs [--check]
-//   --check: generate into a temp dir and compare with the committed files.
+//   --check: generate into a temp dir and compare the whole directory both ways with
+//            test/corpus/generated (README.json included; stale extra files are flagged).
 
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { createRequire } from "node:module"
 import { crc32, deflateRawSync } from "node:zlib"
-import { GENERATED_DIR, SHEETJS_DIR, sha256, sniff, zipEntries, zipRead } from "./lib.mjs"
+import { GENERATED_DIR, SHEETJS_DIR, compareDirs, reportCompare, sha256, sniff, zipEntries, zipRead } from "./lib.mjs"
 
 const require = createRequire(import.meta.url)
 const XLSX = require(path.join(SHEETJS_DIR, "xlsx.js"))
@@ -430,13 +431,7 @@ const total = written.reduce((a, w) => a + w.size, 0)
 console.log(`generated ${written.length} files, ${(total / 1024).toFixed(1)} KiB total -> ${OUT}`)
 
 if (check) {
-  let bad = 0
-  for (const w of index.files) {
-    const p = path.join(GENERATED_DIR, w.name)
-    const same = fs.existsSync(p) && sha256(fs.readFileSync(p)) === w.sha256
-    if (!same) { bad++; console.log(`DIFF ${w.name}`) }
-  }
+  const ok = reportCompare(compareDirs(OUT, GENERATED_DIR), "test/corpus/generated")
   fs.rmSync(OUT, { recursive: true, force: true })
-  if (bad) process.exit(1)
-  console.log("all generated files byte-identical to the committed ones")
+  if (!ok) process.exit(1)
 }

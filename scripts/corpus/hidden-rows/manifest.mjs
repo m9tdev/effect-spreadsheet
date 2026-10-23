@@ -12,6 +12,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { HIDDEN_ROWS_DIR, sha256, sniff } from "../lib.mjs"
+import { RENAMED } from "./names.mjs"
 
 const VALUES = [
   ["Product", "Qty", "Price"],
@@ -29,15 +30,6 @@ const FIXTURES = {
   "hidden-row.xlsb": { storage: "BrtRowHdr flags 0x10 (fDyZero) for row index 2", hidden: 2, hangs: { default: true, cellStyles: true } },
   "hidden-row.xlsx": { storage: '<row r="3" hidden="1">', hidden: 2, hangs: { default: false, cellStyles: true }, note: "SheetJS records xlsx hidden rows in !rows only with cellStyles:true; with default options the old reader returns all 4 rows and loses the flag" },
   "plain.xlsx": { storage: "none (control)", hidden: -1, hangs: { default: false, cellStyles: false } },
-}
-// Misleading-extension copies: same bytes, wrong name. Format detection must ignore the extension.
-const RENAMED = {
-  "renamed/hidden-row-xls.csv": "hidden-row.xls",
-  "renamed/hidden-row-xml.xlsx": "hidden-row.xml",
-  "renamed/hidden-row-slk.csv": "hidden-row.slk",
-  "renamed/hidden-row-xlsb.xls": "hidden-row.xlsb",
-  "renamed/hidden-row-xlsx.csv": "hidden-row.xlsx",
-  "renamed/plain-xlsx.xls": "plain.xlsx",
 }
 
 const files = []
