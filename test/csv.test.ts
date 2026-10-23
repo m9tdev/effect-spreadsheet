@@ -293,16 +293,42 @@ describe("csv: type inference", () => {
     ])
   })
 
+  // The error-literal scan looks only at the inferTypes text: the README's
+  // inferTypes bullet and the JSDoc block above `inferTypes`, so a literal
+  // mentioned anywhere else (say, a future note on #SPILL!) doesn't count.
+  const listedLiterals = (text: string) => [...text.matchAll(/`(#[A-Z0-9/!?_]+)`/g)].map((m) => m[1])
+  const inferTypesBullet = (readme: string): string => {
+    const start = readme.indexOf("- `inferTypes`")
+    expect(start, "README inferTypes bullet").toBeGreaterThanOrEqual(0)
+    const end = readme.indexOf("\n", start)
+    return readme.slice(start, end < 0 ? undefined : end)
+  }
+  const inferTypesJsdoc = (source: string): string => {
+    const field = source.indexOf("readonly inferTypes?:")
+    expect(field, "inferTypes field").toBeGreaterThanOrEqual(0)
+    const start = source.lastIndexOf("/**", field)
+    return source.slice(start, field)
+  }
+
+  it("the error-literal scan ignores literals outside the inferTypes text", () => {
+    const readme = "intro mentions `#SPILL!`\n- `inferTypes`: only `#N/A` here\n- other: `#CALC!`\n"
+    expect(listedLiterals(inferTypesBullet(readme))).toEqual(["#N/A"])
+    const source = "/** see `#SPILL!` */\nconst x = 1\n  /**\n   * `#REF!` only\n   */\n  readonly inferTypes?: boolean\n  /** `#CALC!` */"
+    expect(listedLiterals(inferTypesJsdoc(source))).toEqual(["#REF!"])
+    // and the real files still list exactly the eight
+    const real = readFileSync(new URL("../README.md", import.meta.url), "utf8") + "\n\nLater: `#SPILL!` is not inferred.\n"
+    expect(listedLiterals(inferTypesBullet(real))).toHaveLength(8)
+  })
+
   it("the README and the inferTypes doc list exactly the parser's error literals", () => {
     const literals = ["#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA"]
     const parser = readFileSync(new URL("../src/internal/csv/parser.ts", import.meta.url), "utf8")
     const set = /const ERRORS = new Set\(\[([^\]]*)\]\)/.exec(parser)![1]!
     expect(set.split(",").map((s) => JSON.parse(s.trim()))).toEqual(literals)
-    const listed = (text: string) => [...text.matchAll(/`(#[A-Z0-9/!?_]+)`/g)].map((m) => m[1])
     const jsdoc = readFileSync(new URL("../src/csv/index.ts", import.meta.url), "utf8")
     const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8")
-    expect(listed(jsdoc)).toEqual(literals)
-    expect(listed(readme)).toEqual(literals)
+    expect(listedLiterals(inferTypesJsdoc(jsdoc))).toEqual(literals)
+    expect(listedLiterals(inferTypesBullet(readme))).toEqual(literals)
     for (const text of [jsdoc, readme]) {
       expect(text).toMatch(/case-sensitive/)
       expect(text).toMatch(/surrounding whitespace stay text/)

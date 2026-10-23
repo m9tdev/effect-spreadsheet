@@ -9,6 +9,8 @@ const WATCHDOG = new URL("./setup/watchdog.ts", import.meta.url).pathname
  * limit (heartbeat 500 ms). If the child is still running after `deadlineMs`
  * (say, the watchdog is broken and the body loops), the test kills it, so it
  * can never outlive the test run; `killedByTest` tells the two kills apart.
+ * It resolves on `close`, after the child's stdout has been read to the end
+ * (`exit` can fire before the last output arrives).
  */
 const run = (body: string, hangMs = 2000, deadlineMs = 30_000) =>
   new Promise<
@@ -26,7 +28,7 @@ const run = (body: string, hangMs = 2000, deadlineMs = 30_000) =>
       killedByTest = true
       child.kill("SIGKILL")
     }, deadlineMs)
-    child.on("exit", (code, signal) => {
+    child.on("close", (code, signal) => {
       clearTimeout(deadline)
       resolve({ code, signal, ms: performance.now() - start, killedByTest, stdout })
     })
@@ -60,6 +62,12 @@ describe("test watchdog", () => {
     const hangMs = Number(process.env["TEST_HANG_MS"] ?? 60_000)
     expect(settings).toEqual({ hangMs, ...periods(hangMs) })
   })
+
+  it("the helper returns the child's whole stdout", async () => {
+    const result = await run(`process.stdout.write("x".repeat(4 * 1024 * 1024))`, 2000, 15_000)
+    expect([result.code, result.killedByTest]).toEqual([0, false])
+    expect(result.stdout.length).toBe(4 * 1024 * 1024)
+  }, 20_000)
 
   it("a process with a 300 ms limit runs the watchdog with periods(300)", async () => {
     // through the same helper, so the child has a deadline too

@@ -57,14 +57,15 @@ export interface ReadOptions {
    * zeros in the integer part (`007` stays text); at most 15 digits before
    * the exponent, not counting zeros before the first non-zero digit
    * (`1000000000000000`, `1.000000000000000` and `1234567890123456e-10`
-   * stay text; `123456789012345e10` is a number), finite; `-0` becomes `0`, and so does
-   * any value that rounds to 0 as a double (`1e-999`, `-1e-400`); no thousands
-   * separators, currency, `%` or hex) become `Number`; the Excel error
-   * literals `#NULL!`, `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`,
-   * `#N/A` and `#GETTING_DATA` become `Error` (case-sensitive: `#n/a` stays
-   * text). Values with surrounding whitespace stay text (`" 1"`); quoted
-   * values are inferred too (`"1"` gives `1`). Dates and formulas are never
-   * inferred (`=SUM(A1)` stays text).
+   * stay text; `123456789012345e10` is a number), finite; `-0` becomes
+   * `0`, and so does any value that rounds to 0 as a double (`1e-999`,
+   * `-1e-400`); no thousands separators, currency, `%` or hex) become
+   * `Number`; the Excel error literals `#NULL!`, `#DIV/0!`, `#VALUE!`,
+   * `#REF!`, `#NAME?`, `#NUM!`, `#N/A` and `#GETTING_DATA` become `Error`
+   * (case-sensitive: `#n/a` stays text). Values with
+   * surrounding whitespace stay text (`" 1"`); quoted
+   * values are inferred too (`"1"` gives `1`). Dates and formulas are
+   * never inferred (`=SUM(A1)` stays text).
    */
   readonly inferTypes?: boolean | undefined
   /** Default `false`. See the module docs. */
