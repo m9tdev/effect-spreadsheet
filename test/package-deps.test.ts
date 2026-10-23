@@ -65,6 +65,17 @@ describe("package.json licence and files", () => {
     }
   })
 
+  it("README links to files outside the package are absolute URLs", () => {
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8")
+    const shipped = (target: string) =>
+      (pkg.files ?? []).some((entry) => target === entry || target.startsWith(`${entry.replace(/\/$/, "")}/`))
+    // progress: one Markdown link per iteration of the (finite) README
+    for (const [, target] of readme.matchAll(/\]\(([^)\s]+)\)/g)) {
+      if (/^(https?:|#|mailto:)/.test(target!)) continue
+      expect(shipped(target!.replace(/^\.\//, "")), `README link ${target} is relative but not shipped`).toBe(true)
+    }
+  })
+
   it("never ships test/, scripts/ or docs/", () => {
     for (const entry of pkg.files ?? []) {
       expect(entry, entry).not.toMatch(/^(\.\/)?(test|scripts|docs)(\/|$)/)
