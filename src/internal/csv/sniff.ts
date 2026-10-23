@@ -1,5 +1,3 @@
-// Portions derived from SheetJS (bits/40_harb.js), Copyright (C) SheetJS LLC, Apache-2.0.
-// Licensed under the Apache License, Version 2.0: see LICENSE-APACHE-2.0.
 /**
  * Delimiter sniffing.
  *
@@ -9,7 +7,7 @@
 /** Characters of text looked at to guess the delimiter. */
 export const SNIFF_CHARS = 16 * 1024
 
-/** Candidates, in tie-break order (same order as SheetJS: , \t ; |). */
+/** Candidates, in tie-break order: comma, tab, semicolon, pipe. */
 const CANDIDATES = [0x2C, 0x09, 0x3B, 0x7C] as const
 
 const MAX_LINES = 64
@@ -20,7 +18,7 @@ const MAX_LINES = 64
  * 1. A candidate that occurs the same non-zero number of times on every
  *    line (at least 2 non-blank lines) wins; among several, the one with
  *    more occurrences per line, then the tie-break order.
- * 2. Otherwise the most frequent candidate wins (like SheetJS), then the
+ * 2. Otherwise the most frequent candidate wins, then the
  *    tie-break order; with none at all, `,`.
  */
 export const guessDelimiter = (sample: string): number => {

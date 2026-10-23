@@ -16,7 +16,5 @@ stays under the Apache License, Version 2.0 (full text in LICENSE-APACHE-2.0),
 keeps its SheetJS header and is listed below.
 
 Files derived from SheetJS:
-- src/internal/csv/sniff.ts: delimiter candidates and tie-break order follow
-  guess_sep in bits/40_harb.js
 - src/internal/records.ts: unique header naming (__EMPTY, name_1, ...) follows
   sheet_to_json in bits/90_utils.js
