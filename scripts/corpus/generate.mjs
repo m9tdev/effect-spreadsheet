@@ -255,6 +255,8 @@ out("hidden_rows.xml", Buffer.from(XLSX.write(hrBook(), { type: "string", bookTy
 for (const [name, hidden] of Object.entries(HR_CASES)) {
   out(`hidden_rows_${name}.slk`, Buffer.from(XLSX.write(book([{ name: "Sheet1", ws: hrSheet(hidden) }]), { type: "string", bookType: "sylk" }), "latin1"), `SYLK hidden rows (${name}): F;M0;R<n>`)
 }
+// SYLK row-format record without M: row 1 is NOT hidden (SheetJS wrongly marks it hidden); row 3 is hidden (M0).
+out("sylk_row_format_no_m.slk", Buffer.from('ID;PWXL;N;E\r\nP;PGeneral\r\nF;SDM6;R1\r\nF;M0;R3\r\nC;Y1;X1;K"head"\r\nC;Y1;X2;K"value"\r\nC;Y2;X1;K"a"\r\nC;Y2;X2;K1\r\nC;Y3;X1;K"b"\r\nC;Y3;X2;K2\r\nE\r\n', "latin1"), "SYLK: F;SDM6;R1 (row format without M, row 1 not hidden) and F;M0;R3 (row 3 hidden); 3 rows x 2 cols")
 {
   // ODS: SheetJS doesn't write row visibility; add table:visibility="collapse" by hand.
   const ods = sjs(hrBook(), "ods")

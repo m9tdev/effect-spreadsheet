@@ -73,6 +73,13 @@
       "desc": "SYLK hidden rows (all): F;M0;R<n>"
     },
     {
+      "name": "sylk_row_format_no_m.slk",
+      "format": "sylk",
+      "size": 135,
+      "sha256": "fbfd704052776d3c1d023665c46243a18521a8e024ba12ee99b3989b74dced63",
+      "desc": "SYLK: F;SDM6;R1 (row format without M, row 1 not hidden) and F;M0;R3 (row 3 hidden); 3 rows x 2 cols"
+    },
+    {
       "name": "hidden_rows.ods",
       "format": "ods",
       "size": 2954,

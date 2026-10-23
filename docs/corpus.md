@@ -307,7 +307,8 @@ described in `generated/README.json`.
   in `hidden_rows.{xlsx,xlsb,xml,xls,biff5.xls,ods}`. The xls/biff5 files have ROW records
   (fDyZero) inserted by hand, with BOUNDSHEET offsets fixed up. The ods file has
   `table:visibility="collapse"` added by hand. There are also SYLK files
-  `hidden_rows_{first,middle,last,consecutive,all}.slk` (`F;M0;R<n>`).
+  `hidden_rows_{first,middle,last,consecutive,all}.slk` (`F;M0;R<n>`), and
+  `sylk_row_format_no_m.slk` (a row-format record without `M`, which is not a hidden row).
 - **Sparse/far cells** `sparse_far.{xlsx,xlsb,xml,slk}`: A1 and XFD1048576.
   `sparse_far.xls`: A1 and IV65536 (the BIFF8 maximum).
 - **Huge declared dimension**, 2 cells: `huge_dimension.xlsx` (`<dimension ref="A1:XFD1048576"/>`),
@@ -363,8 +364,9 @@ user names, hostnames, e-mails, company names or paths.
 
 - **xlsx hidden rows need `cellStyles:true`.** Otherwise `!rows` is empty.
 - **SYLK false hidden rows.** In `F;…;R<n>` without `M`, SheetJS keeps `Mval = 0` and
-  marks the row hidden (`bits/40_harb.js` ~563). For example, `F;SDM6;R1` is a row-style
-  record, not a hidden row. A row is hidden only with an explicit `M0`.
+  marks the row hidden (`bits/40_harb.js` ~563). See `generated/sylk_row_format_no_m.slk`:
+  `F;SDM6;R1` is a row-style record (row 1 not hidden), `F;M0;R3` hides row 3. A row is
+  hidden only with an explicit `M0`.
 - **UTF-16BE CSV** isn't decoded (garbage cells). See `generated/csv_utf16be.csv`.
 - **BIFF5 sheet names** lose non-Latin-1 characters on write. That is a property of
   `features.biff5.xls`, not a reader bug.
