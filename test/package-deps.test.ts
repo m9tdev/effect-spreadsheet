@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 
 // Rule: effect and any @effect/* package used at runtime are peerDependencies
@@ -38,7 +38,7 @@ describe("package.json dependencies", () => {
 })
 
 // Rule: the package is MIT, and the "files" allowlist ships only the library
-// (build output, sources, docs and licence files), never tests, scripts or
+// (build output, sources, README and licence), never tests, scripts or
 // the test corpus.
 describe("package.json licence and files", () => {
   it("is MIT", () => {
@@ -51,13 +51,11 @@ describe("package.json licence and files", () => {
     for (const entry of pkg.files ?? []) expect(allowed.has(entry.replace(/^\.\/|\/$/g, "")), entry).toBe(true)
   })
 
-  // SheetJS-derived files stay Apache-2.0, so the package must ship its text (Apache-2.0 4(a)).
-  it("ships LICENSE, NOTICE and LICENSE-APACHE-2.0", () => {
-    for (const name of ["LICENSE", "NOTICE", "LICENSE-APACHE-2.0"]) {
-      expect(pkg.files, name).toContain(name)
-      expect(existsSync(new URL(`../${name}`, import.meta.url)), name).toBe(true)
-    }
-    expect(readFileSync(new URL("../LICENSE-APACHE-2.0", import.meta.url), "utf8")).toContain("Apache License\n                           Version 2.0, January 2004")
+  it("ships the MIT LICENSE", () => {
+    expect(pkg.files).toContain("LICENSE")
+    const license = readFileSync(new URL("../LICENSE", import.meta.url), "utf8")
+    expect(license).toMatch(/^MIT License/)
+    expect(license).toContain("Permission is hereby granted, free of charge")
   })
 
   it("never ships test/, scripts/ or docs/", () => {
