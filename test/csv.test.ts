@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { assert, describe, expect, it } from "@effect/vitest"
 import { Effect, Stream } from "effect"
 import * as Cell from "../src/Cell.ts"
@@ -273,7 +274,7 @@ describe("csv: type inference", () => {
     ])
   })
 
-  it("at most 15 digits, not counting leading zeros", async () => {
+  it("at most 15 digits before the exponent, not counting zeros before the first non-zero digit", async () => {
     const inputs = ["1000000000000000", "1.000000000000000", "100000000000000", "1.00000000000000", "0.000000000000001", "-0.00000000000000123456789012345"]
     const rows = await Effect.runPromise(csvRows(inputs.join(",") + "\n", { inferTypes: true }))
     assert.deepStrictEqual(rows[0]!.cells.map((c) => [c._tag, Cell.value(c)]), [
@@ -284,9 +285,34 @@ describe("csv: type inference", () => {
       ["Number", 1e-15],
       ["Number", -1.23456789012345e-15]
     ])
+    // exponent digits don't count toward the 15
+    const exp = await Effect.runPromise(csvRows("123456789012345e10,1234567890123456e-10\n", { inferTypes: true }))
+    assert.deepStrictEqual(exp[0]!.cells.map((c) => [c._tag, Cell.value(c)]), [
+      ["Number", 1.23456789012345e+24],
+      ["Text", "1234567890123456e-10"]
+    ])
   })
 
-  it("error literals are case-sensitive and limited to the listed ones; spaces keep text, quotes don't", async () => {
+  it("the README and the inferTypes doc list exactly the parser's error literals", () => {
+    const literals = ["#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA"]
+    const parser = readFileSync(new URL("../src/internal/csv/parser.ts", import.meta.url), "utf8")
+    const set = /const ERRORS = new Set\(\[([^\]]*)\]\)/.exec(parser)![1]!
+    expect(set.split(",").map((s) => JSON.parse(s.trim()))).toEqual(literals)
+    const listed = (text: string) => [...text.matchAll(/`(#[A-Z0-9/!?_]+)`/g)].map((m) => m[1])
+    const jsdoc = readFileSync(new URL("../src/csv/index.ts", import.meta.url), "utf8")
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8")
+    expect(listed(jsdoc)).toEqual(literals)
+    expect(listed(readme)).toEqual(literals)
+    for (const text of [jsdoc, readme]) {
+      expect(text).toMatch(/case-sensitive/)
+      expect(text).toMatch(/surrounding whitespace stay text/)
+      expect(text).toMatch(/quoted\s+\*?\s*values are inferred too/)
+      expect(text).toMatch(/rounds to 0 as a double/)
+      expect(text).not.toMatch(/too small for a double|Spaces around/)
+    }
+  })
+
+  it("error literals are case-sensitive and limited to the listed ones; surrounding whitespace keeps text, quotes don't", async () => {
     const literals = ["#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA"]
     const others = ["#n/a", "#div/0!", "#SPILL!", "#CALC!", "#N/A "]
     const rows = await Effect.runPromise(csvRows([...literals, ...others.map((o) => `"${o}"`)].join(",") + "\n", { inferTypes: true }))
@@ -303,7 +329,7 @@ describe("csv: type inference", () => {
     ])
   })
 
-  it("values too small for a double become the Number 0", async () => {
+  it("values that round to 0 as a double become the Number 0", async () => {
     const rows = await Effect.runPromise(csvRows("1e-999,-1e-400,5e-324\n", { inferTypes: true }))
     const cells = rows[0]!.cells
     assert.deepStrictEqual(cells.map((c) => c._tag), ["Number", "Number", "Number"])

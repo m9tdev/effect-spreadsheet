@@ -53,13 +53,18 @@ export interface ReadOptions {
   /**
    * Default `false`: every value is a `Text` cell. With `true`:
    * `TRUE`/`FALSE` (any case) become `Boolean`; decimal numbers (optional
-   * sign, fraction and exponent, e.g. `1.`, `.5`, `1e21`; no leading zeros,
-   * at most 15 digits, not counting leading zeros (`1000000000000000` and
-   * `1.000000000000000` stay text), finite; `-0` becomes `0`, and so do
-   * values too small for a double (`1e-999`, `-1e-400`); no thousands
-   * separators, currency, `%` or hex) become `Number`; the
-   * Excel error literals (`#N/A`, `#DIV/0!`, ...) become `Error`. Dates and
-   * formulas are never inferred (`=SUM(A1)` stays text).
+   * sign, fraction and exponent, e.g. `1.`, `.5`, `1e21`; no extra leading
+   * zeros in the integer part (`007` stays text); at most 15 digits before
+   * the exponent, not counting zeros before the first non-zero digit
+   * (`1000000000000000`, `1.000000000000000` and `1234567890123456e-10`
+   * stay text; `123456789012345e10` is a number), finite; `-0` becomes `0`, and so does
+   * any value that rounds to 0 as a double (`1e-999`, `-1e-400`); no thousands
+   * separators, currency, `%` or hex) become `Number`; the Excel error
+   * literals `#NULL!`, `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`,
+   * `#N/A` and `#GETTING_DATA` become `Error` (case-sensitive: `#n/a` stays
+   * text). Values with surrounding whitespace stay text (`" 1"`); quoted
+   * values are inferred too (`"1"` gives `1`). Dates and formulas are never
+   * inferred (`=SUM(A1)` stays text).
    */
   readonly inferTypes?: boolean | undefined
   /** Default `false`. See the module docs. */
