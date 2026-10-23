@@ -113,3 +113,21 @@ test("date1904 check: typed and non-numeric cells are skipped, never a bare Rang
     assert.throws(() => checkQuirk({ ...q, correct: [[0, 1, "2000-01-01T00:00:00.000Z"]] }, doc, file), /sheetjs-quirks.json t .*correct: 1904-system dates/)
   } finally { fs.rmSync(path.dirname(file), { recursive: true, force: true }) }
 })
+
+test("xlsxSheetPart: maps a sheet name to its part through the workbook rels", async () => {
+  const { xlsxSheetPart } = await import("./quirks.mjs")
+  const { zip } = await import("./lib.mjs")
+  const wb = '<workbook xmlns:r="r"><sheets><sheet name="A &amp; B" sheetId="1" r:id="rId2"/><sheet name="Other" sheetId="2" r:id="rId1"/></sheets></workbook>'
+  const rels = '<Relationships><Relationship Id="rId1" Type="ws" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="ws" Target="worksheets/sheet7.xml"/></Relationships>'
+  const buf = zip([["xl/workbook.xml", wb], ["xl/_rels/workbook.xml.rels", rels]])
+  assert.equal(xlsxSheetPart(buf, "A & B"), "xl/worksheets/sheet7.xml")
+  assert.equal(xlsxSheetPart(buf, "Other"), "xl/worksheets/sheet1.xml")
+  assert.throws(() => xlsxSheetPart(buf, "Missing"), /no sheet "Missing"/)
+  // the committed fixtures resolve to their real parts
+  assert.equal(xlsxSheetPart(fs.readFileSync(path.join(CORPUS_DIR, "generated/strings.xlsx")), "Strings"), "xl/worksheets/sheet1.xml")
+  // a quirk naming a sheet that doesn't exist fails with the quirk's own error
+  const q = QUIRKS.find((x) => x.correctCheck === "xlsx-shared-strings")
+  const doc = docFor(q)
+  doc.sheets[0].name = "Renamed"
+  assert.throws(() => checkQuirk({ ...q, sheet: "Renamed" }, doc, fileFor(q)), /sheetjs-quirks.json .*correct: no sheet "Renamed"/)
+})

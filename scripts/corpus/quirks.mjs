@@ -47,11 +47,26 @@ export const xmlText = (s) => s
   .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d))
   .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&")
   .replace(/_x([0-9A-F]{4})_/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-function xlsxSharedStringCells(buf) {
-  const part = (n) => { const e = zipEntries(buf).find((x) => x.name === n); return e ? zipRead(buf, e).toString("utf8") : "" }
+const zipPart = (buf, n) => { const e = zipEntries(buf).find((x) => x.name === n); return e ? zipRead(buf, e).toString("utf8") : "" }
+const unxml = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&")
+
+/** The worksheet part of `sheet` (xl/workbook.xml name -> r:id -> workbook rels Target). */
+export function xlsxSheetPart(buf, sheet) {
+  const sheets = [...zipPart(buf, "xl/workbook.xml").matchAll(/<sheet\b([^>]*)\/?>/g)].map((m) => ({ name: unxml(/\bname="([^"]*)"/.exec(m[1])?.[1] ?? ""), rid: /\br:id="([^"]*)"/.exec(m[1])?.[1] }))
+  if (!sheets.length) return "xl/worksheets/sheet1.xml" // minimal workbook without a sheet list
+  const s = sheets.find((x) => x.name === sheet)
+  if (!s) throw new Error(`no sheet "${sheet}" in xl/workbook.xml`)
+  const rel = [...zipPart(buf, "xl/_rels/workbook.xml.rels").matchAll(/<Relationship\b([^>]*)\/?>/g)].map((m) => m[1]).find((a) => /\bId="([^"]*)"/.exec(a)?.[1] === s.rid)
+  const target = rel && /\bTarget="([^"]*)"/.exec(rel)?.[1]
+  if (!target) throw new Error(`no relationship ${s.rid} for sheet "${sheet}"`)
+  return target.startsWith("/") ? target.slice(1) : path.posix.normalize(`xl/${target}`)
+}
+
+function xlsxSharedStringCells(buf, sheet) {
+  const part = (n) => zipPart(buf, n)
   const sst = [...part("xl/sharedStrings.xml").matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => xmlText(m[1]))
   const m = new Map()
-  for (const c of part("xl/worksheets/sheet1.xml").matchAll(/<c r="([A-Z]+)(\d+)" t="s"><v>(\d+)<\/v><\/c>/g)) {
+  for (const c of part(xlsxSheetPart(buf, sheet)).matchAll(/<c r="([A-Z]+)(\d+)" t="s"><v>(\d+)<\/v><\/c>/g)) {
     const col = [...c[1]].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1
     m.set(`${+c[2] - 1},${col}`, sst[+c[3]])
   }
@@ -84,7 +99,8 @@ export function checkQuirk(q, doc, file) {
     const got = csvFields(decodeFixture(buf, m.slice(4)))
     if (!sameCells(got, q.correct)) bad(`correct: decoded fields ${JSON.stringify(q.correct.map(([r, c]) => [r, c, got.get(`${r},${c}`) ?? null]))}`)
   } else if (m === "xlsx-shared-strings") {
-    const got = xlsxSharedStringCells(buf)
+    let got
+    try { got = xlsxSharedStringCells(buf, q.sheet) } catch (e) { bad(`correct: ${e.message}`) }
     if (!sameCells(got, q.correct)) bad(`correct: shared strings ${JSON.stringify(q.correct.map(([r, c]) => [r, c, got.get(`${r},${c}`) ?? null]))}`)
   } else if (m === "xlsx-date1904-serial") {
     // the serials in the sheet XML read in the workbook's own date system (date1904 => 1904-01-01 epoch)
@@ -93,7 +109,9 @@ export function checkQuirk(q, doc, file) {
     if (!d1904) bad("correct: the workbook doesn't declare date1904")
     const epoch = Date.UTC(1904, 0, 1)
     const got = new Map()
-    for (const c of part("xl/worksheets/sheet1.xml").matchAll(/<c r="([A-Z]+)(\d+)"([^>]*)><v>([^<]+)<\/v><\/c>/g)) {
+    let sheetPart
+    try { sheetPart = xlsxSheetPart(buf, q.sheet) } catch (e) { bad(`correct: ${e.message}`) }
+    for (const c of part(sheetPart).matchAll(/<c r="([A-Z]+)(\d+)"([^>]*)><v>([^<]+)<\/v><\/c>/g)) {
       // only plain numeric cells are serials: skip typed cells (t="s", "str", "b", ...) and
       // values that aren't finite numbers, which would make new Date() throw a RangeError
       if (/\bt="/.test(c[3])) continue
