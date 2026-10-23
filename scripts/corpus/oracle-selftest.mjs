@@ -10,7 +10,9 @@
 //      same abort after 3.
 //   E. tooBig results (tiny ORACLE_MAX_CELLS) keep reason, options, workbook,
 //      per-sheet counts and the SheetJS version in the expected file.
-// Needs ~/sheetjs (SHEETJS_DIR) for A/B; Linux `ps` for the child lookup.
+// Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B and E: they are skipped, not
+// failed, without it. Linux `ps` for the child lookup. Stale temp dirs from a SIGKILLed
+// run are removed at the next start.
 // Usage: node scripts/corpus/oracle-selftest.mjs
 
 import { execFileSync, spawn } from "node:child_process"
@@ -20,11 +22,23 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const { parseFlags } = await import(path.join(HERE, "lib.mjs"))
+const { parseFlags, SHEETJS_ENTRY } = await import(path.join(HERE, "lib.mjs"))
 parseFlags(process.argv.slice(2), []) // no arguments
 const ORACLE = path.join(HERE, "oracle.mjs")
 const MANIFEST = path.join(HERE, "manifest.mjs")
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-selftest-"))
+// Temp dirs carry our pid; remove ones left by a selftest that was SIGKILLed (pid gone).
+for (const d of fs.readdirSync(os.tmpdir())) {
+  if (!d.startsWith("oracle-selftest-")) continue
+  const m = /^oracle-selftest-(\d+)-/.exec(d)
+  if (m && Number(m[1]) === process.pid) continue
+  let gone = false
+  if (m) { try { process.kill(Number(m[1]), 0) } catch (e) { gone = e.code === "ESRCH" } }
+  else { try { gone = Date.now() - fs.statSync(path.join(os.tmpdir(), d)).mtimeMs > 3_600_000 } catch {} } // older name format: by age
+  if (gone) fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true })
+}
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `oracle-selftest-${process.pid}-`))
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => { fs.rmSync(tmp, { recursive: true, force: true }); process.exit(1) })
+const haveSheetJS = fs.existsSync(SHEETJS_ENTRY)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
 const childrenOf = (pid) => {
@@ -32,6 +46,7 @@ const childrenOf = (pid) => {
 }
 
 let failed = 0
+const skip = (name, why) => console.log(`skip ${name}  — ${why}`)
 const check = (name, ok, detail = "") => { console.log(`${ok ? "ok  " : "FAIL"} ${name}${detail ? "  — " + detail : ""}`); if (!ok) failed++ }
 
 function startOracle(env, args) {
@@ -94,11 +109,17 @@ async function startupCase(name, body, args, expect) {
 
 try {
   execFileSync(process.execPath, [MANIFEST], { env: { ...process.env, CORPUS_CACHE_DIR: tmp }, stdio: "ignore" })
-  await killCase("A parent SIGKILL", "SIGKILL")
-  await killCase("B parent SIGTERM", "SIGTERM")
+  if (haveSheetJS) {
+    await killCase("A parent SIGKILL", "SIGKILL")
+    await killCase("B parent SIGTERM", "SIGTERM")
+  } else {
+    skip("A parent SIGKILL", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+    skip("B parent SIGTERM", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  }
   await startupCase("C throwing xlsx.js", 'throw new Error("boom from fake xlsx.js")\n', [], "boom from fake xlsx.js")
   await startupCase("D hanging xlsx.js", "for (;;) {}\n", ["--ready-timeout", "2"], "no ready within 2s")
-  await tooBigCase("E tooBig results")
+  if (haveSheetJS) await tooBigCase("E tooBig results")
+  else skip("E tooBig results", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })
 }
