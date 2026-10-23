@@ -23,8 +23,6 @@ import { checkQuirk, loadQuirks } from "./quirks.mjs"
 export const MAX_FILE_BYTES = 64 * 1024
 const OUT_ROOT = path.join(CORPUS_DIR, "expected")
 const check = !!parseFlags(process.argv.slice(2), ["--check"])["--check"]
-// Always build into a temp dir; only replace test/corpus/expected once every file was found.
-const OUT = fs.mkdtempSync(path.join(os.tmpdir(), "corpus-expected-"))
 
 function listTop(dir, skip) {
   const out = []
@@ -55,45 +53,52 @@ for (const q of QUIRKS) {
   if (!sources.some((s) => s.name === src && s.files.includes(rest.join("/")))) throw new Error(`sheetjs-quirks.json: unknown file ${q.file}`)
 }
 let missing = 0, capped = 0, total = 0, count = 0
-for (const src of sources) {
-  for (const rel of src.files) {
-    const sha = sha256(fs.readFileSync(path.join(src.dir, rel)))
-    const cached = path.join(EXPECTED_DIR, `${sha}.json`)
-    if (!fs.existsSync(cached)) { missing++; console.error(`no oracle result for ${src.name}/${rel} (run oracle.mjs --source ${src.name})`); continue }
-    const doc = JSON.parse(fs.readFileSync(cached, "utf8"))
-    delete doc.ms
-    doc.path = rel
-    doc.source = src.name
-    const known = quirkIds(`${src.name}/${rel}`)
-    if (known.length) doc.knownQuirks = known
-    // Keep the quirk list honest: `sheetjs` must match the oracle, `correct` the fixture bytes.
-    for (const q of QUIRKS.filter((q) => q.file === `${src.name}/${rel}`)) checkQuirk(q, doc, path.join(src.dir, rel))
-    let text = stringify(doc)
-    if (text.length > MAX_FILE_BYTES && doc.sheets) {
-      for (const s of doc.sheets) if (s.rows) { s.rows = null; s.rowsOmitted = "size cap" }
-      text = stringify(doc)
+// Always build into a temp dir; only replace test/corpus/expected once every file was found.
+// The temp dir goes away even when a check throws (try/finally; no process.exit inside).
+const OUT = fs.mkdtempSync(path.join(os.tmpdir(), "corpus-expected-"))
+let ok = false
+try {
+  for (const src of sources) {
+    for (const rel of src.files) {
+      const sha = sha256(fs.readFileSync(path.join(src.dir, rel)))
+      const cached = path.join(EXPECTED_DIR, `${sha}.json`)
+      if (!fs.existsSync(cached)) { missing++; console.error(`no oracle result for ${src.name}/${rel} (run oracle.mjs --source ${src.name})`); continue }
+      const doc = JSON.parse(fs.readFileSync(cached, "utf8"))
+      delete doc.ms
+      doc.path = rel
+      doc.source = src.name
+      const known = quirkIds(`${src.name}/${rel}`)
+      if (known.length) doc.knownQuirks = known
+      // Keep the quirk list honest: `sheetjs` must match the oracle, `correct` the fixture bytes.
+      for (const q of QUIRKS.filter((q) => q.file === `${src.name}/${rel}`)) checkQuirk(q, doc, path.join(src.dir, rel))
+      let text = stringify(doc)
+      if (text.length > MAX_FILE_BYTES && doc.sheets) {
+        for (const s of doc.sheets) if (s.rows) { s.rows = null; s.rowsOmitted = "size cap" }
+        text = stringify(doc)
+      }
+      if (text.length > MAX_FILE_BYTES && doc.sheets) {
+        for (const s of doc.sheets) if (s.cells) { s.cells = null; s.cellsOmitted = "size cap" }
+        text = stringify(doc)
+      }
+      if (text.length > MAX_FILE_BYTES) throw new Error(`${src.name}/${rel}: still ${text.length} bytes after dropping rows and cells`)
+      if (doc.sheets?.some((s) => s.rowsOmitted === "size cap" || s.cellsOmitted === "size cap")) capped++
+      const out = path.join(OUT, src.name, rel + ".json")
+      fs.mkdirSync(path.dirname(out), { recursive: true })
+      fs.writeFileSync(out, text)
+      total += Buffer.byteLength(text)
+      count++
     }
-    if (text.length > MAX_FILE_BYTES && doc.sheets) {
-      for (const s of doc.sheets) if (s.cells) { s.cells = null; s.cellsOmitted = "size cap" }
-      text = stringify(doc)
-    }
-    if (text.length > MAX_FILE_BYTES) throw new Error(`${src.name}/${rel}: still ${text.length} bytes after dropping rows and cells`)
-    if (doc.sheets?.some((s) => s.rowsOmitted === "size cap" || s.cellsOmitted === "size cap")) capped++
-    const out = path.join(OUT, src.name, rel + ".json")
-    fs.mkdirSync(path.dirname(out), { recursive: true })
-    fs.writeFileSync(out, text)
-    total += Buffer.byteLength(text)
-    count++
   }
+  console.log(`expected: ${count} files, ${(total / 1024).toFixed(1)} KiB, ${capped} capped (rows/cells dropped), ${missing} missing`)
+  ok = !missing
+  if (check) ok = reportCompare(compareDirs(OUT, OUT_ROOT), "test/corpus/expected") && ok
+  else if (missing) console.error(`not updating test/corpus/expected: ${missing} oracle result(s) missing`)
+  else {
+    fs.rmSync(OUT_ROOT, { recursive: true, force: true })
+    fs.cpSync(OUT, OUT_ROOT, { recursive: true })
+    console.log(`wrote ${path.relative(process.cwd(), OUT_ROOT)}`)
+  }
+} finally {
+  fs.rmSync(OUT, { recursive: true, force: true })
 }
-console.log(`expected: ${count} files, ${(total / 1024).toFixed(1)} KiB, ${capped} capped (rows/cells dropped), ${missing} missing`)
-let ok = !missing
-if (check) ok = reportCompare(compareDirs(OUT, OUT_ROOT), "test/corpus/expected") && ok
-else if (missing) console.error(`not updating test/corpus/expected: ${missing} oracle result(s) missing`)
-else {
-  fs.rmSync(OUT_ROOT, { recursive: true, force: true })
-  fs.cpSync(OUT, OUT_ROOT, { recursive: true })
-  console.log(`wrote ${path.relative(process.cwd(), OUT_ROOT)}`)
-}
-fs.rmSync(OUT, { recursive: true, force: true })
-if (!ok) process.exit(1)
+if (!ok) process.exitCode = 1
