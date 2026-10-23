@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM"],
+    "module": "NodeNext",
+    "moduleDetection": "force",
+    "verbatimModuleSyntax": true,
+    "rewriteRelativeImportExtensions": true,
+    "erasableSyntaxOnly": true,
+    "allowJs": false,
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "noErrorTruncation": true,
+    "types": [],
+    "plugins": [{
+      "name": "@effect/language-service",
+      "namespaceImportPackages": ["effect", "@effect/*"],
+      "diagnosticSeverity": {
+        "unstableApiUsage": "off",
+        "experimentalApiUsage": "off"
+      }
+    }]
+  }
+}
