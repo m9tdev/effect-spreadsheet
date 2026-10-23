@@ -250,7 +250,11 @@ export const recordsStream = <E, R>(
             yield* Effect.yieldNow
             const out: Array<Record<string, unknown>> = []
             const until = builder.keys + BATCH_KEYS
-            // progress: i grows by one per iteration, bounded by chunk.length
+            // progress: i grows by one per iteration, bounded by chunk.length.
+            // Rows that give no record (the header, rows before it, blank
+            // rows) add few or no keys, so they don't end the batch; their
+            // work is bounded by the upstream chunk, which the reader already
+            // keeps to one bounded step (and which yielded before it came).
             while (i < chunk.length && builder.keys < until) {
               const record = builder.push(chunk[i++]!)
               if (record instanceof LimitExceeded) {

@@ -146,6 +146,27 @@ describe("toRecords", () => {
       assert.strictEqual(over.limit, "maxRecordFields")
     }), 30_000)
 
+  it("many rows that give no record (blank, before the header) finish fast and keep yielding", async () => {
+    const bytes = enc("\n".repeat(300_000) + "h\n" + "\n".repeat(300_000) + "v\n")
+    let last = performance.now()
+    let maxGap = 0
+    const timer = setInterval(() => {
+      const now = performance.now()
+      maxGap = Math.max(maxGap, now - last)
+      last = now
+    }, 5)
+    const start = performance.now()
+    const records = await Effect.runPromise(
+      Stream.runCollect(Spreadsheet.toRecords(Csv.rows(bytes), { header: 300_000 }))
+    )
+    const elapsed = performance.now() - start
+    await new Promise((r) => setTimeout(r, 30))
+    clearInterval(timer)
+    expect(Array.from(records)).toEqual([{ h: "v" }])
+    expect(elapsed).toBeLessThan(3000)
+    expect(maxGap).toBeLessThan(250)
+  }, 30_000)
+
   it.effect("Empty cells count against maxCellsPerSheet", () =>
     Effect.gen(function*() {
       const rows: Array<Row> = [
