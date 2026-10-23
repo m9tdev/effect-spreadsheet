@@ -163,9 +163,11 @@ describe("recordKeys: hostile inputs stay linear", () => {
   // compared with a linear reference doing the same kind of work on the same
   // input (an entry array, a Set and two Maps of n fresh strings), measured
   // in the same process, interleaved, best of 3: load slows both alike.
-  // Measured at 65 536 columns: linear code 1.0-1.8x the reference idle and
-  // 0.4-3.1x under load; a quadratic that scans a list on every 4th
-  // allocation 16-255x.
+  // Measured at 65 536 columns: linear code 0.62-3.92x the reference under
+  // moderate load and up to ~5.1x under heavy load; a quadratic that scans a
+  // list on every 4th allocation 13.6-81x (always caught), on every 16th
+  // 6.9-11.9x (only partly caught: that is near the limit of what timing
+  // can see).
   const N = 65536
   const MAX_RELATIVE = 8
   const hostile: ReadonlyArray<readonly [string, (n: number) => ReadonlyArray<string>]> = [
