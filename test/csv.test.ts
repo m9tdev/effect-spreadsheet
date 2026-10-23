@@ -1,4 +1,4 @@
-import { assert, describe, it } from "@effect/vitest"
+import { assert, describe, expect, it } from "@effect/vitest"
 import { Effect, Stream } from "effect"
 import * as Cell from "../src/Cell.ts"
 import * as Csv from "../src/csv/index.ts"
@@ -102,6 +102,20 @@ describe("csv: delimiters", () => {
     assert.deepStrictEqual(await csvAoa('"a;b;c";"d"\n"e;f";"g"\n'), [["a;b;c", "d"], ["e;f", "g"]])
   })
 
+  it("sniffing skips quoted delimiters (only `;` is outside quotes here)", async () => {
+    assert.deepStrictEqual(await csvAoa('"a,b,c";d\n"e,f,g";h\n'), [["a,b,c", "d"], ["e,f,g", "h"]])
+  })
+
+  it("sniffing ignores a line cut off at the end of the 16 Ki sample", async () => {
+    // 297-char lines with 1 `,` and 2 `;`: the sample ends 49 chars into a
+    // line holding only the `,`, which would make `;` look inconsistent.
+    const line = "a," + "x".repeat(290) + ";c;d\n"
+    expect(line.length).toBe(297)
+    expect(16 * 1024 % 297).toBe(49)
+    const rows = await csvAoa(line.repeat(60))
+    assert.deepStrictEqual(rows[0], ["a," + "x".repeat(290), "c", "d"])
+  })
+
   it("no candidate: comma", async () => {
     assert.deepStrictEqual(await csvAoa("abc\ndef\n"), [["abc"], ["def"]])
   })
@@ -167,6 +181,16 @@ describe("csv: encodings", () => {
     assert.deepStrictEqual(error?._tag === "InvalidOption" && error.option, "encoding")
     const atRead = await Effect.runPromise(Effect.flip(Csv.read(enc("a"), { encoding: "klingon" })))
     assert.deepStrictEqual(atRead._tag === "InvalidOption" && atRead.option, "encoding")
+  })
+
+  it("encoding is decided on the first 64 KiB only: an invalid byte near 70 000 is U+FFFD, however chunked", async () => {
+    const head = enc("a,é\n".repeat(14_000)) // 70 000 bytes of valid UTF-8
+    const bytes = new Uint8Array([...head, 0xFF, ...enc(",x\n")])
+    expect(bytes.length).toBeGreaterThan(70_000)
+    const expected = [...Array.from({ length: 14_000 }, () => ["a", "é"]), ["\uFFFD", "x"]]
+    expect(await csvAoa(bytes)).toEqual(expected)
+    const twoChunks = Stream.make(bytes.subarray(0, 40 * 1024), bytes.subarray(40 * 1024))
+    expect(await csvAoa(twoChunks)).toEqual(expected)
   })
 
   it("truncated multibyte character at EOF: U+FFFD in UTF-8, windows-1252 if it makes the whole input invalid", async () => {
