@@ -62,6 +62,18 @@ describe("format detection", () => {
     assert.strictEqual(await formatOf(enc("<?xml version=\"1.0\"?><foo/>")), "xml")
   })
 
+  it("raw BIFF needs a real BOF: UTF-16LE text starting with tabs is CSV", async () => {
+    const utf16le = (text: string) => new Uint8Array([...text].flatMap((c) => [c.charCodeAt(0), 0]))
+    assert.strictEqual(await formatOf(utf16le("\t\tname\tx\n1\t2\t3\n")), "csv")
+    assert.strictEqual(await formatOf(utf16le("\t\na\tb\n")), "csv")
+    // BIFF5/8 BOF: version 0x0600, workbook globals
+    assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x08, 0x10, 0x00, 0x00, 0x06, 0x05, 0x00, ...new Uint8Array(12)])), "xls")
+    // right type, wrong length or unknown data type
+    assert.notStrictEqual(await formatOf(new Uint8Array([0x09, 0x00, 0x06, 0x00, 0x02, 0x00, 0x10, 0x00])), "xls")
+    assert.notStrictEqual(await formatOf(new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x33, 0x00])), "xls")
+    assert.notStrictEqual(await formatOf(new Uint8Array([0x09, 0x08, 0x10, 0x00, 0x00, 0x07, 0x05, 0x00, ...new Uint8Array(12)])), "xls")
+  })
+
   it("a CSV whose first field starts with < is CSV; markup is html/xml", async () => {
     assert.strictEqual(await formatOf(enc("<b>,x\n1,2\n")), "csv")
     assert.strictEqual(await formatOf(enc("<b>name</b>;<i>x</i>\n")), "csv")

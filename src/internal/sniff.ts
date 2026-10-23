@@ -44,12 +44,34 @@ const detectZip = (bytes: Uint8Array, limits: Limits): Format | MalformedFile | 
   return "zip"
 }
 
-/** A raw BIFF2-5/8 BOF record: type 0x0009, 0x0209, 0x0409 or 0x0809, small length. */
+/** BOF "type of the following data": workbook globals, VB module, worksheet, chart, macro sheet, BIFF4 workbook. */
+const BOF_DATA_TYPES = new Set([0x0005, 0x0006, 0x0010, 0x0020, 0x0040, 0x0100])
+
+/**
+ * A raw BIFF BOF record with the length its version uses and a known data
+ * type: BIFF2 (0x0009, length 4), BIFF3/4 (0x0209/0x0409, length 6), BIFF5/8
+ * (0x0809, length 8 or 16, version word 0x0500/0x0600). The strict check
+ * keeps UTF-16LE text starting with tabs (`09 00 09 00`) out.
+ */
 const isBiffBof = (bytes: Uint8Array): boolean => {
   if (bytes.length < 8) return false
-  const type = bytes[0]! | (bytes[1]! << 8)
-  const length = bytes[2]! | (bytes[3]! << 8)
-  return (type === 0x0009 || type === 0x0209 || type === 0x0409 || type === 0x0809) && length >= 4 && length <= 20
+  const word = (at: number) => bytes[at]! | (bytes[at + 1]! << 8)
+  const type = word(0)
+  const length = word(2)
+  const dataType = word(6)
+  switch (type) {
+    case 0x0009:
+      return length === 4 && BOF_DATA_TYPES.has(dataType)
+    case 0x0209:
+    case 0x0409:
+      return length === 6 && BOF_DATA_TYPES.has(dataType)
+    case 0x0809: {
+      const version = word(4)
+      return (length === 8 || length === 16) && (version === 0x0500 || version === 0x0600) && BOF_DATA_TYPES.has(dataType)
+    }
+    default:
+      return false
+  }
 }
 
 /**
