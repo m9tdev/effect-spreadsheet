@@ -19,7 +19,7 @@ node scripts/corpus/hidden-rows/generate.mjs --check   # hidden-row fixtures reg
 node scripts/corpus/hidden-rows/manifest.mjs    # test/corpus/hidden-rows/manifest.json
 node scripts/corpus/manifest.mjs       # full manifest -> test/corpus/.cache/manifest.json (gitignored)
 node scripts/corpus/oracle.mjs         # expected output -> test/corpus/.cache/expected/<sha256>.json
-node --test scripts/corpus/*.test.mjs   # unit tests (BOF sniffing, quirk checks, expected.mjs cleanup), no SheetJS needed
+node --test scripts/corpus/*.test.mjs   # unit tests (BOF sniffing, zip checks, quirk checks, expected.mjs cleanup, result freshness), no SheetJS needed
 node scripts/corpus/oracle-selftest.mjs   # oracle process hygiene (orphans, startup deaths, tooBig docs), ~15 s
 node scripts/corpus/expected.mjs       # committed SheetJS expectations for generated + hidden-rows (after oracle --source generated/hidden-rows)
 node scripts/corpus/expected.mjs --check
@@ -28,7 +28,14 @@ node scripts/corpus/expected.mjs --check
 Oracle options: `--force`, `--jobs N` (default min(10, cores/2)), `--timeout SEC` (parse,
 default 60), `--probe-timeout SEC` (default 15), `--no-probe`, `--source sheetjs|generated|hidden-rows`,
 `--format xls,xlsb`, `--max-size BYTES`, `--limit N`, `--ready-timeout SEC` (default 30), `--verbose`. It skips files whose expected
-JSON already exists (same schema) unless you pass `--force`. A run report goes to
+JSON already exists (same schema) unless you pass `--force`. Cached `timeout` and `crash`
+results are the exception: they depend on machine load, so the next run retries them
+(`resultIsFresh` in `oracle-options.mjs`).
+
+**Full runs at 8 or more workers:** the biggest SheetJS corpus files need about half of the
+default 60 s on an idle machine. With 8 workers and the probes busy, `datetime_8192.xlsx` (63 MB)
+has hit the limit. For a full run, pass `--timeout 180`, or simply run again: only the
+timed-out files are retried. A run report goes to
 `test/corpus/.cache/oracle-report.json`. If you run with a filter (`--source`), the report only
 covers that run. Run without filters at the end: it reuses the cache and writes the full report.
 
@@ -217,6 +224,9 @@ startup deaths the oracle aborts with exit 2, instead of respawning forever (e.g
 - an `xlsx.js` that never finishes loading;
 - `tooBig` results under a tiny `ORACLE_MAX_CELLS`, which must keep `reason`, `options`,
   `workbook`, per-sheet counts and the SheetJS version.
+- `ORACLE_MAX_BYTES` counts UTF-8 bytes (F).
+- time-zone independence (G1, G2; see below).
+- a `timeout` result is retried by the next run without `--force` (H).
 
 Cases that need SheetJS are skipped, not failed, when it is missing. Temp dirs left by
 a SIGKILLed selftest are removed at the next start. The parent only writes the expected

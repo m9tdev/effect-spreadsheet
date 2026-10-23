@@ -1,6 +1,8 @@
 // Options of the SheetJS oracle (oracle.mjs), in a module without side effects so tests
 // and other scripts can import them. Recorded in every expected file.
 
+import fs from "node:fs"
+
 // 2: rows use sheet_to_json UTC:true and children run with TZ=UTC (schema 1 rows held
 // local-time Dates, so they depended on the machine's time zone).
 export const SCHEMA = 2
@@ -39,3 +41,15 @@ export const PROBE_VARIANTS = {
   control: { read: { type: "buffer", cellStyles: true }, stream: { ...PROBE_OPTIONS, skipHidden: false } },
 }
 
+
+/**
+ * Whether a cached oracle result can be reused without --force: same schema, and not a
+ * timeout or crash. Those depend on machine load (a big file can time out only while
+ * 8 workers and the probes are busy), so they are retried on the next run.
+ */
+export function resultIsFresh(file) {
+  try {
+    const d = JSON.parse(fs.readFileSync(file, "utf8"))
+    return d.schema === SCHEMA && d.status !== "timeout" && d.status !== "crash"
+  } catch { return false }
+}

@@ -21,6 +21,8 @@
 //      G2 runs just the JSON step (READ_OPTIONS + JSON_OPTIONS from oracle-options.mjs)
 //         in a child with TZ=Pacific/Auckland and no TZ=UTC override. This fails when
 //         UTC:true alone is dropped.
+//   H. a timeout is not a cached result: after a run where every parse times out
+//      (--timeout 0.001), a run without --force parses those files again.
 // Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B and E: they are skipped, not
 // failed, without it. Linux `ps` for the child lookup. Stale temp dirs from a SIGKILLed
 // run are removed at the next start.
@@ -149,6 +151,24 @@ async function timeZoneCase(name) {
   check(`${name}2 time zone: sheet_to_json with JSON_OPTIONS in a TZ=Pacific/Auckland child gives the committed rows`, JSON.stringify(got) === want, `first value ${JSON.stringify(got[0]?.[0]?.[0])}`)
 }
 
+async function retryTimeoutCase(name) {
+  const args = ["--no-probe", "--jobs", "2"]
+  const dir = path.join(tmp, "expected")
+  const statuses = () => fs.readdirSync(dir).filter((f) => !f.includes(".stream.")).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))).filter((d) => d.source === "hidden-rows").map((d) => d.status)
+  const r = await startOracle({}, [...args, "--timeout", "0.001"]).exited
+  const first = statuses()
+  check(`${name}: a run with --timeout 0.001 times out`, r.code === 0 && first.length > 0 && first.every((s) => s === "timeout"), first.join(","))
+  // startOracle passes --force; run the oracle directly without it
+  const p = spawn(process.execPath, [ORACLE, "--source", "hidden-rows", ...args], { env: { ...process.env, CORPUS_CACHE_DIR: tmp }, stdio: ["ignore", "pipe", "pipe"] })
+  let out = ""
+  p.stdout.on("data", (d) => { out += d }); p.stderr.on("data", (d) => { out += d })
+  const code = await new Promise((res) => p.on("exit", (c) => res(c)))
+  const m = /oracle: (\d+) jobs, (\d+) to run/.exec(out)
+  check(`${name}: the next run without --force retries them`, code === 0 && !!m && +m[2] > 0 && +m[2] === +m[1], m ? `${m[2]} of ${m[1]} jobs to run` : out.slice(0, 120))
+  const second = statuses()
+  check(`${name}: and they are ok now`, second.length > 0 && second.every((s) => s === "ok"), second.join(","))
+}
+
 async function startupCase(name, body, args, expect) {
   const dir = path.join(tmp, name.replace(/\W+/g, "_"))
   fs.mkdirSync(dir, { recursive: true })
@@ -181,6 +201,8 @@ try {
   else skip("F MAX_BYTES counts bytes", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
   if (haveSheetJS) await timeZoneCase("G")
   else skip("G time zone", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  if (haveSheetJS) await retryTimeoutCase("H timeout retried")
+  else skip("H timeout retried", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })
 }

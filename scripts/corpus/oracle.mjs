@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url"
 import { HIDDEN_ROWS_DIR, CACHE_DIR, EXPECTED_DIR, GENERATED_DIR, MANIFEST_PATH, SHEETJS_CACHE, SHEETJS_DIR, SHEETJS_ENTRY } from "./lib.mjs"
 
 // Option constants live in oracle-options.mjs (no side effects, so tests can import them).
-import { JSON_OPTIONS, MAX_BYTES, MAX_CELLS, PROBE_OPTIONS, PROBE_VARIANTS, READ_OPTIONS, ROWS_MAX_AREA, SCHEMA } from "./oracle-options.mjs"
+import { JSON_OPTIONS, MAX_BYTES, MAX_CELLS, PROBE_OPTIONS, PROBE_VARIANTS, READ_OPTIONS, ROWS_MAX_AREA, SCHEMA, resultIsFresh } from "./oracle-options.mjs"
 export { JSON_OPTIONS, MAX_BYTES, MAX_CELLS, PROBE_OPTIONS, PROBE_VARIANTS, READ_OPTIONS, ROWS_MAX_AREA, SCHEMA }
 
 const SOURCES = ["sheetjs", "generated", "hidden-rows"]
@@ -298,7 +298,7 @@ async function main() {
       }
     }
   }
-  const todo = (args.limit ? jobs.slice(0, args.limit) : jobs).filter((j) => args.force || !upToDate(j.out))
+  const todo = (args.limit ? jobs.slice(0, args.limit) : jobs).filter((j) => args.force || !resultIsFresh(j.out))
   // Big files first so the long tail overlaps with small ones.
   todo.sort((a, b) => b.size - a.size)
   console.log(`oracle: ${jobs.length} jobs, ${todo.length} to run, ${args.jobs} workers, timeout ${args.timeout / 1000}s (probe ${args.probeTimeout / 1000}s)`)
@@ -353,9 +353,6 @@ async function main() {
   for (const f of report.streamVerdicts) if (f.verdict !== "ok") console.log(`  ${f.verdict.padEnd(5)} ${f.format.padEnd(5)} default=${f.default} cellStyles=${f.cellStyles} control=${f.control}  ${f.file}`)
 }
 
-function upToDate(out) {
-  try { return JSON.parse(fs.readFileSync(out, "utf8")).schema === SCHEMA } catch { return false }
-}
 
 function parseArgs(argv) {
   const a = { verbose: false, force: false, jobs: Math.max(1, Math.min(10, Math.floor(os.availableParallelism() / 2))), timeout: 60_000, probeTimeout: 15_000, readyTimeout: 30_000, probe: true, source: null, format: null, maxSize: 0, limit: 0 }
