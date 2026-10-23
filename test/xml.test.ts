@@ -218,6 +218,12 @@ describe("xml tokenizer: normalization (XML 1.0)", () => {
     expect(events[0]).toEqual(["open", "a", [["v", "1 2 3 4 5"], ["w", "\t\n\r"]]])
   })
 
+  it("numeric references may have any number of leading zeros", () => {
+    expect(one("<a>&#00000065;&#x0000000042;&#0;9</a>").error).toMatchObject({ _tag: "MalformedFile" })
+    expect(one("<a>&#00000065;&#x0000000042;</a>").events[1]).toEqual(["text", "AB"])
+    expect(one("<a>&#00000000;</a>").error).toMatchObject({ _tag: "MalformedFile" })
+  })
+
 })
 
 describe("xml tokenizer: rejected input", () => {

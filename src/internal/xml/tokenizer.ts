@@ -470,8 +470,9 @@ export class XmlTokenizer {
     let from = 0
     // progress: amp moves past each reference (to the next '&' after its ';')
     while (amp >= 0) {
+      // (linear: on success the scan continues after ';', on failure it stops)
       const semi = raw.indexOf(";", amp + 1)
-      if (semi < 0 || semi - amp > 12) {
+      if (semi < 0) {
         this.fail(this.malformed("bad entity reference", offset))
         return undefined
       }
@@ -484,7 +485,8 @@ export class XmlTokenizer {
       else if (name === "apos") ch = "'"
       else if (name.charCodeAt(0) === 0x23) {
         const hex = name.charCodeAt(1) === 0x78 || name.charCodeAt(1) === 0x58
-        const digits = name.slice(hex ? 2 : 1)
+        // leading zeros are allowed in any number (&#00000065; is "A")
+        const digits = name.slice(hex ? 2 : 1).replace(/^0+(?=.)/, "")
         const valid = hex ? /^[0-9A-Fa-f]{1,6}$/.test(digits) : /^[0-9]{1,7}$/.test(digits)
         const code = valid ? Number.parseInt(digits, hex ? 16 : 10) : -1
         if (
