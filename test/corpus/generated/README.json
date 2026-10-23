@@ -1,0 +1,370 @@
+{
+  "generator": "scripts/corpus/generate.mjs",
+  "sheetjs": "0.20.3",
+  "files": [
+    {
+      "name": "hidden_rows.xlsx",
+      "format": "xlsx",
+      "size": 6064,
+      "sha256": "c6217013e2b441ff4adad5474a9d4c2a50515c063b8b54e2bcb4f8465c565882",
+      "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6)"
+    },
+    {
+      "name": "hidden_rows.xlsb",
+      "format": "xlsb",
+      "size": 4331,
+      "sha256": "0971f11233d43a305809e03dc64a743a36fec4606e14dad8f25465652770ab23",
+      "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6)"
+    },
+    {
+      "name": "hidden_rows.xml",
+      "format": "xlml",
+      "size": 6562,
+      "sha256": "19745a015ef61be5b2e6cebca43d8b6a8242de7c1ba003fcf2176dcc35916e45",
+      "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6) (SpreadsheetML 2003)"
+    },
+    {
+      "name": "hidden_rows.xls",
+      "format": "xls",
+      "size": 7680,
+      "sha256": "40f0d5d8452a31b633010ab781eae8fcc72d5facf95ef80fddc952857d5e96de",
+      "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6) (BIFF8, ROW records hand-inserted)"
+    },
+    {
+      "name": "hidden_rows.biff5.xls",
+      "format": "xls",
+      "size": 5120,
+      "sha256": "62c283a8beef3846e5480f31bfd252825e4cedd506126e4baeb1f33c340d083b",
+      "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6) (BIFF5, ROW records hand-inserted)"
+    },
+    {
+      "name": "hidden_rows_first.slk",
+      "format": "sylk",
+      "size": 258,
+      "sha256": "11455f037eb2afa711379857cd4f7a9d156c0747fb57cc67c9cc2f63767fbf26",
+      "desc": "SYLK hidden rows (first): F;M0;R<n>"
+    },
+    {
+      "name": "hidden_rows_middle.slk",
+      "format": "sylk",
+      "size": 258,
+      "sha256": "24b5ef0ae7526372c1fda2aed3b6fb83199c630014cca021e781e70f8f979c0d",
+      "desc": "SYLK hidden rows (middle): F;M0;R<n>"
+    },
+    {
+      "name": "hidden_rows_last.slk",
+      "format": "sylk",
+      "size": 258,
+      "sha256": "28b29496bc2629a7e0909fac49098ce032f4e451a2991732be9047b5cdcc101b",
+      "desc": "SYLK hidden rows (last): F;M0;R<n>"
+    },
+    {
+      "name": "hidden_rows_consecutive.slk",
+      "format": "sylk",
+      "size": 276,
+      "sha256": "451319fea820c451a0a8e2b9507ec86a8c8b0dca6ecd3338b2ed0e5d203dbd14",
+      "desc": "SYLK hidden rows (consecutive): F;M0;R<n>"
+    },
+    {
+      "name": "hidden_rows_all.slk",
+      "format": "sylk",
+      "size": 303,
+      "sha256": "b1564f00d22cd872385858053c677206deb589ff08fa96709bd47a600d49039a",
+      "desc": "SYLK hidden rows (all): F;M0;R<n>"
+    },
+    {
+      "name": "sylk_row_format_no_m.slk",
+      "format": "sylk",
+      "size": 135,
+      "sha256": "fbfd704052776d3c1d023665c46243a18521a8e024ba12ee99b3989b74dced63",
+      "desc": "SYLK: F;SDM6;R1 (row format without M, row 1 not hidden) and F;M0;R3 (row 3 hidden); 3 rows x 2 cols"
+    },
+    {
+      "name": "hidden_rows.ods",
+      "format": "ods",
+      "size": 2918,
+      "sha256": "b2d578fcb590582a26d05ba1cac8c42c78b0385ba80710a09a58198d78acabf4",
+      "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6) (ODS, table:visibility=\"collapse\" hand-added)"
+    },
+    {
+      "name": "sparse_far.xlsx",
+      "format": "xlsx",
+      "size": 2103,
+      "sha256": "735af488d7d7ec6f92d135891a2f36c5a7b4b9220a15767e00d2565e3bc5570a",
+      "desc": "sparse/far: A1='first', XFD1048576=42"
+    },
+    {
+      "name": "sparse_far.xlsb",
+      "format": "xlsb",
+      "size": 3098,
+      "sha256": "f3fb521a0fb5a968eae4da6784ce60a83b5c9f4736760abf56302011d18fbd41",
+      "desc": "sparse/far: A1='first', XFD1048576=42 (BIFF12 patched)"
+    },
+    {
+      "name": "sparse_far.xls",
+      "format": "xls",
+      "size": 4608,
+      "sha256": "974dabf0a492f5746a26773c4a08cc2b14689da4a00671f3649eea565abb4027",
+      "desc": "sparse/far: A1='first', IV65536=42 (BIFF8 max)"
+    },
+    {
+      "name": "sparse_far.xml",
+      "format": "xlml",
+      "size": 544,
+      "sha256": "068909db8e60ce11a14e4fc647efbc64c3d5ece34462390a3b6a756f31b944b8",
+      "desc": "sparse/far: A1='first', XFD1048576=42"
+    },
+    {
+      "name": "sparse_far.slk",
+      "format": "sylk",
+      "size": 57,
+      "sha256": "fcba2b2a5ab57ca8e300f299b58321625b75e980f92759f966419438ea75e1a5",
+      "desc": "sparse/far: A1='first', XFD1048576=42"
+    },
+    {
+      "name": "huge_dimension.xlsx",
+      "format": "xlsx",
+      "size": 2081,
+      "sha256": "40ddda3d5d471766c294049acba3f8f3841ca7573d4a26ab7d4d1ee9c0825993",
+      "desc": "huge <dimension ref=\"A1:XFD1048576\"/>, cells A1=1, B2=2 only"
+    },
+    {
+      "name": "huge_dimension.xlsb",
+      "format": "xlsb",
+      "size": 3084,
+      "sha256": "6c7b03e53c74e7c304db15440d6135f7635c19aa20bf7de534c8bdfde93a7b02",
+      "desc": "huge BrtWsDim A1:XFD1048576, cells A1=1, B2=2 only"
+    },
+    {
+      "name": "huge_dimension.xls",
+      "format": "xls",
+      "size": 4608,
+      "sha256": "d24e45ccf95dea4032a8e4e47689bd6e54698c4ce6cf99680aa5371e8bbed392",
+      "desc": "huge DIMENSIONS A1:IV65536, cells A1=1, B2=2 only"
+    },
+    {
+      "name": "huge_dimension.xml",
+      "format": "xlml",
+      "size": 551,
+      "sha256": "2680f8a788ae4736bcdadd859b0b14b6a68f5872147583f3a949c3abb6f36eeb",
+      "desc": "huge ExpandedRowCount/ColumnCount, cells A1=1, B2=2 only"
+    },
+    {
+      "name": "huge_dimension.slk",
+      "format": "sylk",
+      "size": 78,
+      "sha256": "dab41132274c369c01af66ba5c77595020d938005b1cc28096f30cc6704f406b",
+      "desc": "huge B;Y1048576;X16384, cells A1=1, B2=2 only"
+    },
+    {
+      "name": "many_empty_rows.xlsx",
+      "format": "xlsx",
+      "size": 14128,
+      "sha256": "9f9c89f7e808e8618c63d3b406e09582e90bf174ef22276f4b59b5afedd6d287",
+      "desc": "5000 empty <row r=.../> elements between A1='top' and A5002='bottom'; every 1000th empty row hidden, every 777th has a custom height"
+    },
+    {
+      "name": "many_empty_rows_implicit.xlsx",
+      "format": "xlsx",
+      "size": 11304,
+      "sha256": "6f1dc26a22467a986d095dc91321cb09e18714f0c4b892041527ed18ac65adae",
+      "desc": "1048574 empty <row/> without r (implicit numbering) between A1='top' and A1048576='bottom'; ~6 MB XML, high zip ratio"
+    },
+    {
+      "name": "many_empty_rows.csv",
+      "format": "csv",
+      "size": 5011,
+      "sha256": "274023a93474a96cbf6968b0e194f81cb65ad63f8a50aeb8187849e0e99b0a64",
+      "desc": "5000 blank lines between 'top' and 'bottom'"
+    },
+    {
+      "name": "strings.xlsx",
+      "format": "xlsx",
+      "size": 2821,
+      "sha256": "fcd84a2c496c282356c801f4a46f2097efca7c19833aeae6c2fc9220b6a97ff1",
+      "desc": "shared strings (rich runs, entities, _xHHHH_ escapes, xml:space, unicode, empty, phonetic), inline strings, t=str/b/e/d cells, rows/cells without r attributes"
+    },
+    {
+      "name": "formulas.xlsx",
+      "format": "xlsx",
+      "size": 2254,
+      "sha256": "f5d1de85c544aaed312795553917d158c24fafe0014de0acde1525a8d826d19d",
+      "desc": "formulas with cached values: plain, shared (si), array, string/error/bool results, one formula without cached value"
+    },
+    {
+      "name": "dates.xlsx",
+      "format": "xlsx",
+      "size": 2842,
+      "sha256": "7e8f1e4faefb3896b571590612b7a7cc12c7523db27478356faa9db04cc5bf8e",
+      "desc": "date/time number formats: builtins 14,15,17,20,22,45-47 and custom (yyyy-mm-dd, [h]:mm:ss, locale prefix, quoted text, non-date 0.00, ...); values 46024.52, 0, 60 (1900-02-29 bug), 61, 1.75, -1"
+    },
+    {
+      "name": "dates_1904.xlsx",
+      "format": "xlsx",
+      "size": 2850,
+      "sha256": "ef5f049c4abf44ad1464267e8add5f82e941ab70aa14ad38d04dcf4682435e13",
+      "desc": "same as dates.xlsx with workbookPr date1904=1"
+    },
+    {
+      "name": "features.xlsx",
+      "format": "xlsx",
+      "size": 7089,
+      "sha256": "e32e6c90140e4ad4879ed9aefcc34b3f87a3814d267afddc01f0a629bc6a23fd",
+      "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name (shared strings)"
+    },
+    {
+      "name": "features.xlsb",
+      "format": "xlsb",
+      "size": 4894,
+      "sha256": "35c1a0ab916282494c7092bec92b917933d7d3b9ff642c3268c85a3e74f52736",
+      "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name"
+    },
+    {
+      "name": "features.xls",
+      "format": "xls",
+      "size": 7680,
+      "sha256": "953618761c98e80f38e71c8a73e08735477ed69d81d19439bb06708bffadea4c",
+      "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name"
+    },
+    {
+      "name": "features.biff5.xls",
+      "format": "xls",
+      "size": 5120,
+      "sha256": "ee678cb0dfd66389c1fbade941896d528cdf318bb557d17a96aa5e5c61e60b0d",
+      "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name (BIFF5)"
+    },
+    {
+      "name": "features.xml",
+      "format": "xlml",
+      "size": 6465,
+      "sha256": "b763d2a2d60d58f07bc55690c40637008772e243063d29678e12a71bccf8a867",
+      "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name (SpreadsheetML 2003)"
+    },
+    {
+      "name": "features.ods",
+      "format": "ods",
+      "size": 3444,
+      "sha256": "309d6756279f31e600ce4af3067cc64f9c5be97f5985c86508b2fade297a5153",
+      "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name (ODS)"
+    },
+    {
+      "name": "features.fods",
+      "format": "fods",
+      "size": 13183,
+      "sha256": "ad0080ed67c16aa756a0a46a670e1f7b98e2963eac7ce2ccc59f6819b5087069",
+      "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name (flat ODS)"
+    },
+    {
+      "name": "features.slk",
+      "format": "sylk",
+      "size": 456,
+      "sha256": "748493f938125a362a157af90fda80f3d8528ac68f59841aba5fba489f54b482",
+      "desc": "first sheet (Data) of the features workbook as SYLK"
+    },
+    {
+      "name": "basic.biff2.xls",
+      "format": "xls",
+      "size": 116,
+      "sha256": "7e285207aca072e73764bb21229c42e12e29abefd44bb6a146c599f10c5b6c86",
+      "desc": "BIFF2 raw stream: a,1 / b,2.5 / TRUE,c"
+    },
+    {
+      "name": "basic.biff3.xls",
+      "format": "xls",
+      "size": 132,
+      "sha256": "3fa1f4d7733ccc1949a96ba49c34ba071985421bac67c62c0d1a9833f789fb6e",
+      "desc": "BIFF3 raw stream: a,1 / b,2.5 / TRUE,c"
+    },
+    {
+      "name": "basic.biff4.xls",
+      "format": "xls",
+      "size": 134,
+      "sha256": "f58dfc8a0959c3b8aecf7a19e640eeeb460a4fd89072860853a5abcac78513d0",
+      "desc": "BIFF4 raw stream: a,1 / b,2.5 / TRUE,c"
+    },
+    {
+      "name": "csv_bom_utf8.csv",
+      "format": "csv",
+      "size": 44,
+      "sha256": "4574a8e809236d7cd334a7a2eccfe4867988a0a2d8b1ef0d4cbe8ae7ea674ad9",
+      "desc": "UTF-8 with BOM, CRLF"
+    },
+    {
+      "name": "csv_semicolon.csv",
+      "format": "csv",
+      "size": 72,
+      "sha256": "22e8863c64731ab240b80d75632ba6554a4c39707f80d0b355da040242d05dff",
+      "desc": "; delimiter, decimal comma (European Excel export)"
+    },
+    {
+      "name": "csv_utf16le_tab.txt",
+      "format": "csv",
+      "size": 72,
+      "sha256": "86bb5978bc616560818618d41dc27e1147b871d5afcbdb54539d42c2cfe572e8",
+      "desc": "UTF-16LE with BOM, tab-delimited (Excel 'Unicode Text')"
+    },
+    {
+      "name": "csv_utf16be.csv",
+      "format": "csv",
+      "size": 22,
+      "sha256": "a6ce944492ea0358d58937183c41c5206d8f88f4933ba549bd23233723e71082",
+      "desc": "UTF-16BE with BOM"
+    },
+    {
+      "name": "csv_quoted_newlines.csv",
+      "format": "csv",
+      "size": 85,
+      "sha256": "bb54b3a91b26bbb8ec73168d83a747397579aa14b59b1cde76f3c9b2e031f04c",
+      "desc": "quoted LF and CRLF inside fields, escaped \"\" quotes, empty quoted field"
+    },
+    {
+      "name": "csv_cr_only.csv",
+      "format": "csv",
+      "size": 12,
+      "sha256": "82a923de6dedd9071823fd5c3533413df745313a2b3251de1b725b5d1f65d305",
+      "desc": "old Mac CR-only line endings"
+    },
+    {
+      "name": "csv_windows1252.csv",
+      "format": "csv",
+      "size": 30,
+      "sha256": "d2b24e8f041084273ca0a91ef8ce459cecc4762f53187e441997396c330f87e9",
+      "desc": "Windows-1252 bytes (é, €, curly quotes), no BOM"
+    },
+    {
+      "name": "csv_ragged.csv",
+      "format": "csv",
+      "size": 21,
+      "sha256": "22a029edb0e0af601062a4d8b6c3f5701b103f6267adef7448a1b341e55ed05a",
+      "desc": "ragged rows (1..5 fields), trailing empty fields"
+    },
+    {
+      "name": "csv_no_trailing_newline.csv",
+      "format": "csv",
+      "size": 7,
+      "sha256": "aeedab1ee7a1043753c9ab768594bc8420d7b85491d0be9421edc3813c237f4c",
+      "desc": "no newline at end of file"
+    },
+    {
+      "name": "csv_empty.csv",
+      "format": "empty",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "desc": "empty file (0 bytes)"
+    },
+    {
+      "name": "csv_tab.tsv",
+      "format": "csv",
+      "size": 11,
+      "sha256": "46a613218711fa5d6903056e59b44a0a66b090a3e108bc30ce08a1fa54206b5e",
+      "desc": "tab-delimited, UTF-8, empty middle field"
+    },
+    {
+      "name": "csv_bom_only.csv",
+      "format": "csv",
+      "size": 3,
+      "sha256": "f1945cd6c19e56b3c1c78943ef5ec18116907a4ca1efc40a57d48ab1db7adfc5",
+      "desc": "UTF-8 BOM and nothing else"
+    }
+  ]
+}

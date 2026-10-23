@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+<Worksheet ss:Name="Sheet1"><Table><Row ss:Index="1"><Cell ss:Index="1"><Data ss:Type="String">first</Data></Cell></Row><Row ss:Index="1048576"><Cell ss:Index="16384"><Data ss:Type="Number">42</Data></Cell></Row></Table></Worksheet>
+</Workbook>

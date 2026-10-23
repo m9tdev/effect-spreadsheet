@@ -1,0 +1,27 @@
+ID;PWXL;N;E
+P;PGeneral
+F;P0;DG0G8;M255
+B;Y4;X6;D0 0 5 3
+O;L;D;B;K47;G100 0.001
+C;Y1;X1;K"text"
+C;Y1;X2;K"number"
+C;Y1;X3;K"bool"
+C;Y1;X4;K"unicode"
+C;Y1;X5;K"formula"
+C;Y2;X1;K"héllo"
+C;Y2;X2;K1
+C;Y2;X3;KTRUE
+C;Y2;X4;K"å,ž"
+C;Y2;X5;K2;ERC[-3]*2
+C;Y2;X6;K#N/A
+C;Y3;X1;K"ünïcödé <c"
+C;Y3;X2;K-2.5
+C;Y3;X3;KFALSE
+C;Y3;X4;K"âÑèÙê"
+C;Y3;X5;K-5;ERC[-3]*2
+C;Y3;X6;K#DIV/0!
+C;Y4;X1;K""
+C;Y4;X2;K1e+308
+C;Y4;X4;K"•»»·½¹º¬"
+C;Y4;X5;K"x"
+E

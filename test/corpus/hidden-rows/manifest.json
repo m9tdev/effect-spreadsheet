@@ -1,0 +1,707 @@
+{
+  "version": 1,
+  "description": "Synthetic hidden-row fixtures (all content made up). Paths are relative to test/corpus/hidden-rows. See docs/corpus.md.",
+  "generator": "scripts/corpus/hidden-rows/generate.mjs (SheetJS 0.20.3 write side, script-only)",
+  "oldReader": "XLSX.read(buffer[, {cellStyles:true}]) then XLSX.stream.to_json(sheet, {raw:true, skipHidden:true, UTC:true, header:'A'}) (SheetJS 0.20.3)",
+  "hiddenRowPolicy": "Our reader keeps hidden rows and reports them with hidden=true; it never skips them.",
+  "files": [
+    {
+      "path": "hidden-row.xls",
+      "format": "xls",
+      "size": 4608,
+      "sha256": "2fd422228fc4443613ec146cd15e3ccb30c904f28e0a5ffd067389188d8514cd",
+      "hiddenRowStorage": "BIFF8 ROW record 0x0208 with fHidden 0x20 for row index 2",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": true,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": true,
+        "cellStyles": true
+      }
+    },
+    {
+      "path": "hidden-row.xml",
+      "format": "xlml",
+      "size": 1892,
+      "sha256": "479174c732d3ac9a2b19c719b0ffa64d86f4a4f74dcadf73e24a107d2b6ab9d0",
+      "hiddenRowStorage": "<Row ss:Index=\"3\" ss:Hidden=\"1\">",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": true,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": true,
+        "cellStyles": true
+      }
+    },
+    {
+      "path": "hidden-row.slk",
+      "format": "sylk",
+      "size": 293,
+      "sha256": "e6dd697845034d1b4805f4e7062ad9363ebef5b7098f937c6a3e10ab657fd971",
+      "hiddenRowStorage": "F;M0;R3 (row height 0)",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": true,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": true,
+        "cellStyles": true
+      }
+    },
+    {
+      "path": "hidden-row.xlsb",
+      "format": "xlsb",
+      "size": 3034,
+      "sha256": "8d94da67eddb477e1066fc0b9dd7a647ed87f6dd9a515a31301b1348fd3b7f68",
+      "hiddenRowStorage": "BrtRowHdr flags 0x10 (fDyZero) for row index 2",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": true,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": true,
+        "cellStyles": true
+      }
+    },
+    {
+      "path": "hidden-row.xlsx",
+      "format": "xlsx",
+      "size": 3965,
+      "sha256": "e45f30a52f3796c19a4e136e929ddb99c92a5da4008f10fc2c581891f9e62c67",
+      "hiddenRowStorage": "<row r=\"3\" hidden=\"1\">",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": true,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": false,
+        "cellStyles": true
+      },
+      "note": "SheetJS records xlsx hidden rows in !rows only with cellStyles:true; with default options the old reader returns all 4 rows and loses the flag"
+    },
+    {
+      "path": "plain.xlsx",
+      "format": "xlsx",
+      "size": 3960,
+      "sha256": "b785b1b4d4a796296242cebfdab3fa09dc889393d28cb60d2d812da26d73d458",
+      "hiddenRowStorage": "none (control)",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": false,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": false,
+        "cellStyles": false
+      }
+    },
+    {
+      "path": "renamed/hidden-row-xls.csv",
+      "format": "xls",
+      "size": 4608,
+      "sha256": "2fd422228fc4443613ec146cd15e3ccb30c904f28e0a5ffd067389188d8514cd",
+      "copyOf": "hidden-row.xls",
+      "extensionMismatch": true,
+      "hiddenRowStorage": "BIFF8 ROW record 0x0208 with fHidden 0x20 for row index 2",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": true,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": true,
+        "cellStyles": true
+      }
+    },
+    {
+      "path": "renamed/hidden-row-xml.xlsx",
+      "format": "xlml",
+      "size": 1892,
+      "sha256": "479174c732d3ac9a2b19c719b0ffa64d86f4a4f74dcadf73e24a107d2b6ab9d0",
+      "copyOf": "hidden-row.xml",
+      "extensionMismatch": true,
+      "hiddenRowStorage": "<Row ss:Index=\"3\" ss:Hidden=\"1\">",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": true,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": true,
+        "cellStyles": true
+      }
+    },
+    {
+      "path": "renamed/hidden-row-slk.csv",
+      "format": "sylk",
+      "size": 293,
+      "sha256": "e6dd697845034d1b4805f4e7062ad9363ebef5b7098f937c6a3e10ab657fd971",
+      "copyOf": "hidden-row.slk",
+      "extensionMismatch": true,
+      "hiddenRowStorage": "F;M0;R3 (row height 0)",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": true,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": true,
+        "cellStyles": true
+      }
+    },
+    {
+      "path": "renamed/hidden-row-xlsb.xls",
+      "format": "xlsb",
+      "size": 3034,
+      "sha256": "8d94da67eddb477e1066fc0b9dd7a647ed87f6dd9a515a31301b1348fd3b7f68",
+      "copyOf": "hidden-row.xlsb",
+      "extensionMismatch": true,
+      "hiddenRowStorage": "BrtRowHdr flags 0x10 (fDyZero) for row index 2",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": true,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": true,
+        "cellStyles": true
+      }
+    },
+    {
+      "path": "renamed/hidden-row-xlsx.csv",
+      "format": "xlsx",
+      "size": 3965,
+      "sha256": "e45f30a52f3796c19a4e136e929ddb99c92a5da4008f10fc2c581891f9e62c67",
+      "copyOf": "hidden-row.xlsx",
+      "extensionMismatch": true,
+      "hiddenRowStorage": "<row r=\"3\" hidden=\"1\">",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": true,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": false,
+        "cellStyles": true
+      },
+      "note": "SheetJS records xlsx hidden rows in !rows only with cellStyles:true; with default options the old reader returns all 4 rows and loses the flag"
+    },
+    {
+      "path": "renamed/plain-xlsx.xls",
+      "format": "xlsx",
+      "size": 3960,
+      "sha256": "b785b1b4d4a796296242cebfdab3fa09dc889393d28cb60d2d812da26d73d458",
+      "copyOf": "plain.xlsx",
+      "extensionMismatch": true,
+      "hiddenRowStorage": "none (control)",
+      "expected": {
+        "sheets": [
+          {
+            "name": "Sheet1",
+            "visibility": "visible",
+            "rows": [
+              {
+                "index": 0,
+                "hidden": false,
+                "values": [
+                  "Product",
+                  "Qty",
+                  "Price"
+                ]
+              },
+              {
+                "index": 1,
+                "hidden": false,
+                "values": [
+                  "Product A",
+                  1,
+                  2.5
+                ]
+              },
+              {
+                "index": 2,
+                "hidden": false,
+                "values": [
+                  "Product B",
+                  2,
+                  3.75
+                ]
+              },
+              {
+                "index": 3,
+                "hidden": false,
+                "values": [
+                  "Product C",
+                  3,
+                  4
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "oldReaderHangs": {
+        "default": false,
+        "cellStyles": false
+      }
+    }
+  ]
+}

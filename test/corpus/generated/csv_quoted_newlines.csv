@@ -1,0 +1,8 @@
+id,text
+1,"line one
+line two"
+2,"crlf
+inside"
+3,"say ""hi"""
+4,"comma, inside"
+5,""

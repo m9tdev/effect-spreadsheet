@@ -1,0 +1,11 @@
+{
+  "sheetjs": {
+    "description": "SheetJS test_files corpus. Fetched by scripts/corpus/fetch.mjs into the gitignored test/corpus/.cache/sheetjs; not redistributed (see docs/corpus.md).",
+    "url": "https://test-files.sheetjs.com/test_files.zip",
+    "archiveSha256": "a786d4f1a80adf9447997b6f3b30b2593c776c27e0b075e3971627c17205f220",
+    "archiveSize": 341452051,
+    "lastModified": "2024-07-17T18:53:02Z",
+    "files": 12237,
+    "root": "test/corpus/.cache/sheetjs/test_files"
+  }
+}
