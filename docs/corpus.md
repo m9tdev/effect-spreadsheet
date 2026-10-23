@@ -38,8 +38,10 @@ covers that run. Run without filters at the end: it reuses the cache and writes 
 | `scripts/corpus/fetch.mjs` | yes | download + extract the SheetJS corpus |
 | `scripts/corpus/manifest.mjs` | yes | builds the full manifest `test/corpus/.cache/manifest.json` |
 | `scripts/corpus/oracle.mjs` | yes | SheetJS oracle (pooled child processes, timeouts) |
+| `scripts/corpus/oracle-selftest.mjs` | yes | oracle process-hygiene tests (orphaned children, startup deaths) |
+| `scripts/corpus/expected.mjs` | yes | exports committed expectations for our fixtures to `test/corpus/expected/` |
 | `scripts/corpus/generate.mjs` | yes | our edge-case fixtures |
-| `scripts/corpus/hidden-rows/*.mjs` | yes | hidden-row fixture generator; hidden-rows manifest |
+| `scripts/corpus/hidden-rows/*.mjs` | yes | hidden-row fixture generator (also writes `renamed/`); hidden-rows manifest; shared names |
 | `test/corpus/sources.json` | yes | pin of the external corpus: URL, archive sha256/size, file count (no per-file details) |
 | `test/corpus/generated/` | yes | our fixtures (~150 KB), with `README.json` (name, sniffed format, size, sha256, description) |
 | `test/corpus/hidden-rows/` | yes | Synthetic hidden-row fixtures + `manifest.json` |
