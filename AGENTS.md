@@ -8,6 +8,12 @@ Read PLAN.md first. This is the project's rulebook.
   dev. The library has to run in Node, in workers, and in browsers: no
   `node:` imports and no native deps under `src/`. Use web-standard APIs
   (`TextDecoder`, `DecompressionStream`, `Uint8Array`/`DataView`).
+- `effect` and every `@effect/*` package used at runtime are
+  `peerDependencies` (range covering Effect 4, e.g. `^4.0.6`), and also
+  `devDependencies` pinned to the version we test against (`4.0.6`). Never in
+  `dependencies`: the app's own Effect copy must be the one used, so its
+  Data/Schema/Context types match ours. `test/package-deps.test.ts` enforces
+  this; every later package follows the same rule.
 - Package manager: pnpm. Test runner: vitest + `@effect/vitest`.
   Property/fuzz tests use fast-check.
 

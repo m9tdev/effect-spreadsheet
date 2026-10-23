@@ -102,6 +102,14 @@ Spreadsheet.toRecords(rows, { header: "first-row" | number | string[] }) // like
   dims, truncation).
 - Performance check: 200k-row XLSX, with max event-loop pause measured.
 
+## Packaging
+
+- `effect` (and any `@effect/*` used at runtime) is a peer dependency,
+  `^4.0.6`, plus a dev dependency pinned to `4.0.6` for our tests. It is never
+  in `dependencies`, so apps don't end up with two Effect copies and
+  mismatched Data/Schema/Context types. A test fails if `effect` or
+  `@effect/*` appears in `dependencies`.
+
 ## Licensing
 
 The project is licensed Apache-2.0, which is the same as SheetJS and keeps
