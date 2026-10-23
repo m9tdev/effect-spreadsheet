@@ -60,4 +60,5 @@ not from the workbook the rows were read from.
 
 The test suite compares CSV results with a widely used JavaScript spreadsheet library as a
 test-only oracle. The intended differences are listed in
-[docs/csv-oracle-differences.md](docs/csv-oracle-differences.md).
+[docs/csv-oracle-differences.md](docs/csv-oracle-differences.md) (CSV reading) and
+[docs/records-oracle-differences.md](docs/records-oracle-differences.md) (`toRecords`).
