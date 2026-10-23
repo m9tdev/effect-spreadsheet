@@ -10,11 +10,11 @@
 
 import fs from "node:fs"
 import path from "node:path"
-import { HIDDEN_ROWS_DIR, CACHE_DIR, GENERATED_DIR, MANIFEST_PATH, SHEETJS_CACHE, SHEETJS_DIR, sha256, sniff } from "./lib.mjs"
+import { HIDDEN_ROWS_DIR, CACHE_DIR, GENERATED_DIR, MANIFEST_PATH, SHEETJS_CACHE, SHEETJS_DIR, parseFlags, sha256, sniff } from "./lib.mjs"
 
 export const FOCUS = new Set(["csv", "xlsx", "xlsm", "xltx", "xls", "xlsb", "xlml", "ods", "fods", "sylk", "ooxml-encrypted"])
 
-const allFormats = process.argv.includes("--all-formats")
+const allFormats = !!parseFlags(process.argv.slice(2), ["--all-formats"])["--all-formats"]
 const t0 = Date.now()
 const SHEETJS_ROOT = path.join(SHEETJS_CACHE, "test_files")
 

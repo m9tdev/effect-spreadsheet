@@ -20,6 +20,8 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
+const { parseFlags } = await import(path.join(HERE, "lib.mjs"))
+parseFlags(process.argv.slice(2), []) // no arguments
 const ORACLE = path.join(HERE, "oracle.mjs")
 const MANIFEST = path.join(HERE, "manifest.mjs")
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-selftest-"))

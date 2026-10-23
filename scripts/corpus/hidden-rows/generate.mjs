@@ -15,15 +15,17 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { createRequire } from "node:module"
-import { HIDDEN_ROWS_DIR, SHEETJS_DIR, SHEETJS_ENTRY, compareDirs, reportCompare, sha256 } from "../lib.mjs"
+import { HIDDEN_ROWS_DIR, SHEETJS_DIR, SHEETJS_ENTRY, compareDirs, parseFlags, reportCompare, sha256 } from "../lib.mjs"
 import { NAMES, RENAMED } from "./names.mjs"
 
 const require = createRequire(import.meta.url)
 const XLSX = require(SHEETJS_ENTRY)
 
-const args = process.argv.slice(2)
-const check = args.includes("--check")
-const outArg = args.indexOf("--out") >= 0 ? args[args.indexOf("--out") + 1] : null
+const flags = parseFlags(process.argv.slice(2), ["--check"], ["--out"])
+const check = !!flags["--check"]
+const outArg = flags["--out"] ?? null
+// --check generates into a temp dir and deletes it afterwards: never combine it with a caller's dir.
+if (check && outArg) { console.error("--check and --out can't be combined (--check uses its own temp dir)"); process.exit(2) }
 const OUT = outArg ?? (check ? fs.mkdtempSync(path.join(os.tmpdir(), "hidden-rows-fixtures-")) : HIDDEN_ROWS_DIR)
 fs.mkdirSync(OUT, { recursive: true })
 

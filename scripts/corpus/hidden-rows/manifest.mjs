@@ -11,8 +11,10 @@
 
 import fs from "node:fs"
 import path from "node:path"
-import { HIDDEN_ROWS_DIR, sha256, sniff } from "../lib.mjs"
+import { HIDDEN_ROWS_DIR, sha256, sniff, parseFlags } from "../lib.mjs"
 import { RENAMED } from "./names.mjs"
+
+parseFlags(process.argv.slice(2), []) // no arguments
 
 const VALUES = [
   ["Product", "Qty", "Price"],

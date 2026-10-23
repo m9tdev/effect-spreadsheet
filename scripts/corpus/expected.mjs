@@ -17,12 +17,13 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { HIDDEN_ROWS_DIR, CORPUS_DIR, EXPECTED_DIR, GENERATED_DIR, compareDirs, reportCompare, sha256 } from "./lib.mjs"
+import { parseFlags, HIDDEN_ROWS_DIR, CORPUS_DIR, EXPECTED_DIR, GENERATED_DIR, compareDirs, reportCompare, sha256 } from "./lib.mjs"
 
 export const MAX_FILE_BYTES = 64 * 1024
 const OUT_ROOT = path.join(CORPUS_DIR, "expected")
-const check = process.argv.includes("--check")
-const OUT = check ? fs.mkdtempSync(path.join(os.tmpdir(), "corpus-expected-")) : OUT_ROOT
+const check = !!parseFlags(process.argv.slice(2), ["--check"])["--check"]
+// Always build into a temp dir; only replace test/corpus/expected once every file was found.
+const OUT = fs.mkdtempSync(path.join(os.tmpdir(), "corpus-expected-"))
 
 function listTop(dir, skip) {
   const out = []
@@ -46,7 +47,6 @@ const sources = [
 // One sheet cell per line would be nicer to diff, but compact keeps the committed set small.
 const stringify = (doc) => JSON.stringify(doc) + "\n"
 let missing = 0, capped = 0, total = 0, count = 0
-if (!check) fs.rmSync(OUT_ROOT, { recursive: true, force: true })
 for (const src of sources) {
   for (const rel of src.files) {
     const sha = sha256(fs.readFileSync(path.join(src.dir, rel)))
@@ -74,9 +74,14 @@ for (const src of sources) {
     count++
   }
 }
-console.log(`expected: ${count} files, ${(total / 1024).toFixed(1)} KiB, ${capped} capped (rows/cells dropped), ${missing} missing -> ${OUT}`)
-if (check) {
-  const ok = reportCompare(compareDirs(OUT, OUT_ROOT), "test/corpus/expected")
-  fs.rmSync(OUT, { recursive: true, force: true })
-  if (!ok || missing) process.exit(1)
-} else if (missing) process.exit(1)
+console.log(`expected: ${count} files, ${(total / 1024).toFixed(1)} KiB, ${capped} capped (rows/cells dropped), ${missing} missing`)
+let ok = !missing
+if (check) ok = reportCompare(compareDirs(OUT, OUT_ROOT), "test/corpus/expected") && ok
+else if (missing) console.error(`not updating test/corpus/expected: ${missing} oracle result(s) missing`)
+else {
+  fs.rmSync(OUT_ROOT, { recursive: true, force: true })
+  fs.cpSync(OUT, OUT_ROOT, { recursive: true })
+  console.log(`wrote ${path.relative(process.cwd(), OUT_ROOT)}`)
+}
+fs.rmSync(OUT, { recursive: true, force: true })
+if (!ok) process.exit(1)

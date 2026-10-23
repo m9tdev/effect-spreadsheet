@@ -572,3 +572,27 @@ export function reportCompare(r, label) {
   console.log(r.same ? `${label}: ${r.files} files byte-identical, no missing or extra files` : `${label}: ${r.differ.length} differ, ${r.missing.length} missing, ${r.extra.length} extra`)
   return r.same
 }
+
+// ---------------------------------------------------------------- argument checks
+
+/**
+ * Parse simple CLI flags. `flags` lists boolean flags, `withValue` flags that take a
+ * value. Anything else (e.g. a typo like --chek) exits with code 2.
+ */
+export function parseFlags(argv, flags, withValue = []) {
+  const out = {}
+  for (let i = 0; i < argv.length; i++) {
+    const k = argv[i]
+    if (flags.includes(k)) out[k] = true
+    else if (withValue.includes(k)) {
+      const v = argv[i + 1]
+      if (v === undefined || v.startsWith("--")) { console.error(`${k} needs a value`); process.exit(2) }
+      out[k] = v
+      i++
+    } else {
+      console.error(`unknown argument ${k} (allowed: ${[...flags, ...withValue.map((w) => w + " VALUE")].join(", ") || "none"})`)
+      process.exit(2)
+    }
+  }
+  return out
+}
