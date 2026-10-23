@@ -366,7 +366,15 @@ a temp dir and compares). Zips are rebuilt with fixed timestamps, and document p
 are fixed (author `effect-spreadsheet`, 2026-01-01). They are our own files (MIT); the
 SheetJS boilerplate parts that the SheetJS writer embeds stay Apache-2.0 (see NOTICE).
 They are built from the SheetJS writer where it can express the case, and by hand or by patching
-where it can't. SheetJS's BIFF writers drop row properties, and its writers iterate the
+where it can't. The writer's own boilerplate is stripped from every fixture
+(`stripWriterBoilerplate` in `lib.mjs`), and the SheetJS parse result is unchanged:
+- xlsx/xlsb: `xl/theme/theme1.xml` with its relationship and Content_Types override,
+  `<Application>SheetJS</Application>` in `docProps/app.xml`, and the app/version strings in
+  the xlsb BrtFileVersion record (now empty).
+- ods/fods: the `meta:generator` element and the `sh33tjs` namespace.
+- SYLK: `ID;PSheetJS;N;E` becomes `ID;PWXL;N;E`.
+- xls: the `\x01Sh33tJ5` CFB stream is unlinked and zeroed. The WRITEACCESS user name is
+  blanked, and so is the property-set SystemIdentifier. SheetJS's BIFF writers drop row properties, and its writers iterate the
 whole declared range, so far cells or huge dimensions would take forever. Each file is
 described in `generated/README.json`.
 
@@ -405,25 +413,26 @@ these files (truncate at every N bytes, flip bits) with fast-check, under a time
 These are synthetic files that reproduce the SheetJS hidden-row hang. All content is
 made up: `Sheet1`, 4 rows (Product/Qty/Price; Product A/B/C), and row index 2 is
 hidden in `hidden-row.*`. The generator
-`scripts/corpus/hidden-rows/generate.mjs` uses `~/sheetjs` 0.20.3 and reproduces all six
-**byte for byte**. `renamed/` holds byte copies with misleading extensions (xls as `.csv`,
+`scripts/corpus/hidden-rows/generate.mjs` uses `~/sheetjs` 0.20.3, strips the writer's
+boilerplate (see the generated fixtures below), and reproduces all six byte for byte
+(`--check`). `renamed/` holds byte copies with misleading extensions (xls as `.csv`,
 xml as `.xlsx`, slk as `.csv`, xlsb as `.xls`, xlsx as `.csv`, plain.xlsx as `.xls`).
 These carry `copyOf` and `extensionMismatch: true` and prove that detection ignores the
 name. Tests must use the repo paths only.
 
 | file | sha256 | hidden row stored as | old reader hangs (default read / cellStyles) |
 | --- | --- | --- | --- |
-| hidden-row.xls | `34bd0edc7debb46d532f1d74dac7cedf8e70648af3657129df56ca518cd65039` | BIFF8 ROW 0x0208 fDyZero | yes / yes |
+| hidden-row.xls | `2fd422228fc4443613ec146cd15e3ccb30c904f28e0a5ffd067389188d8514cd` | BIFF8 ROW 0x0208 fDyZero | yes / yes |
 | hidden-row.xml | `479174c732d3ac9a2b19c719b0ffa64d86f4a4f74dcadf73e24a107d2b6ab9d0` | `ss:Hidden="1"` | yes / yes |
-| hidden-row.slk | `15b75e2ba317ab7e04289abfc9e61b3e523b04a7b88d5cb6d458e9a94a1434eb` | `F;M0;R3` | yes / yes |
-| hidden-row.xlsb | `8f0078f7a61d3d71c2055de994767c5c15b9c0e3866b86bdc40fd1e0e1d136b1` | BrtRowHdr 0x10 | yes / yes |
-| hidden-row.xlsx | `785d5cffdf805d6f26e3447d70a2611edfb85535abac882f9ddda4b4d74d6395` | `<row hidden="1">` | no (flag lost) / yes |
-| plain.xlsx | `b015a0de8f696c7d7f0e610da0d46c4106ea67e94265cb10206045d1e3c40e0c` | – | no / no |
+| hidden-row.slk | `e6dd697845034d1b4805f4e7062ad9363ebef5b7098f937c6a3e10ab657fd971` | `F;M0;R3` | yes / yes |
+| hidden-row.xlsb | `8d94da67eddb477e1066fc0b9dd7a647ed87f6dd9a515a31301b1348fd3b7f68` | BrtRowHdr 0x10 | yes / yes |
+| hidden-row.xlsx | `e45f30a52f3796c19a4e136e929ddb99c92a5da4008f10fc2c581891f9e62c67` | `<row hidden="1">` | no (flag lost) / yes |
+| plain.xlsx | `b785b1b4d4a796296242cebfdab3fa09dc889393d28cb60d2d812da26d73d458` | – | no / no |
 
 Our oracle probe confirms every entry in that table (verdict `hang`). The metadata check
 was done before committing; the findings are in the commit message of the hidden-rows import.
 Summary: every document property is empty. Zip entries carry no timestamps (1980-00-00),
-comments or extra fields. The CFB has no timestamps. WRITEACCESS says `Sh33tJS`. `strings`
+comments or extra fields. The CFB has no timestamps. WRITEACCESS is blank (only spaces). `strings`
 (ASCII and UTF-16LE, also on the unzipped parts and the Workbook stream) shows no names,
 user names, hostnames, e-mails, company names or paths.
 

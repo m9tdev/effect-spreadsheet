@@ -5,15 +5,15 @@
     {
       "name": "hidden_rows.xlsx",
       "format": "xlsx",
-      "size": 7774,
-      "sha256": "54f65d7a365520242522045776146e3ef6f74ac43fbaa9d04c8600a1713ad637",
+      "size": 6064,
+      "sha256": "c6217013e2b441ff4adad5474a9d4c2a50515c063b8b54e2bcb4f8465c565882",
       "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6)"
     },
     {
       "name": "hidden_rows.xlsb",
       "format": "xlsb",
-      "size": 6071,
-      "sha256": "1ecc9dfa0132e0f2f2810b799f7f119e495ab2adaa35c9472d029329b310fe88",
+      "size": 4331,
+      "sha256": "0971f11233d43a305809e03dc64a743a36fec4606e14dad8f25465652770ab23",
       "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6)"
     },
     {
@@ -27,49 +27,49 @@
       "name": "hidden_rows.xls",
       "format": "xls",
       "size": 7680,
-      "sha256": "8c4eec63ebe3e8491bfbb52821a788c7b420d6431cbe334cca03920dab41f6a4",
+      "sha256": "40f0d5d8452a31b633010ab781eae8fcc72d5facf95ef80fddc952857d5e96de",
       "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6) (BIFF8, ROW records hand-inserted)"
     },
     {
       "name": "hidden_rows.biff5.xls",
       "format": "xls",
       "size": 5120,
-      "sha256": "a4f741bb345ca40d08c9059085708078c0fce61822741d98aff899b44c84d09b",
+      "sha256": "62c283a8beef3846e5480f31bfd252825e4cedd506126e4baeb1f33c340d083b",
       "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6) (BIFF5, ROW records hand-inserted)"
     },
     {
       "name": "hidden_rows_first.slk",
       "format": "sylk",
-      "size": 262,
-      "sha256": "79c49e90710a3e9383be873ec66a908e80b24d4882e7a4002d6fdea0fd040b98",
+      "size": 258,
+      "sha256": "11455f037eb2afa711379857cd4f7a9d156c0747fb57cc67c9cc2f63767fbf26",
       "desc": "SYLK hidden rows (first): F;M0;R<n>"
     },
     {
       "name": "hidden_rows_middle.slk",
       "format": "sylk",
-      "size": 262,
-      "sha256": "3616a3a0de085570540cb52362afbe28983cb5215e9d9e6af26bd08d9f7d27c6",
+      "size": 258,
+      "sha256": "24b5ef0ae7526372c1fda2aed3b6fb83199c630014cca021e781e70f8f979c0d",
       "desc": "SYLK hidden rows (middle): F;M0;R<n>"
     },
     {
       "name": "hidden_rows_last.slk",
       "format": "sylk",
-      "size": 262,
-      "sha256": "121767a8c160533d1cc7bf7b2d8224f7b57c8974472467e03cb9b3329e39ccb0",
+      "size": 258,
+      "sha256": "28b29496bc2629a7e0909fac49098ce032f4e451a2991732be9047b5cdcc101b",
       "desc": "SYLK hidden rows (last): F;M0;R<n>"
     },
     {
       "name": "hidden_rows_consecutive.slk",
       "format": "sylk",
-      "size": 280,
-      "sha256": "86186f61b93d5cceba0f9cbbc417920a8b287d3af1ac61a83ec379d547f58152",
+      "size": 276,
+      "sha256": "451319fea820c451a0a8e2b9507ec86a8c8b0dca6ecd3338b2ed0e5d203dbd14",
       "desc": "SYLK hidden rows (consecutive): F;M0;R<n>"
     },
     {
       "name": "hidden_rows_all.slk",
       "format": "sylk",
-      "size": 307,
-      "sha256": "727b990a1e48be3b26f6a8c583e6295f70c6bf270a1fbcbf949c932b2826fb7c",
+      "size": 303,
+      "sha256": "b1564f00d22cd872385858053c677206deb589ff08fa96709bd47a600d49039a",
       "desc": "SYLK hidden rows (all): F;M0;R<n>"
     },
     {
@@ -82,8 +82,8 @@
     {
       "name": "hidden_rows.ods",
       "format": "ods",
-      "size": 2954,
-      "sha256": "e776aedc61340fb28eaeaa4d33305a86be020bf1c14b9e944371c4edaf177708",
+      "size": 2918,
+      "sha256": "b2d578fcb590582a26d05ba1cac8c42c78b0385ba80710a09a58198d78acabf4",
       "desc": "hidden rows; sheets first/middle/last/consecutive/all, 6 rows x 2 cols (A=r1..r6, B=1..6) (ODS, table:visibility=\"collapse\" hand-added)"
     },
     {
@@ -96,15 +96,15 @@
     {
       "name": "sparse_far.xlsb",
       "format": "xlsb",
-      "size": 4838,
-      "sha256": "28d070a2d0ce805f44fcb17db5bd7694610ec7310c686498a5c08bf9eca02362",
+      "size": 3098,
+      "sha256": "f3fb521a0fb5a968eae4da6784ce60a83b5c9f4736760abf56302011d18fbd41",
       "desc": "sparse/far: A1='first', XFD1048576=42 (BIFF12 patched)"
     },
     {
       "name": "sparse_far.xls",
       "format": "xls",
       "size": 4608,
-      "sha256": "1522edb1ecfd5152edb0daec1ac2af1a90564ebac900830c297c40f228329920",
+      "sha256": "974dabf0a492f5746a26773c4a08cc2b14689da4a00671f3649eea565abb4027",
       "desc": "sparse/far: A1='first', IV65536=42 (BIFF8 max)"
     },
     {
@@ -131,15 +131,15 @@
     {
       "name": "huge_dimension.xlsb",
       "format": "xlsb",
-      "size": 4824,
-      "sha256": "11165365225aa4aa1591493845e0440c0299cca8d5827eb35f7151ac04954ae2",
+      "size": 3084,
+      "sha256": "6c7b03e53c74e7c304db15440d6135f7635c19aa20bf7de534c8bdfde93a7b02",
       "desc": "huge BrtWsDim A1:XFD1048576, cells A1=1, B2=2 only"
     },
     {
       "name": "huge_dimension.xls",
       "format": "xls",
       "size": 4608,
-      "sha256": "2fa25e138c9555529b4b1b7df87fc299874805202e2dd08dd935373a3c03df04",
+      "sha256": "d24e45ccf95dea4032a8e4e47689bd6e54698c4ce6cf99680aa5371e8bbed392",
       "desc": "huge DIMENSIONS A1:IV65536, cells A1=1, B2=2 only"
     },
     {
@@ -208,29 +208,29 @@
     {
       "name": "features.xlsx",
       "format": "xlsx",
-      "size": 8803,
-      "sha256": "4d91dff7eba7d56990d0c175c039a8868fc51d124ef0087df1cabe17593a1345",
+      "size": 7089,
+      "sha256": "e32e6c90140e4ad4879ed9aefcc34b3f87a3814d267afddc01f0a629bc6a23fd",
       "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name (shared strings)"
     },
     {
       "name": "features.xlsb",
       "format": "xlsb",
-      "size": 6640,
-      "sha256": "1457a8f351e4dff844492c7c1ee9dbd9b9e4b998a6ef310c71701cef1d443040",
+      "size": 4894,
+      "sha256": "35c1a0ab916282494c7092bec92b917933d7d3b9ff642c3268c85a3e74f52736",
       "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name"
     },
     {
       "name": "features.xls",
       "format": "xls",
       "size": 7680,
-      "sha256": "d228cc40a835ea471a45941b5eb7bfcafca63fedb37a323caac23cf1dcc20d1d",
+      "sha256": "953618761c98e80f38e71c8a73e08735477ed69d81d19439bb06708bffadea4c",
       "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name"
     },
     {
       "name": "features.biff5.xls",
       "format": "xls",
       "size": 5120,
-      "sha256": "82c6e9ee804256cda1ae2d4ecefb2e409f6857482c40423815675b05002a93a6",
+      "sha256": "ee678cb0dfd66389c1fbade941896d528cdf318bb557d17a96aa5e5c61e60b0d",
       "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name (BIFF5)"
     },
     {
@@ -243,22 +243,22 @@
     {
       "name": "features.ods",
       "format": "ods",
-      "size": 3480,
-      "sha256": "d27429b924ec940432312047b443a934abaeda0f2a7052cdf371266bc983220e",
+      "size": 3444,
+      "sha256": "309d6756279f31e600ce4af3067cc64f9c5be97f5985c86508b2fade297a5153",
       "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name (ODS)"
     },
     {
       "name": "features.fods",
       "format": "fods",
-      "size": 13288,
-      "sha256": "08e7c9e085a395f9b7afb6adc3611a5f921f3ce75c49b70074bf5ca3804dfd6e",
+      "size": 13183,
+      "sha256": "ad0080ed67c16aa756a0a46a670e1f7b98e2963eac7ce2ccc59f6819b5087069",
       "desc": "sheets Data (text/number/bool/unicode/formulas with cached values/errors), Dates (8 formats), Merges (A1:C1, A2:A3, B2:C3), Hidden, VeryHidden, unicode sheet name (flat ODS)"
     },
     {
       "name": "features.slk",
       "format": "sylk",
-      "size": 460,
-      "sha256": "9c5fef19023facb85ad46da4619b8c3c02e2580ed819ac82365c9c3fce7191c7",
+      "size": 456,
+      "sha256": "748493f938125a362a157af90fda80f3d8528ac68f59841aba5fba489f54b482",
       "desc": "first sheet (Data) of the features workbook as SYLK"
     },
     {

@@ -2,7 +2,9 @@
 // Synthetic hidden-row fixture generator. SheetJS 0.20.3 is loaded from the local clone
 // ~/sheetjs (SHEETJS_DIR), test/script-only, never from src/ or package deps.
 //
-// All content is made up. Document properties are set to empty values.
+// All content is made up. Document properties are set to empty values, and the SheetJS
+// writer's boilerplate (theme part, app name/version strings, marker streams) is stripped
+// (lib.mjs stripWriterBoilerplate); the parse result is unchanged.
 //
 // Usage:
 //   node scripts/corpus/hidden-rows/generate.mjs           # (re)write test/corpus/hidden-rows/*.{xls,xml,slk,xlsb,xlsx} and renamed/
@@ -15,7 +17,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { createRequire } from "node:module"
-import { HIDDEN_ROWS_DIR, SHEETJS_DIR, SHEETJS_ENTRY, compareDirs, parseFlags, reportCompare, sha256 } from "../lib.mjs"
+import { HIDDEN_ROWS_DIR, SHEETJS_DIR, SHEETJS_ENTRY, compareDirs, parseFlags, reportCompare, sha256, stripWriterBoilerplate } from "../lib.mjs"
 import { NAMES, RENAMED } from "./names.mjs"
 
 const require = createRequire(import.meta.url)
@@ -54,7 +56,7 @@ function workbook({ hidden }) {
 }
 
 function write(name, wb, opts) {
-  fs.writeFileSync(path.join(OUT, name), XLSX.write(wb, { type: "buffer", ...opts }))
+  fs.writeFileSync(path.join(OUT, name), stripWriterBoilerplate(Buffer.from(XLSX.write(wb, { type: "buffer", ...opts }))))
 }
 
 // The SheetJS BIFF8 writer drops row properties, so the hidden flag is added by
@@ -87,7 +89,7 @@ function writeXlsWithHiddenRow(name) {
   row.writeUInt16LE(0x0f, 18) // ixfe
   entry.content = Buffer.concat([records.subarray(0, insertAt), row, records.subarray(insertAt)])
   entry.size = entry.content.length
-  fs.writeFileSync(path.join(OUT, name), XLSX.CFB.write(cfb, { type: "buffer" }))
+  fs.writeFileSync(path.join(OUT, name), stripWriterBoilerplate(Buffer.from(XLSX.CFB.write(cfb, { type: "buffer" }))))
 }
 
 writeXlsWithHiddenRow("hidden-row.xls")

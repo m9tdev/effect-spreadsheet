@@ -18,8 +18,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { createRequire } from "node:module"
-import { crc32, deflateRawSync } from "node:zlib"
-import { GENERATED_DIR, SHEETJS_DIR, SHEETJS_ENTRY, compareDirs, parseFlags, reportCompare, sha256, sniff, zipEntries, zipRead } from "./lib.mjs"
+import { GENERATED_DIR, SHEETJS_DIR, SHEETJS_ENTRY, compareDirs, parseFlags, reportCompare, rezip, sha256, sniff, stripWriterBoilerplate, zip } from "./lib.mjs"
 
 const require = createRequire(import.meta.url)
 const XLSX = require(SHEETJS_ENTRY)
@@ -29,53 +28,14 @@ const OUT = check ? fs.mkdtempSync(path.join(os.tmpdir(), "corpus-gen-")) : GENE
 fs.rmSync(OUT, { recursive: true, force: true })
 fs.mkdirSync(OUT, { recursive: true })
 const written = []
-const out = (name, data, desc) => {
+const out = (name, raw, desc) => {
   const p = path.join(OUT, name)
   fs.mkdirSync(path.dirname(p), { recursive: true })
+  // SheetJS-writer boilerplate (theme, app name/version strings, marker streams) is stripped
+  // from every fixture; the parse result doesn't change (see docs/corpus.md).
+  const data = stripWriterBoilerplate(Buffer.from(raw))
   fs.writeFileSync(p, data)
   written.push({ name, size: data.length, desc })
-}
-
-// ------------------------------------------------------------------ zip writer
-
-/** Deterministic zip: fixed DOS timestamp (1980-01-01), deflate unless tiny. */
-function zip(files) {
-  const locals = [], centrals = []
-  let off = 0
-  for (const [name, content] of files) {
-    const data = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8")
-    const nameBuf = Buffer.from(name, "utf8")
-    const deflated = deflateRawSync(data, { level: 9 })
-    const store = deflated.length >= data.length
-    const body = store ? data : deflated
-    const crc = crc32(data)
-    const lh = Buffer.alloc(30)
-    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x0800, 6); lh.writeUInt16LE(store ? 0 : 8, 8)
-    lh.writeUInt16LE(0, 10); lh.writeUInt16LE(0x0021, 12); lh.writeUInt32LE(crc, 14)
-    lh.writeUInt32LE(body.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(nameBuf.length, 26); lh.writeUInt16LE(0, 28)
-    const ch = Buffer.alloc(46)
-    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x0800, 8); ch.writeUInt16LE(store ? 0 : 8, 10)
-    ch.writeUInt16LE(0, 12); ch.writeUInt16LE(0x0021, 14); ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(body.length, 20); ch.writeUInt32LE(data.length, 24)
-    ch.writeUInt16LE(nameBuf.length, 28); ch.writeUInt32LE(off, 42)
-    locals.push(lh, nameBuf, body)
-    centrals.push(ch, nameBuf)
-    off += 30 + nameBuf.length + body.length
-  }
-  const cd = Buffer.concat(centrals)
-  const eocd = Buffer.alloc(22)
-  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10)
-  eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(off, 16)
-  return Buffer.concat([...locals, cd, eocd])
-}
-
-/** Re-zip an existing zip deterministically, optionally replacing/transforming parts. */
-function rezip(buf, transform = {}) {
-  const files = zipEntries(buf).filter((e) => !e.name.endsWith("/")).map((e) => {
-    let data = zipRead(buf, e)
-    if (transform[e.name]) data = transform[e.name](Buffer.from(data))
-    return [e.name, data]
-  })
-  return zip(files)
 }
 
 // ------------------------------------------------------------------ SheetJS helpers
@@ -261,7 +221,7 @@ out("sylk_row_format_no_m.slk", Buffer.from('ID;PWXL;N;E\r\nP;PGeneral\r\nF;SDM6
 {
   // ODS: SheetJS doesn't write row visibility; add table:visibility="collapse" by hand.
   const ods = sjs(hrBook(), "ods")
-  const patched = rezip(ods, {
+  const patched = rezip(ods, { parts: {
     "content.xml": (b) => {
       const cases = Object.values(HR_CASES)
       let t = -1, row = 0
@@ -272,7 +232,7 @@ out("sylk_row_format_no_m.slk", Buffer.from('ID;PWXL;N;E\r\nP;PGeneral\r\nF;SDM6
       })
       return Buffer.from(s, "utf8")
     },
-  })
+  } })
   out("hidden_rows.ods", patched, hrDesc + ' (ODS, table:visibility="collapse" hand-added)')
 }
 
@@ -280,7 +240,7 @@ out("sylk_row_format_no_m.slk", Buffer.from('ID;PWXL;N;E\r\nP;PGeneral\r\nF;SDM6
 {
   out("sparse_far.xlsx", xlsx({ sheets: [{ name: "Sheet1", dimension: "A1:XFD1048576", data: '<row r="1"><c r="A1" t="inlineStr"><is><t>first</t></is></c></row><row r="1048576"><c r="XFD1048576"><v>42</v></c></row>' }] }), "sparse/far: A1='first', XFD1048576=42")
   const xb = sjs(book([{ name: "Sheet1", ws: XLSX.utils.aoa_to_sheet([["first", null], [null, 42]]) }]), "xlsb")
-  out("sparse_far.xlsb", rezip(xb, { "xl/worksheets/sheet1.bin": (b) => patchXlsbSheet(b, { move: [{ from: [1, 1], to: [1048575, 16383] }], dim: { r0: 0, r1: 1048575, c0: 0, c1: 16383 } }) }), "sparse/far: A1='first', XFD1048576=42 (BIFF12 patched)")
+  out("sparse_far.xlsb", rezip(xb, { parts: { "xl/worksheets/sheet1.bin": (b) => patchXlsbSheet(b, { move: [{ from: [1, 1], to: [1048575, 16383] }], dim: { r0: 0, r1: 1048575, c0: 0, c1: 16383 } }) } }), "sparse/far: A1='first', XFD1048576=42 (BIFF12 patched)")
   const xl = sjs(book([{ name: "Sheet1", ws: XLSX.utils.aoa_to_sheet([["first", null], [null, 42]]) }]), "biff8")
   out("sparse_far.xls", patchXls(xl, [{ move: [{ from: [1, 1], to: [65535, 255] }], dims: { r1: 65536, c1: 256 } }]), "sparse/far: A1='first', IV65536=42 (BIFF8 max)")
   out("sparse_far.xml", Buffer.from(xlml([`<Worksheet ss:Name="Sheet1"><Table><Row ss:Index="1"><Cell ss:Index="1"><Data ss:Type="String">first</Data></Cell></Row><Row ss:Index="1048576"><Cell ss:Index="16384"><Data ss:Type="Number">42</Data></Cell></Row></Table></Worksheet>`])), "sparse/far: A1='first', XFD1048576=42")
@@ -292,7 +252,7 @@ out("sylk_row_format_no_m.slk", Buffer.from('ID;PWXL;N;E\r\nP;PGeneral\r\nF;SDM6
   const two = '<row r="1"><c r="A1"><v>1</v></c></row><row r="2"><c r="B2"><v>2</v></c></row>'
   out("huge_dimension.xlsx", xlsx({ sheets: [{ name: "Sheet1", dimension: "A1:XFD1048576", data: two }] }), 'huge <dimension ref="A1:XFD1048576"/>, cells A1=1, B2=2 only')
   const ws = XLSX.utils.aoa_to_sheet([[1, null], [null, 2]])
-  out("huge_dimension.xlsb", rezip(sjs(book([{ name: "Sheet1", ws }]), "xlsb"), { "xl/worksheets/sheet1.bin": (b) => patchXlsbSheet(b, { dim: { r0: 0, r1: 1048575, c0: 0, c1: 16383 } }) }), "huge BrtWsDim A1:XFD1048576, cells A1=1, B2=2 only")
+  out("huge_dimension.xlsb", rezip(sjs(book([{ name: "Sheet1", ws }]), "xlsb"), { parts: { "xl/worksheets/sheet1.bin": (b) => patchXlsbSheet(b, { dim: { r0: 0, r1: 1048575, c0: 0, c1: 16383 } }) } }), "huge BrtWsDim A1:XFD1048576, cells A1=1, B2=2 only")
   out("huge_dimension.xls", patchXls(sjs(book([{ name: "Sheet1", ws: XLSX.utils.aoa_to_sheet([[1, null], [null, 2]]) }]), "biff8"), [{ dims: { r1: 65536, c1: 256 } }]), "huge DIMENSIONS A1:IV65536, cells A1=1, B2=2 only")
   out("huge_dimension.xml", Buffer.from(xlml([`<Worksheet ss:Name="Sheet1"><Table ss:ExpandedColumnCount="16384" ss:ExpandedRowCount="1048576"><Row><Cell><Data ss:Type="Number">1</Data></Cell></Row><Row><Cell ss:Index="2"><Data ss:Type="Number">2</Data></Cell></Row></Table></Worksheet>`])), "huge ExpandedRowCount/ColumnCount, cells A1=1, B2=2 only")
   out("huge_dimension.slk", Buffer.from("ID;PWXL;N;E\r\nB;Y1048576;X16384;D0 0 1048575 16383\r\nC;Y1;X1;K1\r\nC;Y2;X2;K2\r\nE\r\n", "latin1"), "huge B;Y1048576;X16384, cells A1=1, B2=2 only")

@@ -11,7 +11,7 @@
 import { createHash } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
-import { inflateRawSync } from "node:zlib"
+import { crc32, deflateRawSync, inflateRawSync } from "node:zlib"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -596,4 +596,189 @@ export function parseFlags(argv, flags, withValue = []) {
     }
   }
   return out
+}
+
+// ---------------------------------------------------------------- zip writer (fixture generators)
+
+/** Deterministic zip: fixed DOS timestamp (1980-01-01), deflate unless that's not smaller. */
+export function zip(files) {
+  const locals = [], centrals = []
+  let off = 0
+  for (const [name, content] of files) {
+    const data = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8")
+    const nameBuf = Buffer.from(name, "utf8")
+    const deflated = deflateRawSync(data, { level: 9 })
+    const store = deflated.length >= data.length
+    const body = store ? data : deflated
+    const crc = crc32(data)
+    const lh = Buffer.alloc(30)
+    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x0800, 6); lh.writeUInt16LE(store ? 0 : 8, 8)
+    lh.writeUInt16LE(0, 10); lh.writeUInt16LE(0x0021, 12); lh.writeUInt32LE(crc, 14)
+    lh.writeUInt32LE(body.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(nameBuf.length, 26); lh.writeUInt16LE(0, 28)
+    const ch = Buffer.alloc(46)
+    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x0800, 8); ch.writeUInt16LE(store ? 0 : 8, 10)
+    ch.writeUInt16LE(0, 12); ch.writeUInt16LE(0x0021, 14); ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(body.length, 20); ch.writeUInt32LE(data.length, 24)
+    ch.writeUInt16LE(nameBuf.length, 28); ch.writeUInt32LE(off, 42)
+    locals.push(lh, nameBuf, body)
+    centrals.push(ch, nameBuf)
+    off += 30 + nameBuf.length + body.length
+  }
+  const cd = Buffer.concat(centrals)
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10)
+  eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(off, 16)
+  return Buffer.concat([...locals, cd, eocd])
+}
+
+/**
+ * Re-zip an existing zip deterministically.
+ * transform: {
+ *   drop?: (name) => boolean            // parts to leave out
+ *   parts?: { [name]: (Buffer) => Buffer } // per-part byte transforms
+ *   replace?: Array<[name | RegExp, string | RegExp, string]> // string replacements in UTF-8 parts
+ * }
+ */
+export function rezip(buf, transform = {}) {
+  const { drop = () => false, parts = {}, replace = [] } = transform
+  const files = []
+  for (const e of zipEntries(buf)) {
+    if (e.name.endsWith("/") || drop(e.name)) continue
+    let data = Buffer.from(zipRead(buf, e))
+    if (parts[e.name]) data = parts[e.name](data)
+    const reps = replace.filter(([p]) => (typeof p === "string" ? p === e.name : p.test(e.name)))
+    if (reps.length) {
+      let s = data.toString("utf8")
+      for (const [, from, to] of reps) s = s.replace(from, to)
+      data = Buffer.from(s, "utf8")
+    }
+    files.push([e.name, data])
+  }
+  return zip(files)
+}
+
+// ---------------------------------------------------------------- strip SheetJS-writer boilerplate
+
+function writeVar(v, maxBytes) {
+  const out = []
+  for (let i = 0; i < maxBytes; i++) {
+    const b = v & 0x7f
+    v >>>= 7
+    if (v === 0) { out.push(b); return Buffer.from(out) }
+    out.push(b | 0x80)
+  }
+  throw new Error("varint too large")
+}
+
+/** Replace the BrtFileVersion record (type 0x80, [MS-XLSB] 2.4.649) with empty app/version strings. */
+function xlsbBlankFileVersion(buf) {
+  const parts = []
+  let o = 0
+  // progress: o strictly increases by header + size per record
+  for (let n = 0; o < buf.length && n < 10_000_000; n++) {
+    const [type, a] = readVar(buf, o, 2)
+    const [size, b] = readVar(buf, o + a, 4)
+    if (a === 0 || b === 0) throw new Error("bad BIFF12 record header")
+    const end = o + a + b + size
+    if (type === 0x0080) {
+      // guidCodeName (16 bytes), then stAppName, stLastEdited, stLowestEdited, stRupBuild (XLWideString: u32 count + UTF-16)
+      const data = Buffer.alloc(16 + 4 * 4)
+      parts.push(writeVar(type, 2), writeVar(data.length, 4), data)
+    } else parts.push(buf.subarray(o, end))
+    o = end
+  }
+  return Buffer.concat(parts)
+}
+
+/** Remove the SheetJS writer's own parts/strings from an xlsx/xlsb/ods zip. Parse results don't change. */
+export function stripWriterZip(buf) {
+  return rezip(buf, {
+    drop: (n) => n === "xl/theme/theme1.xml",
+    parts: { "xl/workbook.bin": xlsbBlankFileVersion },
+    replace: [
+      ["[Content_Types].xml", /<Override PartName="\/xl\/theme\/theme1\.xml"[^>]*\/>/, ""],
+      [/^xl\/_rels\/workbook\.(xml|bin)\.rels$/, /<Relationship [^>]*Target="theme\/theme1\.xml"\/>/, ""],
+      ["docProps/app.xml", "<Application>SheetJS</Application>", ""],
+      ["meta.xml", /<meta:generator>SheetJS[^<]*<\/meta:generator>/, ""],
+      ["content.xml", / xmlns:sheet="urn:oasis:names:tc:opendocument:sh33tjs:1\.0"/, ""],
+      ["styles.xml", / xmlns:sheet="urn:oasis:names:tc:opendocument:sh33tjs:1\.0"/, ""],
+    ],
+  })
+}
+
+/** Same for text formats: SYLK ID record, flat-ODS generator and namespace. */
+export function stripWriterText(s) {
+  return s
+    .replace(/^ID;PSheetJS;N;E(\r?\n)/, "ID;PWXL;N;E$1")
+    .replace(/<meta:generator>SheetJS[^<]*<\/meta:generator>/, "")
+    .replace(/ xmlns:sheet="urn:oasis:names:tc:opendocument:sh33tjs:1\.0"/, "")
+}
+
+/**
+ * Unlink a stream from a compound file's directory ([MS-CFB] 2.6) and zero its data.
+ * Only handles an entry with at most one child (true for the SheetJS marker stream).
+ * Returns a patched copy, or the input when the entry isn't there.
+ */
+export function cfbUnlink(input, name) {
+  const buf = Buffer.from(input)
+  const ssz = 1 << buf.readUInt16LE(30), mssz = 1 << buf.readUInt16LE(32)
+  const nFat = buf.readUInt32LE(44), dirStart = buf.readUInt32LE(48), miniCutoff = buf.readUInt32LE(56), miniFatStart = buf.readUInt32LE(60)
+  if (buf.readUInt32LE(72) !== 0) throw new Error("cfbUnlink: DIFAT sectors not supported")
+  const off = (s) => ssz + s * ssz
+  const fat = []
+  for (let i = 0; i < Math.min(nFat, 109); i++) {
+    const s = buf.readUInt32LE(76 + i * 4)
+    for (let j = 0; j < ssz / 4; j++) fat.push(buf.readUInt32LE(off(s) + j * 4))
+  }
+  const chain = (start, table) => { const out = [], seen = new Set(); for (let s = start; s < table.length && !seen.has(s); s = table[s]) { seen.add(s); out.push(s) } return out }
+  const ents = chain(dirStart, fat).flatMap((s) => Array.from({ length: ssz / 128 }, (_, k) => off(s) + k * 128))
+  const nameOf = (e) => buf.toString("utf16le", e, e + Math.max(0, Math.min(64, buf.readUInt16LE(e + 64)) - 2))
+  const idx = ents.findIndex((e) => buf[e + 66] !== 0 && nameOf(e) === name)
+  if (idx < 0) return buf
+  const v = ents[idx]
+  const L = buf.readInt32LE(v + 68), R = buf.readInt32LE(v + 72), C = buf.readInt32LE(v + 76)
+  if (C !== -1 || (L !== -1 && R !== -1)) throw new Error("cfbUnlink: entry has children on both sides")
+  const repl = L !== -1 ? L : R
+  for (const e of ents) for (const o of [68, 72, 76]) if (buf[e + 66] !== 0 && buf.readInt32LE(e + o) === idx) buf.writeInt32LE(repl, e + o)
+  // zero the stream data
+  const start = buf.readUInt32LE(v + 116), size = buf.readUInt32LE(v + 120)
+  if (size < miniCutoff) {
+    const miniFat = chain(miniFatStart, fat).flatMap((s) => Array.from({ length: ssz / 4 }, (_, j) => buf.readUInt32LE(off(s) + j * 4)))
+    const root = ents[0], rootSecs = chain(buf.readUInt32LE(root + 116), fat)
+    for (const ms of chain(start, miniFat)) {
+      const pos = ms * mssz, sec = rootSecs[Math.floor(pos / ssz)]
+      if (sec !== undefined) buf.fill(0, off(sec) + (pos % ssz), off(sec) + (pos % ssz) + mssz)
+    }
+  } else for (const s of chain(start, fat)) buf.fill(0, off(s), off(s) + ssz)
+  buf.fill(0, v, v + 128)
+  buf.writeInt32LE(-1, v + 68); buf.writeInt32LE(-1, v + 72); buf.writeInt32LE(-1, v + 76)
+  return buf
+}
+
+/** xls written by SheetJS: drop the \x01Sh33tJ5 marker stream, blank "Sh33tJS" in WRITEACCESS and the "7262" SystemIdentifier. */
+export function stripWriterXls(buf) {
+  const out = cfbUnlink(buf, "\u0001Sh33tJ5")
+  const tag = Buffer.from("Sh33tJS", "latin1")
+  // progress: each step moves i past the previous match
+  for (let i = out.indexOf(tag), n = 0; i >= 0 && n < 4; i = out.indexOf(tag, i + tag.length), n++) out.fill(0x20, i, i + tag.length)
+  // Property-set streams ([MS-OLEPS] 2.21 PropertySetStream): ByteOrder FFFE, Version 0,
+  // then SystemIdentifier, which SheetJS fills with "7262". Zero it.
+  const ps = Buffer.from([0xfe, 0xff, 0x00, 0x00, 0x37, 0x32, 0x36, 0x32])
+  for (let i = out.indexOf(ps), n = 0; i >= 0 && n < 4; i = out.indexOf(ps, i + ps.length), n++) out.fill(0, i + 4, i + 8)
+  return out
+}
+
+/** Strip SheetJS-writer boilerplate from any fixture, picked by its bytes (no-op for others). */
+export function stripWriterBoilerplate(buf) {
+  if (buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 3) return stripWriterZip(buf)
+  if (buf.length >= 512 && buf.readUInt32LE(0) === 0xe011cfd0) return stripWriterXls(buf)
+  const head = buf.subarray(0, 8).toString("latin1")
+  if (head.startsWith("ID;") || head.startsWith("<?xml")) {
+    const enc = head.startsWith("ID;") ? "latin1" : "utf8"
+    const s = buf.toString(enc), t = stripWriterText(s)
+    return t === s ? buf : Buffer.from(t, enc)
+  }
+  // raw BIFF2-4: WRITEACCESS-like username strings
+  const tag = Buffer.from("Sh33tJS", "latin1")
+  if (buf.indexOf(tag) >= 0) { const b = Buffer.from(buf); for (let i = b.indexOf(tag); i >= 0; i = b.indexOf(tag, i + 7)) b.fill(0x20, i, i + 7); return b }
+  return buf
 }
