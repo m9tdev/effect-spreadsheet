@@ -10,6 +10,9 @@
 //      same abort after 3.
 //   E. tooBig results (tiny ORACLE_MAX_CELLS) keep reason, options, workbook,
 //      per-sheet counts and the SheetJS version in the expected file.
+//   F. ORACLE_MAX_BYTES counts UTF-8 bytes, not UTF-16 string length: with a cap
+//      between the two sizes of generated/features.xlsx's expected JSON (it holds
+//      non-ASCII text, so bytes > chars), the result must be tooBig.
 // Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B and E: they are skipped, not
 // failed, without it. Linux `ps` for the child lookup. Stale temp dirs from a SIGKILLed
 // run are removed at the next start.
@@ -92,6 +95,30 @@ async function tooBigCase(name) {
   check(`${name}: every tooBig doc keeps reason, options, workbook, counts, sheetjsVersion`, big.length > 0 && complete.length === big.length, big[0] ? Object.keys(big[0]).join(",") : "")
 }
 
+async function maxBytesCase(name) {
+  const docFor = () => {
+    const dir = path.join(tmp, "expected")
+    for (const f of fs.readdirSync(dir)) {
+      if (f.includes(".stream.")) continue
+      const p = path.join(dir, f), d = JSON.parse(fs.readFileSync(p, "utf8"))
+      if (d.source === "generated" && d.path === "features.xlsx") return { p, d }
+    }
+    return null
+  }
+  const args = ["--source", "generated", "--format", "xlsx", "--no-probe", "--jobs", "2"]
+  let r = await startOracle({}, args).exited
+  const first = docFor()
+  check(`${name}: features.xlsx parsed without a cap`, r.code === 0 && first?.d.status === "ok", `exit ${r.code ?? r.sig}, status ${first?.d.status}`)
+  if (!first) return
+  const text = fs.readFileSync(first.p, "utf8")
+  const bytes = Buffer.byteLength(text, "utf8"), chars = text.length
+  check(`${name}: expected JSON has more bytes than chars`, bytes - chars >= 40, `${bytes} bytes, ${chars} chars`)
+  const cap = Math.floor((bytes + chars) / 2) // over the char count, under the byte count
+  r = await startOracle({ ORACLE_MAX_BYTES: String(cap) }, args).exited
+  const second = docFor()
+  check(`${name}: cap ${cap} (between ${chars} chars and ${bytes} bytes) gives tooBig`, second?.d.status === "tooBig" && /over \d+ bytes/.test(second.d.reason ?? ""), `status ${second?.d.status}, reason ${second?.d.reason}`)
+}
+
 async function startupCase(name, body, args, expect) {
   const dir = path.join(tmp, name.replace(/\W+/g, "_"))
   fs.mkdirSync(dir, { recursive: true })
@@ -120,6 +147,8 @@ try {
   await startupCase("D hanging xlsx.js", "for (;;) {}\n", ["--ready-timeout", "2"], "no ready within 2s")
   if (haveSheetJS) await tooBigCase("E tooBig results")
   else skip("E tooBig results", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  if (haveSheetJS) await maxBytesCase("F MAX_BYTES counts bytes")
+  else skip("F MAX_BYTES counts bytes", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })
 }

@@ -72,15 +72,15 @@ try {
       // Keep the quirk list honest: `sheetjs` must match the oracle, `correct` the fixture bytes.
       for (const q of QUIRKS.filter((q) => q.file === `${src.name}/${rel}`)) checkQuirk(q, doc, path.join(src.dir, rel))
       let text = stringify(doc)
-      if (text.length > MAX_FILE_BYTES && doc.sheets) {
+      if (Buffer.byteLength(text) > MAX_FILE_BYTES && doc.sheets) {
         for (const s of doc.sheets) if (s.rows) { s.rows = null; s.rowsOmitted = "size cap" }
         text = stringify(doc)
       }
-      if (text.length > MAX_FILE_BYTES && doc.sheets) {
+      if (Buffer.byteLength(text) > MAX_FILE_BYTES && doc.sheets) {
         for (const s of doc.sheets) if (s.cells) { s.cells = null; s.cellsOmitted = "size cap" }
         text = stringify(doc)
       }
-      if (text.length > MAX_FILE_BYTES) throw new Error(`${src.name}/${rel}: still ${text.length} bytes after dropping rows and cells`)
+      if (Buffer.byteLength(text) > MAX_FILE_BYTES) throw new Error(`${src.name}/${rel}: still ${Buffer.byteLength(text)} bytes after dropping rows and cells`)
       if (doc.sheets?.some((s) => s.rowsOmitted === "size cap" || s.cellsOmitted === "size cap")) capped++
       const out = path.join(OUT, src.name, rel + ".json")
       fs.mkdirSync(path.dirname(out), { recursive: true })
