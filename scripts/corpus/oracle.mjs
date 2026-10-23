@@ -48,8 +48,10 @@ export const READ_OPTIONS = {
 export const JSON_OPTIONS = { header: 1, raw: true, defval: null, blankrows: true }
 export const ROWS_MAX_AREA = 2_000_000
 // Caps per expected file: above these the file holds status "tooBig" and counts only.
-export const MAX_CELLS = 5_000_000
-export const MAX_BYTES = 128 * 1024 * 1024
+// ORACLE_MAX_CELLS / ORACLE_MAX_BYTES override them (oracle-selftest.mjs uses tiny caps).
+const envCap = (k, d) => (process.env[k] && Number(process.env[k]) > 0 ? Number(process.env[k]) : d)
+export const MAX_CELLS = envCap("ORACLE_MAX_CELLS", 5_000_000)
+export const MAX_BYTES = envCap("ORACLE_MAX_BYTES", 128 * 1024 * 1024)
 // A typical SheetJS-based reader: XLSX.read(buffer) then stream.to_json with these options.
 export const PROBE_OPTIONS = { raw: true, skipHidden: true, UTC: true, header: "A" }
 // Probe variants:
@@ -418,8 +420,9 @@ function runPool(jobs, n, readyTimeout) {
     const progress = () => { if (done % 200 === 0 || done === jobs.length) console.log(`  ${done}/${jobs.length}`) }
     const finish = (job, r) => {
       results.set(job, r)
-      if (r.status !== "ok" && r.status !== "error") {
-        // the child couldn't write the file: record it ourselves
+      if (r.status === "timeout" || r.status === "crash") {
+        // the child was killed or died before writing the file: record it ourselves.
+        // ok / error / tooBig were written by the child (with reason, options, counts).
         const doc = { schema: SCHEMA, oracle: "sheetjs", sha256: job.sha256, path: job.path, source: job.source, format: job.format, kind: job.kind, variant: job.variant, status: r.status, ms: r.ms, error: r.error }
         fs.writeFileSync(job.out, JSON.stringify(doc) + "\n")
       }

@@ -8,6 +8,8 @@
 //      consecutive startup deaths (exit 2) instead of respawning forever.
 //   D. an xlsx.js that never finishes loading: the ready timer kills each child;
 //      same abort after 3.
+//   E. tooBig results (tiny ORACLE_MAX_CELLS) keep reason, options, workbook,
+//      per-sheet counts and the SheetJS version in the expected file.
 // Needs ~/sheetjs (SHEETJS_DIR) for A/B; Linux `ps` for the child lookup.
 // Usage: node scripts/corpus/oracle-selftest.mjs
 
@@ -55,6 +57,19 @@ async function killCase(name, signal) {
   for (const pid of left) { try { process.kill(pid, "SIGKILL") } catch {} }
 }
 
+async function tooBigCase(name) {
+  const o = startOracle({ ORACLE_MAX_CELLS: "5" }, ["--no-probe", "--format", "xlsx", "--jobs", "2"])
+  const r = await o.exited
+  check(`${name}: oracle exits 0`, r.code === 0, `exit ${r.code ?? r.sig}`)
+  const dir = path.join(tmp, "expected")
+  // --force rewrote every xlsx parse result in this run; earlier cases may have left other formats.
+  const docs = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => !f.includes(".stream.")).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"))).filter((d) => d.format === "xlsx") : []
+  const big = docs.filter((d) => d.status === "tooBig")
+  check(`${name}: xlsx results are tooBig`, big.length > 0 && big.length === docs.length, `${big.length}/${docs.length}`)
+  const complete = big.filter((d) => /cells > 5$/.test(d.reason ?? "") && d.options?.maxCells === 5 && d.workbook?.sheets?.length && d.sheets?.length && d.sheets.every((s) => typeof s.cellCount === "number" && "ref" in s && typeof s.hiddenRowCount === "number") && d.sheetjsVersion)
+  check(`${name}: every tooBig doc keeps reason, options, workbook, counts, sheetjsVersion`, big.length > 0 && complete.length === big.length, big[0] ? Object.keys(big[0]).join(",") : "")
+}
+
 async function startupCase(name, body, args, expect) {
   const dir = path.join(tmp, name.replace(/\W+/g, "_"))
   fs.mkdirSync(dir, { recursive: true })
@@ -76,6 +91,7 @@ try {
   await killCase("B parent SIGTERM", "SIGTERM")
   await startupCase("C throwing xlsx.js", 'throw new Error("boom from fake xlsx.js")\n', [], "boom from fake xlsx.js")
   await startupCase("D hanging xlsx.js", "for (;;) {}\n", ["--ready-timeout", "2"], "no ready within 2s")
+  await tooBigCase("E tooBig results")
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })
 }
