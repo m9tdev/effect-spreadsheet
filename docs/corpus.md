@@ -40,6 +40,7 @@ covers that run. Run without filters at the end: it reuses the cache and writes 
 | `scripts/corpus/fetch.mjs` | yes | download + extract the SheetJS corpus |
 | `scripts/corpus/manifest.mjs` | yes | builds the full manifest `test/corpus/.cache/manifest.json` |
 | `scripts/corpus/oracle.mjs` | yes | SheetJS oracle (pooled child processes, timeouts) |
+| `scripts/corpus/oracle-options.mjs` | yes | the oracle's SheetJS read/JSON/probe options and caps (side-effect free, importable by tests) |
 | `scripts/corpus/oracle-selftest.mjs` | yes | oracle process-hygiene tests (orphaned children, startup deaths) |
 | `scripts/corpus/expected.mjs` | yes | exports committed expectations for our fixtures to `test/corpus/expected/` |
 | `scripts/corpus/generate.mjs` | yes | our edge-case fixtures |
@@ -237,7 +238,11 @@ xlsx reader to put hidden rows in `!rows`; without it the flag is silently dropp
 those (ISO strings in the JSON) independent of the machine's time zone. It is enough on
 its own: those Dates are the only time-zone-dependent output we found, and the
 expectations come out the same in three other zones without any `TZ` setting. The oracle
-children also run with `TZ=UTC`, as a safety net. Selftest G fails without `UTC: true`.
+children also run with `TZ=UTC`, as a safety net. Selftest G checks both safeguards.
+G1 runs the whole oracle under `TZ=Pacific/Auckland`. Since the children still get
+`TZ=UTC`, G1 only fails when both safeguards are gone. G2 runs just the JSON step
+(`READ_OPTIONS` and `JSON_OPTIONS` from `oracle-options.mjs`) in a child that really runs
+in Pacific/Auckland, so it fails as soon as `UTC: true` is dropped.
 Schema 1 files had local-time Dates. We never
 use `XLSX.stream.to_json` for expected output, because that is where the hang is (below).
 
