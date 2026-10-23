@@ -220,3 +220,15 @@ test("childErrorDetail: a timeout or signal is kept when the child wrote to stde
   const x = fail(["-e", 'process.stderr.write("bye\\n"); process.exit(3)'])
   assert.equal(childErrorDetail(x), "bye")
 })
+
+test("childErrorDetail: thrown strings, objects, DOMException and subclassed errors", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  const detail = (code) => { try { execFileSync(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { return childErrorDetail(e) } assert.fail("child should fail") }
+  assert.equal(detail('throw "a thrown string"'), "a thrown string")
+  assert.equal(detail('throw { custom: 1 }'), "{ custom: 1 }")
+  assert.equal(detail('throw new DOMException("stop", "AbortError")'), "DOMException [AbortError]: stop")
+  assert.equal(detail('class MyErr extends Error {}; throw new MyErr("mine")'), "MyErr [Error]: mine")
+  // a source line that starts like an error name isn't taken for the error line
+  assert.equal(detail('Error.captureStackTrace({}); throw new TypeError("bad type")'), "TypeError: bad type")
+})
