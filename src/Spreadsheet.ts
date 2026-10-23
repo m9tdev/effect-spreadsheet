@@ -106,10 +106,11 @@ export const readCsv: (
  * - `header: "first-row"`: the first row gives the names.
  * - `header: n`: the row with index `n` gives the names; rows before it are
  *   skipped.
- * - `header: [...]`: the given names, by column; every row is data and
- *   columns past the array are dropped.
+ * - `header: [...]`: the given names, by column (repeats made unique the
+ *   same way); every row is data and columns past the array are dropped.
  *
- * Header names are made unique (`__EMPTY` for an empty one, `name_1`, ...).
+ * Header names are made unique (`name`, `name_1`, `name_2`, ...); an empty
+ * or Empty header cell leaves its column unnamed.
  * A column with no header cell is named `__EMPTY_k` when a data cell first
  * appears in it, and `defval` fills only the header-named columns.
  *

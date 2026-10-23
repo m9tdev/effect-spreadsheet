@@ -69,6 +69,14 @@ describe("recordKeys: spec examples (dense header)", () => {
   })
 })
 
+describe("recordKeys: make returns a plain RecordKeys", () => {
+  it("has exactly named, headerKey and key (no probe counter)", () => {
+    expect(Object.keys(make([[0, "a"]])).sort()).toEqual(["headerKey", "key", "named"])
+    expect("probes" in make([])).toBe(false)
+    expect(typeof makeCounted([]).probes).toBe("function")
+  })
+})
+
 describe("recordKeys: lazy keys with make (spec examples 20-24)", () => {
   it("20: columns past the header get __EMPTY names", () => {
     const keys = make([[0, "a"]])

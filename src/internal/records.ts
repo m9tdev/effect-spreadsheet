@@ -1,5 +1,3 @@
-// Portions derived from SheetJS (bits/90_utils.js), Copyright (C) SheetJS LLC, Apache-2.0.
-// Licensed under the Apache License, Version 2.0: see LICENSE-APACHE-2.0.
 /**
  * Rows -> records: one object per data row, keyed by header names.
  *
@@ -11,12 +9,14 @@ import type * as Arr from "effect/Array"
 import { LimitExceeded } from "../SpreadsheetError.ts"
 import type { LimitOverrides, Limits } from "../SpreadsheetLimits.ts"
 import type { Row } from "../Workbook.ts"
+import * as RecordKeys from "./recordKeys.ts"
 
 export interface RecordsOptions<D = never> {
   /**
    * - `"first-row"`: the first row is the header.
    * - a number: the row with that `index` is the header; earlier rows are skipped.
-   * - an array: column `i` is named `header[i]`; columns past its end are dropped.
+   * - an array: column `i` is named `header[i]` (repeats made unique the same
+   *   way); columns past its end are dropped.
    */
   readonly header: "first-row" | number | ReadonlyArray<string>
   /** Value for header-named columns the row has no value in. Default: no key. */
@@ -39,32 +39,30 @@ const set = (record: Record<string, unknown>, key: string, value: unknown): void
   else record[key] = value
 }
 
-const headerText = (cell: Cell.Cell): string => {
+/**
+ * A header cell as a record-key name: text as is, numbers and booleans as
+ * `String(v)`, a Date as ISO text, an error cell its code; Empty gives no
+ * name (the column is then named `__EMPTY…` like any unnamed column).
+ */
+const headerName = (cell: Cell.Cell): string | undefined => {
   const v = Cell.value(cell)
-  return v === undefined ? "" : v instanceof Date ? v.toISOString() : String(v)
+  return v === undefined ? undefined : v instanceof Date ? v.toISOString() : String(v)
 }
 
 /**
- * Stateful converter: feed rows in order, get records. Header names are made
- * unique: an empty header is `__EMPTY`, repeats get `_1`, `_2`, ...
+ * Stateful converter: feed rows in order, get records. Keys come from
+ * `recordKeys` (one namer per run): repeated header names get `_1`, `_2`,
+ * ...; a column without a header name gets `__EMPTY…` when a data cell first
+ * shows up in it. `defval` fills only the header-named columns.
  *
- * Cost follows the cells present: names live in a sparse map, a column the
- * header row has no cell for is named (`__EMPTY_k`) only when a data cell
- * shows up in it, and `defval` fills only the header-named columns. For the
- * whole run, cells (Empty included) count against `maxCellsPerSheet` and
- * `defval` fills against `maxRecordFields`.
+ * For the whole run, cells (Empty included) count against `maxCellsPerSheet`
+ * and `defval` fills against `maxRecordFields`.
  */
 export class RecordBuilder {
-  private readonly names = new Map<number, string>()
-  /** Header-named columns in column order: where `defval` goes. */
-  private headerNames: Array<string> = []
-  /** Columns that have a header name (so a value there needs no fill). */
-  private readonly headerColumns = new Set<number>()
-  private readonly fixed: boolean
-  private readonly used = new Map<string, number>()
-  private readonly headerRow: number | undefined
-  private readonly firstRow: boolean
-  private headerDone: boolean
+  /** The key namer, once the header is known. */
+  private namer: RecordKeys.RecordKeys | undefined
+  /** With an explicit `header: [...]`, columns at or past its length are dropped. */
+  private readonly explicitLength: number | undefined
   private cells = 0
   private fills = 0
   /** Keys written so far (cells and fills); callers diff it to size batches. */
@@ -79,63 +77,23 @@ export class RecordBuilder {
     this.maxCells = limits.maxCellsPerSheet
     this.maxFills = limits.maxRecordFields
     const header = options.header
-    this.firstRow = header === "first-row"
-    this.headerRow = typeof header === "number" ? header : undefined
     if (typeof header !== "string" && typeof header !== "number") {
-      this.fixed = true
-      const given = header as ReadonlyArray<string>
-      // progress: i increases up to given.length
-      for (let i = 0; i < given.length; i++) {
-        const name = given[i]
-        if (name === undefined) continue
-        this.names.set(i, name)
-        this.headerNames.push(name)
-        this.headerColumns.add(i)
-      }
-      this.headerDone = true
+      const names = header as ReadonlyArray<string>
+      this.explicitLength = names.length
+      // explicit names go through the same de-duplication: ["x", "x"] -> x, x_1
+      this.namer = RecordKeys.make(names.map((name, column): RecordKeys.HeaderEntry => [column, name]))
     } else {
-      this.fixed = false
-      this.headerDone = false
+      this.explicitLength = undefined
     }
   }
 
-  private unique(base: string): string {
-    const count = this.used.get(base) ?? 0
-    if (count === 0) {
-      this.used.set(base, 1)
-      return base
-    }
-    let n = count
-    let name = `${base}_${n}`
-    // progress: n increases; at most (number of names so far) collisions
-    while (this.used.has(name)) name = `${base}_${++n}`
-    this.used.set(base, n + 1)
-    this.used.set(name, 1)
-    return name
-  }
-
-  private setHeader(row: Row | undefined): void {
-    if (row !== undefined) {
-      // progress: one header cell per iteration (only cells present)
-      for (const cell of row.cells) {
-        if (this.names.has(cell.column)) continue
-        const text = headerText(cell)
-        const name = this.unique(text === "" ? "__EMPTY" : text)
-        this.names.set(cell.column, name)
-        this.headerNames.push(name)
-        this.headerColumns.add(cell.column)
-      }
-    }
-    this.headerDone = true
-  }
-
-  private nameOf(column: number): string | undefined {
-    const known = this.names.get(column)
-    if (known !== undefined || this.fixed) return known
-    // A column without a header cell: named when a data cell first appears in it.
-    const name = this.unique("__EMPTY")
-    this.names.set(column, name)
-    return name
+  /** Builds the namer from the header row's cells (only the cells present). */
+  private setHeader(row: Row | undefined): RecordKeys.RecordKeys {
+    const entries: Array<RecordKeys.HeaderEntry> = []
+    // progress: one header cell per iteration
+    if (row !== undefined) for (const cell of row.cells) entries.push([cell.column, headerName(cell)])
+    this.namer = RecordKeys.make(entries)
+    return this.namer
   }
 
   private countCells(n: number): LimitExceeded | undefined {
@@ -159,49 +117,53 @@ export class RecordBuilder {
    * skipped, or blank; or the limit error.
    */
   push(row: Row): Record<string, unknown> | undefined | LimitExceeded {
-    if (!this.headerDone) {
-      if (this.firstRow) {
+    let namer = this.namer
+    if (namer === undefined) {
+      const header = this.options.header
+      if (header === "first-row") {
         this.setHeader(row)
         return undefined
       }
-      const at = this.headerRow!
+      const at = header as number
       if (row.index < at) return undefined
       if (row.index === at) {
         this.setHeader(row)
         return undefined
       }
       // The header row isn't in the data (rows can be sparse): no names.
-      this.setHeader(undefined)
+      namer = this.setHeader(undefined)
     }
     const record: Record<string, unknown> = {}
     let empty = true
     const defval = this.options.defval
     if (defval !== undefined) {
-      // Only header columns without a value in this row are fills; count
-      // them before writing anything. progress: one cell per iteration.
+      const named = namer.named
+      // Only header-named columns without a value in this row are fills;
+      // count them before writing anything. progress: one cell per iteration.
       let valued = 0
       for (const cell of row.cells) {
-        if (cell._tag !== "Empty" && this.headerColumns.has(cell.column)) valued++
+        if (cell._tag !== "Empty" && namer.headerKey(cell.column) !== undefined) valued++
       }
-      const over = this.countFills(Math.max(0, this.headerNames.length - valued))
+      const over = this.countFills(Math.max(0, named.length - valued))
       if (over !== undefined) return over
-      // every header name is written once below (values overwrite): batch by writes
-      this.keys += Math.min(valued, this.headerNames.length)
-      // progress: one header name per iteration
-      for (const name of this.headerNames) set(record, name, defval)
+      // every header key is written once below (values overwrite): batch by writes
+      this.keys += Math.min(valued, named.length)
+      // progress: one header-named column per iteration
+      for (const [, key] of named) set(record, key, defval)
     }
     const over = this.countCells(row.cells.length)
     if (over !== undefined) return over
+    const limit = this.explicitLength
     // progress: one cell per iteration
     for (const cell of row.cells) {
+      if (limit !== undefined && cell.column >= limit) continue
+      const key = namer.key(cell.column)
       const v = Cell.value(cell)
-      const name = this.nameOf(cell.column)
-      if (name === undefined) continue
       if (v === undefined) {
-        if (defval !== undefined) set(record, name, defval)
+        if (defval !== undefined) set(record, key, defval)
         continue
       }
-      set(record, name, v)
+      set(record, key, v)
       empty = false
     }
     if (empty && !this.options.blankRows) return undefined

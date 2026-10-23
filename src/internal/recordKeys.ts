@@ -43,7 +43,8 @@ const isEmptyName = (name: string | undefined): name is undefined | "" => name =
 
 const isColumn = (column: number): boolean => Number.isSafeInteger(column) && column >= 0
 
-/** Like `make`, and also reports the probe count. `make` is this with the narrower type. */
+/** Like `make`, and also reports the probe count. For tests only: `make`
+ *  returns a plain `RecordKeys` without `probes`. */
 export const makeCounted = (header: Iterable<HeaderEntry>): CountedRecordKeys => {
   const used = new Set<string>()
   /** Per base name: the next suffix to try. Invariant: `b_1 … b_{next(b)-1}` are all in `used`. */
@@ -131,7 +132,10 @@ export const makeCounted = (header: Iterable<HeaderEntry>): CountedRecordKeys =>
  *  Doesn't throw on a violated precondition: a repeated column keeps its
  *  first entry, descending entries are put in column order, and entries whose
  *  column isn't a non-negative safe integer are ignored. */
-export const make = (header: Iterable<HeaderEntry>): RecordKeys => makeCounted(header)
+export const make = (header: Iterable<HeaderEntry>): RecordKeys => {
+  const { named, headerKey, key } = makeCounted(header)
+  return { named, headerKey, key }
+}
 
 /** Pure helper (tests, docs): the keys for a dense header, as if every column
  *  had data in the first data row. Equal to `make(entries).key(i)` for
