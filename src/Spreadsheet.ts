@@ -112,10 +112,11 @@ export const readCsv: (
  *   treated like a blank header cell (an `__EMPTY…` key when data appears,
  *   no `defval` fill).
  *
- * Header names are made unique (`name`, `name_1`, `name_2`, ...); an empty
- * or Empty header cell leaves its column unnamed.
- * A column with no header cell is named `__EMPTY_k` when a data cell first
- * appears in it, and `defval` fills only the header-named columns.
+ * Header names are made unique (`name`, `name_1`, `name_2`, ...). A column
+ * without a header name (a blank or Empty header cell, a gap in the header
+ * row, a column past it) gets its key when a data cell first appears in it:
+ * the first such key is `__EMPTY`, then `__EMPTY_1`, `__EMPTY_2`, and so on.
+ * `defval` fills only the header-named columns.
  *
  * Cost is bounded per run: every cell of the rows (Empty included) counts
  * against `maxCellsPerSheet`, every `defval` fill against `maxRecordFields`;

@@ -37,6 +37,11 @@ describe("toRecords", () => {
     ])
   })
 
+  it("unnamed columns get __EMPTY, then __EMPTY_1, __EMPTY_2, in order of first data", async () => {
+    const rows = await rowsOf("a\n,,,1\n,2,3\n")
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [{ __EMPTY: 1 }, { __EMPTY_1: 2, __EMPTY_2: 3 }])
+  })
+
   it("columns past the header get __EMPTY names", async () => {
     const rows = await rowsOf("a\n1,2,3\n")
     assert.deepStrictEqual(recs(rows, { header: "first-row" }), [{ a: 1, __EMPTY: 2, __EMPTY_1: 3 }])
