@@ -1,6 +1,7 @@
 /**
  * SheetJS oracle: loads the reference clone from ~/sheetjs/xlsx.mjs (never a
- * package dependency; SHEETJS_PATH overrides the path). `load()` gives
+ * package dependency). SHEETJS_DIR names the SheetJS repo dir (default
+ * ~/sheetjs, as for the corpus scripts); xlsx.mjs is loaded from it. `load()` gives
  * undefined when it's absent, so tests can skip, unless REQUIRE_ORACLE=1
  * (set in CI), where it fails.
  */
@@ -19,7 +20,8 @@ export interface SheetJS {
   }
 }
 
-export const SHEETJS_PATH = process.env["SHEETJS_PATH"] ?? join(homedir(), "sheetjs", "xlsx.mjs")
+export const SHEETJS_DIR = process.env["SHEETJS_DIR"] ?? join(homedir(), "sheetjs")
+export const SHEETJS_MJS = join(SHEETJS_DIR, "xlsx.mjs")
 
 let cached: Promise<SheetJS | undefined> | undefined
 
@@ -28,10 +30,10 @@ export const REQUIRED = process.env["REQUIRE_ORACLE"] === "1"
 
 export const load = (): Promise<SheetJS | undefined> => {
   if (cached === undefined) {
-    cached = existsSync(SHEETJS_PATH)
-      ? import(pathToFileURL(SHEETJS_PATH).href).then((m: { default?: SheetJS } & SheetJS) => m.default ?? m)
+    cached = existsSync(SHEETJS_MJS)
+      ? import(pathToFileURL(SHEETJS_MJS).href).then((m: { default?: SheetJS } & SheetJS) => m.default ?? m)
       : REQUIRED
-      ? Promise.reject(new Error(`REQUIRE_ORACLE=1 but SheetJS is missing at ${SHEETJS_PATH} (set SHEETJS_PATH)`))
+      ? Promise.reject(new Error(`REQUIRE_ORACLE=1 but SheetJS is missing at ${SHEETJS_MJS} (set SHEETJS_DIR)`))
       : Promise.resolve(undefined)
   }
   return cached

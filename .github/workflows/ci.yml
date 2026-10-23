@@ -41,6 +41,6 @@ jobs:
           git -C sheetjs checkout FETCH_HEAD
       - run: pnpm test
         env:
-          SHEETJS_PATH: ${{ runner.temp }}/sheetjs/xlsx.mjs
+          SHEETJS_DIR: ${{ runner.temp }}/sheetjs
           # fail instead of skipping the oracle tests if SheetJS is missing
           REQUIRE_ORACLE: "1"
