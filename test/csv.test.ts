@@ -176,6 +176,21 @@ describe("csv: encodings", () => {
     assert.deepStrictEqual(await csvAoa(utf16("a,b", false, true), { encoding: "utf-16le" }), [["a", "b"]])
   })
 
+  it("a BOM wins over a requested encoding (and is dropped)", async () => {
+    const utf8Bom = new Uint8Array([0xEF, 0xBB, 0xBF, ...enc("név,a\n")])
+    assert.deepStrictEqual(await csvAoa(utf8Bom, { encoding: "windows-1252" }), [["név", "a"]])
+    assert.deepStrictEqual(await csvAoa(utf16("név,a", false, true), { encoding: "utf-8" }), [["név", "a"]])
+    // split right inside the BOM, with a forced encoding
+    assert.deepStrictEqual(
+      await csvAoa(Stream.make(utf8Bom.subarray(0, 1), utf8Bom.subarray(1, 2), utf8Bom.subarray(2)), { encoding: "windows-1252" }),
+      [["név", "a"]]
+    )
+    // without a BOM the requested encoding is used
+    assert.deepStrictEqual(await csvAoa(enc("név"), { encoding: "windows-1252" }), [["nÃ©v"]])
+    // inputs shorter than a BOM still decode
+    assert.deepStrictEqual(await csvAoa(enc("a"), { encoding: "windows-1252" }), [["a"]])
+  })
+
   it("unknown encoding label is an InvalidOption error (when streaming and at read)", async () => {
     const error = failureOf(await csvExit("a", { encoding: "klingon" }))
     assert.deepStrictEqual(error?._tag === "InvalidOption" && error.option, "encoding")

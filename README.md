@@ -41,7 +41,7 @@ Errors: `UnsupportedFormat { format, reason }`, `MalformedFile { format, part?, 
 
 ## CSV behaviour
 
-- Encoding: BOM (UTF-8, UTF-16LE/BE) wins; otherwise `"auto"` decides on the first 64 KiB: UTF-16 by NUL pattern, else UTF-8 if valid, else windows-1252. `encoding` forces any `TextDecoder` label.
+- Encoding: a BOM (UTF-8, UTF-16LE/BE) always wins, even over a forced `encoding`, and is dropped; otherwise `"auto"` decides on the first 64 KiB: UTF-16 by NUL pattern, else UTF-8 if valid, else windows-1252. `encoding` forces any `TextDecoder` label for input without a BOM.
 - Delimiter: `delimiter` option, else an Excel `sep=X` first line, else sniffed among `,` `\t` `;` `|` (a count consistent across lines wins, then frequency).
 - RFC 4180 quoting; LF / CRLF / CR line breaks; ragged rows; blank lines are empty rows; empty fields produce no cell.
 - Lenient by default: text after a closing quote is appended (`"ab"c` → `abc`), an unterminated quote runs to end of input. `strict: true` makes both `MalformedFile`.

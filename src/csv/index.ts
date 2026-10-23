@@ -9,7 +9,8 @@
  * ```
  *
  * Behaviour:
- * - Encoding: a BOM wins (UTF-8, UTF-16LE/BE). Without one, `"auto"` looks
+ * - Encoding: a BOM (UTF-8, UTF-16LE/BE) always wins, even over a
+ *   requested `encoding`, and is dropped. Without one, `"auto"` looks
  *   at the first 64 KiB: UTF-16 if every other byte is NUL, else UTF-8 if
  *   they are valid UTF-8, else windows-1252. Any `TextDecoder` label can
  *   be forced with `encoding`.
@@ -45,7 +46,7 @@ export type Encoding = "auto" | "utf-8" | "utf-16le" | "utf-16be" | "windows-125
  * @category models
  */
 export interface ReadOptions {
-  /** Default `"auto"`. */
+  /** Used when the input has no BOM. Default `"auto"`. */
   readonly encoding?: Encoding | undefined
   /** One character. Default: `sep=` line, else sniffed. */
   readonly delimiter?: string | undefined
