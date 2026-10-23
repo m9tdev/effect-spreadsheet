@@ -205,3 +205,18 @@ test("childErrorDetail: the error line, not the location line Node prints first"
   // no stderr at all: the error's message
   assert.equal(childErrorDetail({ stderr: Buffer.from(""), message: "spawnSync node ETIMEDOUT" }), "spawnSync node ETIMEDOUT")
 })
+
+test("childErrorDetail: a timeout or signal is kept when the child wrote to stderr", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  const fail = (args, opts = {}) => { try { execFileSync(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], ...opts }) } catch (e) { return e } assert.fail("child should fail") }
+  // writes a line, then hangs until the timeout kills it
+  const t = fail(["-e", 'process.stderr.write("partial output\\n"); setTimeout(() => {}, 60_000)'], { timeout: 500, killSignal: "SIGKILL" })
+  assert.equal(childErrorDetail(t), "ETIMEDOUT: partial output")
+  // killed by a signal
+  const s = fail(["-e", 'process.stderr.write("about to die\\n"); process.kill(process.pid, "SIGTERM")'])
+  assert.equal(childErrorDetail(s), "SIGTERM: about to die")
+  // a plain non-zero exit has neither: no prefix
+  const x = fail(["-e", 'process.stderr.write("bye\\n"); process.exit(3)'])
+  assert.equal(childErrorDetail(x), "bye")
+})

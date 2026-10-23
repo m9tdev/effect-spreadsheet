@@ -911,9 +911,13 @@ export function stripWriterBoilerplate(buf) {
 /**
  * One useful line from a failed child process (execFileSync error): the first stderr line
  * that names an error ("RangeError: ..."), else the last non-empty stderr line, else the
- * error's own message. Node's first stderr line is only the throwing location.
+ * error's own message. Node's first stderr line is only the throwing location. A timeout
+ * or signal (err.code, else err.signal) goes in front, e.g. "ETIMEDOUT: <line>".
  */
 export function childErrorDetail(err) {
   const lines = (err?.stderr?.toString() ?? "").trim().split("\n").map((l) => l.trim()).filter(Boolean)
-  return lines.find((l) => /^\w*Error\b/.test(l)) ?? lines.at(-1) ?? String(err?.message ?? err)
+  const line = lines.find((l) => /^\w*Error\b/.test(l)) ?? lines.at(-1) ?? String(err?.message ?? err)
+  // a timeout or a signal is the real cause even when the child already wrote to stderr
+  const why = err?.code ?? err?.signal
+  return why ? `${why}: ${line}` : line
 }
