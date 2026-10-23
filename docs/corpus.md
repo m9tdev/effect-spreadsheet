@@ -47,6 +47,7 @@ covers that run. Run without filters at the end: it reuses the cache and writes 
 | `test/corpus/generated/` | yes | our fixtures (~150 KB), with `README.json` (name, sniffed format, size, sha256, description) |
 | `test/corpus/hidden-rows/` | yes | Synthetic hidden-row fixtures + `manifest.json` |
 | `test/corpus/expected/{generated,hidden-rows}/<file>.json` | yes | SheetJS expected output for our fixtures, so CI can compare without `~/sheetjs` (58 files, ~152 KiB, each ≤ 64 KiB) |
+| `test/corpus/sheetjs-quirks.json` | yes | machine-readable list of places where that SheetJS output is wrong or differs on purpose (`sheetjs` vs `correct` value) |
 | `test/corpus/.cache/` | **no** (gitignored) | `sheetjs/test_files` (fetched, 1.9 GB), `manifest.json` (full manifest), `expected/` (oracle output, ~1.3 GB), `oracle-report.json`; about **3.2 GB** in all (apparent size; plus 341 MB with `fetch --keep-zip`) |
 
 **Nothing committed lists third-party corpus files.** GitHub blocked `SheetJS/test_files`
@@ -417,12 +418,24 @@ user names, hostnames, e-mails, company names or paths.
 
 ## Known SheetJS quirks seen through the oracle (intended differences)
 
+The quirks that affect our committed fixtures are listed in `test/corpus/sheetjs-quirks.json`.
+Each entry has an `id`, `file`, `sheet`, `field` (`cells`, `hiddenRows` or `ref`), the
+`sheetjs` value and the `correct` value. Tests compare against the SheetJS expectation
+except at those places. `expected.mjs` stamps the ids into the affected expected files
+(`knownQuirks`). It also fails if a listed `sheetjs` value no longer matches the oracle,
+so the list can't go stale.
+
 - **xlsx hidden rows need `cellStyles:true`.** Otherwise `!rows` is empty.
 - **SYLK false hidden rows.** In `F;…;R<n>` without `M`, SheetJS keeps `Mval = 0` and
   marks the row hidden (`bits/40_harb.js` ~563). See `generated/sylk_row_format_no_m.slk`:
   `F;SDM6;R1` is a row-style record (row 1 not hidden), `F;M0;R3` hides row 3. A row is
   hidden only with an explicit `M0`.
 - **UTF-16BE CSV** isn't decoded (garbage cells). See `generated/csv_utf16be.csv`.
+- **Windows-1252 CSV** is decoded as ISO-8859-1: bytes 0x80–0x9F become C1 controls
+  instead of €, curly quotes and so on (`generated/csv_windows1252.csv`).
+- **Astral character references** (`&#x1F363;`) are truncated to 16 bits (U+F363), and
+  **`_x000D_`** is dropped (`generated/strings.xlsx`).
+- An explicit empty quoted CSV field (`""`) gives no cell (`generated/csv_quoted_newlines.csv`).
 - **BIFF5 sheet names** lose non-Latin-1 characters on write. That is a property of
   `features.biff5.xls`, not a reader bug.
 - SheetJS ignores declared dimensions in xlml/SYLK (`ref` = the actual cells), but
