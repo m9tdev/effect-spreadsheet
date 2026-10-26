@@ -228,7 +228,8 @@ startup deaths the oracle aborts with exit 2, instead of respawning forever (e.g
 - time-zone independence (G1, G2; see below).
 - a `timeout` result is retried by the next run without `--force` (H).
 
-Cases that need SheetJS are skipped, not failed, when it is missing. Temp dirs left by
+Cases that need SheetJS are skipped, not failed, when it is missing. With
+`REQUIRE_ORACLE=1` (as in CI) they fail instead, the same convention as the vitest oracle. Temp dirs left by
 a SIGKILLed selftest are removed at the next start. The parent only writes the expected
 file itself for `timeout` and `crash`; `ok`, `error` and `tooBig` documents come from the
 child.

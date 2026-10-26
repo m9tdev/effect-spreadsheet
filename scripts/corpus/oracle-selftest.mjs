@@ -28,7 +28,7 @@
 //   H. a timeout is not a cached result: after a run where every parse times out
 //      (--timeout 0.001), a run without --force parses those files again.
 // Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B, E, F, G and H: they are skipped,
-// not failed, without it (C and D use a fake SheetJS). Linux `ps` for the child lookup.
+// not failed, without it (C and D use a fake SheetJS); with REQUIRE_ORACLE=1 they fail. Linux `ps` for the child lookup.
 // Stale temp dirs from a SIGKILLed run are removed at the next start.
 // Usage: node scripts/corpus/oracle-selftest.mjs
 //   ORACLE_SELFTEST_ONLY=G,H        run only these cases (A-H, G1, G2; unknown names exit 2)
@@ -229,10 +229,16 @@ if (ONLY) {
   }
 }
 const wanted = (letter) => !ONLY || ONLY.has(letter)
+// Same convention as the vitest oracle (test/oracle/sheetjs.ts): with REQUIRE_ORACLE=1 (CI) a
+// missing SheetJS fails the checks that need it instead of skipping them.
+const REQUIRE_ORACLE = process.env.REQUIRE_ORACLE === "1"
+const missingSheetJS = (name) => REQUIRE_ORACLE
+  ? check(name, false, `REQUIRE_ORACLE=1 but SheetJS is missing at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  : skip(name, `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
 const needSheetJS = async (letter, name, fn) => {
   if (!wanted(letter)) return
   if (haveSheetJS) await fn()
-  else skip(name, `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+  else missingSheetJS(name)
 }
 try {
   execFileSync(process.execPath, [MANIFEST], { env: { ...process.env, CORPUS_CACHE_DIR: tmp }, stdio: "ignore" })
@@ -245,7 +251,7 @@ try {
   const g1 = wanted("G") || wanted("G1"), g2 = wanted("G") || wanted("G2")
   if (g1 || g2) {
     if (haveSheetJS) await timeZoneCase("G", { g1, g2 })
-    else skip("G time zone", `needs SheetJS at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+    else missingSheetJS("G time zone")
   }
   await needSheetJS("H", "H timeout retried", () => retryTimeoutCase("H timeout retried"))
 } finally {
