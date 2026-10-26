@@ -1,6 +1,6 @@
 # effect-spreadsheet
 
-Effect v4 library for reading spreadsheet files (CSV, XLSX, XLS, XLSB, ...) with its own pure-TypeScript parsers. Work in progress; see PLAN.md. Today only CSV/delimited text reads; the other formats are detected and fail with `UnsupportedFormat`.
+Effect v4 library for reading spreadsheet files (CSV, XLSX, XLS, XLSB, ...) with its own pure-TypeScript parsers. Work in progress; see PLAN.md. Today CSV/delimited text and XLSX/XLSM read; the other formats are detected and fail with `UnsupportedFormat`.
 
 It runs in Node, workers and browsers (web-standard APIs only). Every loop has a progress measure, every resource has a limit, and bad input fails with a typed `SpreadsheetError`.
 
@@ -56,9 +56,19 @@ not from the workbook the rows were read from.
 - Lenient by default: text after a closing quote is appended (`"ab"c` → `abc`), an unterminated quote runs to end of input. `strict: true` makes both `MalformedFile`.
 - `inferTypes` (default `false`): booleans (any case), decimal numbers, Excel error literals. A number is an optional sign, an integer part without extra leading zeros (`0.5` is fine, `007` stays text), an optional fraction (`1.`, `.5`) and an optional exponent (`1e21`, `1E-3`), with at most 15 digits before the exponent, not counting zeros before the first non-zero digit (`0.000000000000001` is fine; `1000000000000000`, `1.000000000000000` and `1234567890123456e-10` stay text; `123456789012345e10` is a number), and a finite value (`1e999` stays text); `-0` becomes `0`, and so does any value that rounds to 0 as a double (`1e-999` and `-1e-400` become the Number `0`). Values with surrounding whitespace stay text (`" 1"`), and quoted values are inferred too (`"1"` gives the Number `1`). Error literals are case-sensitive and recognised only as `#NULL!`, `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`, `#N/A` and `#GETTING_DATA` (`#n/a` stays text). Never dates, `%`, currency, thousands separators, hex or formulas.
 
+## XLSX behaviour
+
+- `effect-spreadsheet/xlsx` (`Xlsx.read(bytes)`), or `Spreadsheet.read`, which detects XLSX/XLSM from the zip's parts. `.xlsm` reads like `.xlsx`; macros are ignored.
+- The workbook part is found through the package relationships. `workbook.sheets` gives names and visibility (`visible`, `hidden`, `veryHidden`); `workbook.definedNames` the defined names (`name`, `formula` text, `scope` sheet index, `hidden`), as metadata only.
+- Sheets are read lazily: each `Workbook.rows` run inflates and parses that sheet as a stream, in bounded pieces. Hidden rows are emitted with `hidden: true`. Rows the file leaves out are not emitted (rows are sparse); nothing is sized by the declared dimension.
+- Values: shared, inline and formula strings are `Text` (`_xHHHH_` escapes decoded, phonetic runs skipped); booleans, error codes and numbers keep their type. A number whose number format shows a date or time is a `Date` (wall clock as UTC, rounded to the millisecond, 1900 or 1904 date system), as is an ISO-dated cell. Serials that are no real date (negative, past 9999-12-31, or the 1900 system's fictional 29 February 1900) stay numbers. Cells without a value are `Empty`.
+- `numFmt` is the number-format code for numbers and dates (built-in ids as ECMA-376 lists them); `formula` is the formula text as stored (a shared formula only on its first cell). Formulas are not evaluated.
+- Zip bombs: all entries of an archive share one inflate budget, `max(inflateFloorBytes, maxInflateRatio × archive size)` (64 MiB and 200 by default), never more than `maxDecompressedBytes` (1 GiB).
+
 ### Comparison with other readers
 
 The test suite compares CSV results with a widely used JavaScript spreadsheet library as a
 test-only oracle. The intended differences are listed in
 [docs/csv-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/csv-oracle-differences.md) (CSV reading) and
-[docs/records-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/records-oracle-differences.md) (`toRecords`).
+[docs/records-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/records-oracle-differences.md) (`toRecords`) and
+[docs/xlsx-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/xlsx-oracle-differences.md) (XLSX).
