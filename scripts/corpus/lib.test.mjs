@@ -210,8 +210,15 @@ test("childErrorDetail: a timeout or signal is kept when the child wrote to stde
   const { childErrorDetail } = await import("./lib.mjs")
   const { execFileSync } = await import("node:child_process")
   const fail = (args, opts = {}) => { try { execFileSync(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], ...opts }) } catch (e) { return e } assert.fail("child should fail") }
-  // writes a line, then hangs until the timeout kills it
-  const t = fail(["-e", 'process.stderr.write("partial output\\n"); setTimeout(() => {}, 60_000)'], { timeout: 500, killSignal: "SIGKILL" })
+  // writes a line, then hangs until the timeout kills it. Under heavy load Node can take longer
+  // than a short timeout just to start, and is then killed before it writes anything; so retry
+  // with a longer timeout until the line is there (normally the first 500 ms try is enough).
+  let t
+  for (const timeout of [500, 2_000, 8_000, 30_000]) {
+    t = fail(["-e", 'process.stderr.write("partial output\\n"); setTimeout(() => {}, 60_000)'], { timeout, killSignal: "SIGKILL" })
+    if (t.stderr?.toString().includes("partial output")) break
+  }
+  assert.equal(t.code, "ETIMEDOUT")
   assert.equal(childErrorDetail(t), "ETIMEDOUT: partial output")
   // killed by a signal
   const s = fail(["-e", 'process.stderr.write("about to die\\n"); process.kill(process.pid, "SIGTERM")'])
@@ -231,4 +238,59 @@ test("childErrorDetail: thrown strings, objects, DOMException and subclassed err
   assert.equal(detail('class MyErr extends Error {}; throw new MyErr("mine")'), "MyErr [Error]: mine")
   // a source line that starts like an error name isn't taken for the error line
   assert.equal(detail('Error.captureStackTrace({}); throw new TypeError("bad type")'), "TypeError: bad type")
+})
+
+test("childErrorDetail: the last error line wins over earlier lines the child printed", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  const detail = (code) => { try { execFileSync(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { return childErrorDetail(e) } assert.fail("child should fail") }
+  assert.equal(detail('console.error("debug: x"); throw new TypeError("bad")'), "TypeError: bad")
+  assert.equal(detail('console.error("Warning: an earlier Error: not this one"); throw new RangeError("this one")'), "RangeError: this one")
+  // Node prints error properties after the stack ("code: 'ERR_X'"); they aren't the error line
+  assert.equal(detail('console.error("debug: x"); const e = new Error("boom"); e.code = "ERR_X"; throw e'), "Error: boom")
+  // a child that printed an earlier error line and then exits on its own: the last one
+  assert.equal(childErrorDetail({ stderr: Buffer.from("SyntaxError: first\ndebug: x\nTypeError: second\n"), message: "Command failed" }), "TypeError: second")
+  // nothing error-like: the last non-empty line, then the message
+  assert.equal(childErrorDetail({ stderr: Buffer.from("debug: x\nlast words\n\n"), message: "m" }), "last words")
+  assert.equal(childErrorDetail({ stderr: Buffer.from(""), message: "m" }), "m")
+})
+
+test("childErrorDetail: an error whose name doesn't end in Error gives its header, not a stack frame", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  let err
+  try { execFileSync(process.execPath, ["--input-type=module", "-e", 'class MyErr extends Error { name = "MyErr" }; throw new MyErr("mine")'], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { err = e }
+  assert.equal(childErrorDetail(err), "MyErr: mine")
+  // no stack, but stack-frame-looking lines last (e.g. a child that printed a trace): skipped
+  assert.equal(childErrorDetail({ stderr: Buffer.from("custom failure\n    at somewhere (x.js:1:1)\n"), message: "m" }), "custom failure")
+})
+
+test("childErrorDetail: nested errors (AggregateError, error properties, cause, multi-line message) give the outer one", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  const detail = (code) => { try { execFileSync(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { return childErrorDetail(e) } assert.fail("child should fail") }
+  assert.equal(detail('throw new AggregateError([new TypeError("a"), new RangeError("b")], "agg")'), "AggregateError: agg")
+  assert.equal(detail('const e = new Error("outer"); e.originalError = new TypeError("inner"); throw e'), "Error: outer")
+  assert.equal(detail('throw new Error("outer", { cause: new TypeError("inner") })'), "Error: outer")
+  assert.equal(detail('throw new Error("wrapped: TypeError: inner")'), "Error: wrapped: TypeError: inner")
+  assert.equal(detail('throw new Error("line one\\nTypeError: inner")'), "Error: line one")
+})
+
+async function thrownDetail(code) {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  try { execFileSync(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { return childErrorDetail(e) }
+  assert.fail("child should fail")
+}
+
+test("childErrorDetail: an Error the child logged earlier doesn't beat the one it throws", async () => {
+  assert.equal(await thrownDetail('console.error(new Error("logged earlier")); throw new TypeError("the real one")'), "TypeError: the real one")
+})
+
+test("childErrorDetail: a console.trace earlier doesn't beat the error the child throws", async () => {
+  assert.equal(await thrownDetail('console.trace("tracing"); throw new TypeError("the real one")'), "TypeError: the real one")
+})
+
+test("childErrorDetail: logged error and trace earlier, then a nested error: the thrown outer one", async () => {
+  assert.equal(await thrownDetail('console.error(new Error("logged")); console.trace("tracing"); throw new AggregateError([new RangeError("b")], "agg")'), "AggregateError: agg")
 })

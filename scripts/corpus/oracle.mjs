@@ -270,6 +270,12 @@ if (process.argv[2] !== "--child") await main()
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!fs.existsSync(SHEETJS_ENTRY)) {
+    // Same convention as the tests: with REQUIRE_ORACLE=1 a missing SheetJS is an error, so a
+    // run with an old cache can't pass on stale results.
+    if (process.env.REQUIRE_ORACLE === "1") {
+      console.error(`oracle: REQUIRE_ORACLE=1 but SheetJS is missing at ${SHEETJS_ENTRY} (set SHEETJS_DIR)`)
+      process.exit(1)
+    }
     console.error(`SheetJS not found at ${SHEETJS_DIR} (set SHEETJS_DIR); skipping oracle`)
     process.exit(0)
   }

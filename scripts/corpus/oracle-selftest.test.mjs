@@ -9,9 +9,10 @@ import test from "node:test"
 import { fileURLToPath } from "node:url"
 
 const SELFTEST = path.join(path.dirname(fileURLToPath(import.meta.url)), "oracle-selftest.mjs")
-// The child's environment without any ORACLE_SELFTEST_* from ours (e.g. an
-// ORACLE_SELFTEST_G2_TZ left set in the shell would change what these tests see).
-const env = (extra) => ({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("ORACLE_SELFTEST_"))), ...extra })
+// The child's environment without any ORACLE_SELFTEST_* or REQUIRE_ORACLE from ours (e.g. an
+// ORACLE_SELFTEST_G2_TZ left set in the shell, or CI's REQUIRE_ORACLE=1, would change what
+// these tests see). Tests that want them pass them in `extra`.
+const env = (extra) => ({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("ORACLE_SELFTEST_") && k !== "REQUIRE_ORACLE")), ...extra })
 
 test("G2 reports the child's error line (not Node's location line) as a failed check", () => {
   const fake = fs.mkdtempSync(path.join(os.tmpdir(), "selftest-fake-sheetjs-"))
@@ -93,4 +94,21 @@ test("ORACLE_SELFTEST_G2_TIMEOUT_MS: garbage or a non-integer is an error, not a
   // empty means the default
   const ok = spawnSync(process.execPath, [SELFTEST], { env: env({ ORACLE_SELFTEST_G2_TIMEOUT_MS: "", ORACLE_SELFTEST_ONLY: "C" }), encoding: "utf8", timeout: 60_000 })
   assert.equal(ok.status, 0, ok.stdout + ok.stderr)
+})
+
+test("REQUIRE_ORACLE=1: checks that need SheetJS fail instead of skipping when it is missing", () => {
+  const run = (extra) => spawnSync(process.execPath, [SELFTEST], { env: env({ SHEETJS_DIR: "/nonexistent-sheetjs", ...extra }), encoding: "utf8", timeout: 60_000 })
+  const strict = run({ REQUIRE_ORACLE: "1" })
+  assert.equal(strict.status, 1, strict.stdout + strict.stderr)
+  for (const c of ["A", "B", "E", "F", "G", "H"]) assert.match(strict.stdout, new RegExp(`^FAIL ${c} .*REQUIRE_ORACLE=1 but SheetJS is missing`, "m"), c)
+  assert.doesNotMatch(strict.stdout, /^skip /m)
+  assert.match(strict.stdout, /^ok {3}C /m) // C and D use a fake SheetJS and still run
+  assert.match(strict.stdout, /^6 check\(s\) failed$/m)
+  // without REQUIRE_ORACLE (or with another value) the same run only skips
+  for (const extra of [{}, { REQUIRE_ORACLE: "0" }]) {
+    const lax = run(extra)
+    assert.equal(lax.status, 0, lax.stdout + lax.stderr)
+    assert.match(lax.stdout, /^skip H /m)
+    assert.match(lax.stdout, /^all oracle self-tests passed$/m)
+  }
 })
