@@ -18,13 +18,17 @@ import { Context, Effect, Layer } from "effect"
 export interface Limits {
   /** Size of the input file in bytes (for streams: bytes read so far). */
   readonly maxInputBytes: number
-  /** Total bytes inflated from a container (all zip entries together). */
+  /** Total bytes inflated from a container (all zip entries together): the hard cap. */
   readonly maxDecompressedBytes: number
   /**
-   * Max inflated/compressed ratio of a zip entry. Checked once an entry has
-   * inflated past 1 MiB, so tiny highly-compressible entries pass.
+   * Archive-wide zip-bomb guard: all entries together may inflate to at
+   * most `max(inflateFloorBytes, maxInflateRatio × archive size)` bytes
+   * (and never more than `maxDecompressedBytes`). Per archive, not per
+   * entry, so many small highly compressible entries can't add up.
    */
-  readonly maxCompressionRatio: number
+  readonly maxInflateRatio: number
+  /** The inflate budget every archive gets, however small it is (see `maxInflateRatio`). */
+  readonly inflateFloorBytes: number
   /** Entries in a zip central directory. */
   readonly maxZipEntries: number
   /** Sheets in a workbook. */
@@ -74,7 +78,8 @@ export type LimitOverrides = { readonly [K in keyof Limits]?: number | undefined
  * |---|---|---|
  * | maxInputBytes | 256 MiB | far above real uploads, below tab-crashing sizes |
  * | maxDecompressedBytes | 1 GiB | a 200k-row XLSX inflates to a few hundred MiB |
- * | maxCompressionRatio | 100 | the common 1% minimum inflate-ratio zip-bomb default |
+ * | maxInflateRatio | 200 | real workbooks inflate 5-20x; blank-row sheets reach a few hundred |
+ * | inflateFloorBytes | 64 MiB | small files may inflate this far whatever their size |
  * | maxZipEntries | 10 000 | real workbooks have tens to hundreds |
  * | maxSheets | 1 024 | |
  * | maxRows | 1 048 576 | Excel's row limit |
@@ -93,7 +98,8 @@ export type LimitOverrides = { readonly [K in keyof Limits]?: number | undefined
 export const defaults: Limits = {
   maxInputBytes: 256 * 1024 * 1024,
   maxDecompressedBytes: 1024 * 1024 * 1024,
-  maxCompressionRatio: 100,
+  maxInflateRatio: 200,
+  inflateFloorBytes: 64 * 1024 * 1024,
   maxZipEntries: 10_000,
   maxSheets: 1_024,
   maxRows: 1_048_576,

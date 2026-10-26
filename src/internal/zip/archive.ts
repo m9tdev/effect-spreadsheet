@@ -6,11 +6,14 @@
  * - Every entry's local header must match its directory entry (signature,
  *   name) and its data must lie inside the buffer; entries may not overlap
  *   or repeat a name (names compare case-insensitively, as OPC parts do).
- * - Inflated bytes count against `maxDecompressedBytes` for the whole
- *   archive and against the entry's declared size; once an entry has
- *   inflated past `RATIO_GRACE_BYTES`, its ratio to the compressed size
- *   must stay within `maxCompressionRatio`. The CRC-32 is checked at the
- *   end. Decompression only runs as far as the stream is read.
+ * - Inflated bytes count against the entry's declared size and against one
+ *   budget for the whole archive, `inflateBudget`: max(`inflateFloorBytes`,
+ *   `maxInflateRatio` × archive size), capped at `maxDecompressedBytes`.
+ *   Reading an entry again doesn't spend the budget again (each entry
+ *   counts up to the most it has inflated), so a sheet can be streamed
+ *   twice; many entries, however small each one is, can't add up past it.
+ *   The CRC-32 is checked at the end. Decompression only runs as far as
+ *   the stream is read.
  *
  * @internal
  */
@@ -24,8 +27,9 @@ import { CRC32_START, crc32Final, crc32Update } from "./crc32.ts"
 import { type Directory, readDirectory, type ZipEntry } from "./directory.ts"
 import { type InflateRaw, inflateRawWeb } from "./inflate.ts"
 
-/** The ratio limit applies once an entry has inflated past this many bytes. */
-export const RATIO_GRACE_BYTES = 1024 * 1024
+/** The archive-wide inflate budget for an archive of `archiveBytes` bytes. */
+export const inflateBudget = (archiveBytes: number, limits: Limits): number =>
+  Math.min(limits.maxDecompressedBytes, Math.max(limits.inflateFloorBytes, limits.maxInflateRatio * archiveBytes))
 
 /** Stored entries are emitted in slices of this size. */
 const STORED_SLICE = 64 * 1024
@@ -121,7 +125,13 @@ export const open = (
   }
   const located = locate(bytes, directory)
   if (located instanceof MalformedFile) return located
+  /** Bytes inflated in total (every read counts): a work counter. */
   let inflated = 0
+  /** Bytes counted against the budget: per entry, the most it has inflated so far. */
+  let charged = 0
+  const highWater = new Map<ZipEntry, number>()
+  const budget = inflateBudget(bytes.length, limits)
+  const ratioBound = budget < limits.maxDecompressedBytes
 
   /** Counts `n` more output bytes of `entry` (`soFar` after them); an error if a limit is crossed. */
   const account = (entry: ZipEntry, soFar: number, n: number): SpreadsheetError | undefined => {
@@ -129,14 +139,15 @@ export const open = (
     if (soFar > entry.uncompressedSize) {
       return malformed(`entry inflates past its declared size of ${entry.uncompressedSize} bytes`, entry.name)
     }
-    if (inflated > limits.maxDecompressedBytes) {
-      return new LimitExceeded({ limit: "maxDecompressedBytes", max: limits.maxDecompressedBytes, actual: inflated })
+    const before = highWater.get(entry) ?? 0
+    if (soFar > before) {
+      charged += soFar - before
+      highWater.set(entry, soFar)
     }
-    if (soFar > RATIO_GRACE_BYTES) {
-      const ratio = soFar / Math.max(1, entry.compressedSize)
-      if (ratio > limits.maxCompressionRatio) {
-        return new LimitExceeded({ limit: "maxCompressionRatio", max: limits.maxCompressionRatio, actual: Math.floor(ratio) })
-      }
+    if (charged > budget) {
+      return ratioBound
+        ? new LimitExceeded({ limit: "maxInflateRatio", max: limits.maxInflateRatio, actual: Math.ceil(charged / Math.max(1, bytes.length)) })
+        : new LimitExceeded({ limit: "maxDecompressedBytes", max: limits.maxDecompressedBytes, actual: charged })
     }
     return undefined
   }

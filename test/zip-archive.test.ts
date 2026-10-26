@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
-import { type Archive, open, RATIO_GRACE_BYTES } from "../src/internal/zip/archive.ts"
+import { type Archive, inflateBudget, open } from "../src/internal/zip/archive.ts"
 import { crc32 } from "../src/internal/zip/crc32.ts"
 import { readDirectory, type ZipEntry } from "../src/internal/zip/directory.ts"
 import type { Inflater, InflateRaw } from "../src/internal/zip/inflate.ts"
@@ -83,8 +83,7 @@ describe("zip archive: reading entries", () => {
         if (!statSync(`${dir}/${name}`).isFile()) continue
         const bytes = new Uint8Array(readFileSync(`${dir}/${name}`))
         if (!(bytes[0] === 0x50 && bytes[1] === 0x4B && bytes[2] === 0x03 && bytes[3] === 0x04)) continue
-        // some fixtures are deliberately highly compressible
-        const archive = openOk(bytes, { ...limits, maxCompressionRatio: 10_000 })
+        const archive = openOk(bytes)
         for (const entry of archive.entries) {
           const exit = await Effect.runPromise(Effect.exit(archive.readAll(entry)))
           expect(Exit.isSuccess(exit), `${name}: ${entry.name}`).toBe(true)
@@ -178,18 +177,92 @@ describe("zip64 extra field bounds", () => {
 })
 
 describe("zip archive: hostile input", () => {
-  it("a zip bomb stops at the ratio limit after inflating about the grace amount", async () => {
-    const zeros = new Uint8Array(64 * 1024 * 1024)
+  const MiB = 1024 * 1024
+  const FLOOR = 64 * MiB
+
+  it("the archive-wide budget is max(64 MiB, 200 x archive size), capped at maxDecompressedBytes", () => {
+    expect(inflateBudget(10_000, limits)).toBe(FLOOR)
+    expect(inflateBudget(1 * MiB, limits)).toBe(200 * MiB)
+    expect(inflateBudget(100 * MiB, limits)).toBe(1024 * MiB)
+  })
+
+  it("a single-entry zip bomb stops just past the 64 MiB floor", async () => {
+    const zeros = new Uint8Array(96 * MiB)
     const zip = await buildZip([{ name: "bomb.xml", data: zeros }])
     expect(zip.length).toBeLessThan(200_000)
     const archive = openOk(zip)
     const error = await errorOf(archive, "bomb.xml")
-    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxCompressionRatio", max: 100 })
-    // work done: up to the ratio (or the grace amount) plus one chunk, not 64 MiB
-    const compressed = archive.find("bomb.xml")!.compressedSize
-    expect(archive.inflatedBytes()).toBeLessThanOrEqual(Math.max(RATIO_GRACE_BYTES, 100 * compressed) + CHUNK)
-    expect(archive.inflatedBytes()).toBeLessThan(zeros.length / 8)
-  }, 30_000)
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxInflateRatio", max: 200 })
+    // work done: the budget plus at most one chunk, not 96 MiB
+    expect(archive.inflatedBytes()).toBeLessThanOrEqual(FLOOR + CHUNK)
+  }, 60_000)
+
+  it("a bomb that would inflate forever stops at the budget (fake inflater, declared 1 GiB)", async () => {
+    const chunk = new Uint8Array(MiB)
+    const endless: InflateRaw = () => ({ next: async () => chunk, cancel: () => {} })
+    const zip = await buildZip([{ name: "endless.xml", data: enc("x"), uncompressedSize: 1024 * MiB }])
+    const archive = openOk(zip, limits, endless)
+    expect(await errorOf(archive, "endless.xml")).toMatchObject({ _tag: "LimitExceeded", limit: "maxInflateRatio" })
+    expect(archive.inflatedBytes()).toBeLessThanOrEqual(FLOOR + MiB)
+  })
+
+  const zeroEntries = async (count: number) => {
+    // one deflated MiB of zeros, reused for every entry (each well under the
+    // old per-entry 1 MiB grace, so only an archive-wide budget sees them)
+    const zeros = new Uint8Array(MiB)
+    const deflated = await deflateRaw(zeros)
+    const crc = testCrc32(zeros)
+    return buildZip(Array.from({ length: count }, (_, i) => ({
+      name: `zeros${i}.xml`, data: deflated, method: "store" as const, methodCode: 8, uncompressedSize: MiB, crc32: crc
+    })))
+  }
+  const readEntries = async (archive: Archive) => {
+    let read = 0
+    for (const entry of archive.entries) {
+      const error = failureOf(await Effect.runPromise(Effect.exit(archive.readAll(entry))))
+      if (error !== undefined) return { read, error }
+      read++
+    }
+    return { read, error: undefined }
+  }
+
+  it("many small 1 MiB-zero entries are stopped by the archive-wide budget", async () => {
+    const zip = await zeroEntries(100)
+    expect(zip.length).toBeLessThan(200 * 1024)
+    const archive = openOk(zip)
+    const { read, error } = await readEntries(archive)
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxInflateRatio", max: 200 })
+    expect(read).toBe(64) // the 65th MiB crosses the floor
+    expect(archive.inflatedBytes()).toBeLessThanOrEqual(FLOOR + CHUNK)
+  }, 60_000)
+
+  it("50 such entries (50 MiB) fit within the 64 MiB floor; a lower floor stops them early", async () => {
+    const zip = await zeroEntries(50)
+    expect((await readEntries(openOk(zip))).error).toBeUndefined()
+    // with a 1 MiB floor the ratio part decides: 200 x the archive size
+    const tightLimits = { ...limits, inflateFloorBytes: MiB }
+    const budget = inflateBudget(zip.length, tightLimits)
+    expect(budget).toBe(200 * zip.length)
+    const tight = openOk(zip, tightLimits)
+    const { read, error } = await readEntries(tight)
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxInflateRatio" })
+    expect(read).toBe(Math.floor(budget / MiB))
+    expect(read).toBeLessThan(50)
+    expect(tight.inflatedBytes()).toBeLessThanOrEqual(budget + CHUNK)
+  }, 60_000)
+
+  it("reading an entry again doesn't spend the budget again", async () => {
+    const zip = await zeroEntries(1)
+    const archive = openOk(zip, { ...limits, inflateFloorBytes: 2 * MiB })
+    for (let k = 0; k < 5; k++) expect((await readEntries(archive)).error).toBeUndefined()
+    expect(archive.inflatedBytes()).toBe(5 * MiB)
+  })
+
+  it("the committed 666:1 blank-row workbook passes with the default limits", async () => {
+    const bytes = new Uint8Array(readFileSync("test/corpus/generated/many_empty_rows_implicit.xlsx"))
+    const archive = openOk(bytes)
+    expect((await readEntries(archive)).error).toBeUndefined()
+  })
 
   it("the total budget covers all entries together", async () => {
     // compressible but well under the ratio limit

@@ -361,7 +361,7 @@ describe("xml bytes", () => {
         if (!statSync(`${dir}/${name}`).isFile()) continue
         const bytes = new Uint8Array(readFileSync(`${dir}/${name}`))
         if (!(bytes[0] === 0x50 && bytes[1] === 0x4B)) continue
-        const archive = open(bytes, { ...limits, maxCompressionRatio: 10_000 })
+        const archive = open(bytes, limits)
         if ("_tag" in archive) throw new Error(`${name}: ${archive._tag}`)
         for (const entry of archive.entries.filter((e) => /\.(xml|rels)$/.test(e.name))) {
           const handler: XmlHandler = { open: () => undefined, close: () => undefined, text: () => undefined }
