@@ -24,7 +24,8 @@
  * errors (`#N/A`, ...) and numbers have their types; a number whose number
  * format shows a date or time is a `Date` (wall clock as UTC, rounded to
  * the millisecond, in the workbook's 1900 or 1904 date system), as is an
- * ISO-dated cell (`t="d"`). Number formats other than General are given as
+ * ISO-dated cell (`t="d"`: without a zone its wall clock as UTC, with an
+ * offset the instant it names). Number formats other than General are given as
  * `numFmt`; formula text (as stored, shared formulas only on their first
  * cell) as `formula`. Formulas are not evaluated.
  *

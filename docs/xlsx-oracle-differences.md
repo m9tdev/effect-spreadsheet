@@ -23,6 +23,12 @@ These are the intended differences:
 | built-in number format 14 | `numFmt: "mm-dd-yy"` (the code ECMA-376 lists) | `z: "m/d/yy"` |
 | formatted text (`w`) | not produced (PLAN.md: later) | `w` |
 | hidden columns, merges, declared dimension | `Workbook.sheetDetails` (not in rows) | `!cols`, `!merges`, `!ref` |
+| one bad cell (a number, boolean or ISO date that doesn't parse, an unknown `t`, a shared-string index out of range) | the sheet's rows fail with `MalformedFile` at that cell | a value for the cell (and the rest of the sheet) |
+| a defined name whose `localSheetId` names no sheet | no `scope`: it looks workbook-wide | keeps `Sheet: 99` |
+| XLM macro sheets (and chart and dialog sheets) | no rows, empty `sheetDetails` | cells, where it reads them |
+
+An impossible ISO date such as `2020-02-30` rolls over to the next valid
+day (2020-03-01), as it does in SheetJS.
 
 `dates_1904.xlsx`: SheetJS's `sheet_to_json` turns 1904-system serials into
 dates with the 1900 epoch (quirk `sheet-to-json-ignores-date1904`); our
