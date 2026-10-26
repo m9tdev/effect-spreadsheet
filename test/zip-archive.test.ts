@@ -171,7 +171,7 @@ describe("zip64 extra field bounds", () => {
   it("a ZIP64 compressed size of 2^53-1 is read exactly and fails as out of bounds", async () => {
     const { bytes, view, extra } = await zip64Archive()
     view.setBigUint64(extra + 4 + 8, (1n << 53n) - 1n, true)
-    const entries = readDirectory(bytes, limits) as ReadonlyArray<ZipEntry>
+    const { entries } = readDirectory(bytes, limits) as { entries: ReadonlyArray<ZipEntry> }
     expect(entries[0]!.compressedSize).toBe(Number.MAX_SAFE_INTEGER)
     expect(open(bytes, limits)).toMatchObject({ _tag: "MalformedFile", reason: "entry data out of bounds" })
   })

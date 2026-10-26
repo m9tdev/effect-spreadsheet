@@ -7,9 +7,9 @@ import { makeZip } from "./helpers/zip.ts"
 
 const limits = SpreadsheetLimits.defaults
 const names = (result: ReturnType<typeof readDirectory>) =>
-  Array.isArray(result) ? (result as ReadonlyArray<ZipEntry>).map((e) => e.name) : `${(result as { _tag: string })._tag}`
+  "entries" in result ? result.entries.map((e: ZipEntry) => e.name) : `${result._tag}`
 const reason = (result: ReturnType<typeof readDirectory>) =>
-  Array.isArray(result) ? "ok" : (result as { reason?: string; _tag: string }).reason ?? (result as { _tag: string })._tag
+  "entries" in result ? "ok" : (result as { reason?: string; _tag: string }).reason ?? result._tag
 
 // Written by Python's zipfile with the ZIP64 records forced on (see make-zip64.py).
 const ZIP64 = new Uint8Array(readFileSync(new URL("./fixtures/zip/zip64.zip", import.meta.url)))
@@ -151,7 +151,7 @@ describe("zip central directory", () => {
     const zip = makeZip([{ name: "xl/workbook.xml" }])
     for (let cut = 0; cut < zip.length; cut++) {
       const result = readDirectory(zip.subarray(0, cut), limits)
-      expect(Array.isArray(result)).toBe(false)
+      expect("entries" in result).toBe(false)
     }
     expect(reason(readDirectory(new Uint8Array(10), limits))).toMatch(/not found/)
   })

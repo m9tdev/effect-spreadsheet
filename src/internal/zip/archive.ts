@@ -63,7 +63,8 @@ interface Located {
 }
 
 /** Checks the local headers and the layout; returns where each entry's data is. */
-const locate = (bytes: Uint8Array, entries: Directory): Map<ZipEntry, Located> | MalformedFile => {
+const locate = (bytes: Uint8Array, directory: Directory): Map<ZipEntry, Located> | MalformedFile => {
+  const entries = directory.entries
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const names = new TextDecoder("utf-8")
   const located = new Map<ZipEntry, Located>()
@@ -81,7 +82,7 @@ const locate = (bytes: Uint8Array, entries: Directory): Map<ZipEntry, Located> |
     const dataEnd = dataStart + entry.compressedSize
     if (dataEnd > bytes.length) return malformed("entry data out of bounds", entry.name, at)
     // entry data comes before the central directory (and so the EOCD)
-    if (dataEnd > entries.directoryStart) return malformed("entry data overlaps the central directory", entry.name, at)
+    if (dataEnd > directory.directoryStart) return malformed("entry data overlaps the central directory", entry.name, at)
     // The local name must be the directory's name (decoded the same way); a
     // mismatch means the directory points at the wrong data.
     if (names.decode(bytes.subarray(at + 30, at + 30 + nameLength)) !== entry.name) {
@@ -108,16 +109,17 @@ export const open = (
   limits: Limits,
   inflate: InflateRaw = inflateRawWeb
 ): Archive | SpreadsheetError => {
-  const entries = readDirectory(bytes, limits)
-  if (!Array.isArray(entries)) return entries as MalformedFile | LimitExceeded
+  const directory = readDirectory(bytes, limits)
+  if (directory instanceof MalformedFile || directory instanceof LimitExceeded) return directory
+  const entries = directory.entries
   const byName = new Map<string, ZipEntry>()
   // progress: one entry per iteration
-  for (const entry of entries as ReadonlyArray<ZipEntry>) {
+  for (const entry of entries) {
     const key = normalize(entry.name)
     if (byName.has(key)) return malformed("duplicate entry name", entry.name, entry.localOffset)
     byName.set(key, entry)
   }
-  const located = locate(bytes, entries as Directory)
+  const located = locate(bytes, directory)
   if (located instanceof MalformedFile) return located
   let inflated = 0
 
@@ -230,7 +232,7 @@ export const open = (
     })
 
   return {
-    entries: entries as ReadonlyArray<ZipEntry>,
+    entries,
     find: (name) => byName.get(normalize(name)),
     read,
     readAll,

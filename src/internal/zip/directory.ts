@@ -54,7 +54,10 @@ const findEocd = (bytes: Uint8Array, view: DataView): number => {
 }
 
 /** The entries, plus where the central directory starts (entry data must end before it). */
-export type Directory = ReadonlyArray<ZipEntry> & { readonly directoryStart: number }
+export interface Directory {
+  readonly entries: ReadonlyArray<ZipEntry>
+  readonly directoryStart: number
+}
 
 /**
  * Reads the central directory. Names are decoded as UTF-8 whatever the
@@ -137,7 +140,7 @@ export const readDirectory = (
     entries.push({ name, method, flags, crc32, compressedSize, uncompressedSize, localOffset })
     p = next
   }
-  return Object.assign(entries, { directoryStart: start })
+  return { entries, directoryStart: start }
 }
 
 /** Finds an extra field by id within [start, end); its data range, or undefined. */
