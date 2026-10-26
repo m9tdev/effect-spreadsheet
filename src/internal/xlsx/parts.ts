@@ -295,9 +295,13 @@ export const readStyles = (
   const custom = new Map<number, string>()
   const xfIds: Array<number> = []
   let inCellXfs = false
+  // custom codes only from <numFmts>: <dxfs><dxf><numFmt> (conditional
+  // formats) may reuse an id with another code
+  let inNumFmts = false
   const handler: XmlHandler = {
     open: (name, attributes) => {
-      if (name === "numFmt") {
+      if (name === "numFmts") inNumFmts = true
+      else if (name === "numFmt" && inNumFmts) {
         const id = attr(attributes, "numFmtId")
         const code = attr(attributes, "formatCode")
         if (id !== undefined && code !== undefined && /^\d{1,9}$/.test(id)) custom.set(Number(id), code)
@@ -309,6 +313,7 @@ export const readStyles = (
     },
     close: (name) => {
       if (name === "cellXfs") inCellXfs = false
+      else if (name === "numFmts") inNumFmts = false
     },
     text: () => undefined
   }

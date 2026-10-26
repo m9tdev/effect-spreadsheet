@@ -129,6 +129,16 @@ describe("xlsx: cells and rows", () => {
     expect(row2[4]!.formula).toBe("NOW()")
   })
 
+  it("number formats come only from <numFmts>, not from conditional formats (<dxfs>)", async () => {
+    const { sheets } = await readOk({
+      xfs: [0, 164],
+      numFmts: { 164: "0.00" },
+      stylesExtra: `<dxfs count="1"><dxf><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></dxf></dxfs>`,
+      sheets: [{ name: "S", data: `<row><c s="1"><v>45000</v></c></row>` }]
+    })
+    expect(sheets[0]![0]!.cells[0]).toEqual(Cell.number(0, 45000, { numFmt: "0.00" }))
+  })
+
   it("rows and cells without references, out-of-order cells, hidden rows", async () => {
     const { sheets } = await readOk({
       sheets: [{

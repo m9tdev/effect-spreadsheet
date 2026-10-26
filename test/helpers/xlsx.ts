@@ -24,6 +24,8 @@ export interface TestWorkbook {
   /** numFmtId per cellXfs entry, and custom codes. */
   readonly xfs?: ReadonlyArray<number>
   readonly numFmts?: Readonly<Record<number, string>>
+  /** Extra styles XML after <cellXfs> (e.g. <dxfs>). */
+  readonly stylesExtra?: string
   readonly date1904?: boolean
   readonly definedNames?: string
   /** Extra zip entries. */
@@ -61,7 +63,7 @@ export const xlsx = (book: TestWorkbook): Promise<Uint8Array> => {
   if (book.xfs !== undefined) {
     rels.push(`<Relationship Id="rIdT" Type="${REL}/styles" Target="styles.xml"/>`)
     const fmts = Object.entries(book.numFmts ?? {}).map(([id, code]) => `<numFmt numFmtId="${id}" formatCode="${escape(code)}"/>`).join("")
-    const styles = `<styleSheet ${NS}><numFmts>${fmts}</numFmts><cellXfs>${book.xfs.map((id) => `<xf numFmtId="${id}"/>`).join("")}</cellXfs></styleSheet>`
+    const styles = `<styleSheet ${NS}><numFmts>${fmts}</numFmts><cellXfs>${book.xfs.map((id) => `<xf numFmtId="${id}"/>`).join("")}</cellXfs>${book.stylesExtra ?? ""}</styleSheet>`
     entries.push({ name: `${dir}styles.xml`, data: enc(styles) })
   }
   entries.push({ name: `${dir}_rels/${base}.rels`, data: enc(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}</Relationships>`) })
