@@ -265,6 +265,25 @@ describe("xml tokenizer: rejected input", () => {
     expect(work).toBeLessThan(2_000)
   })
 
+  it("a tag complete in one piece but longer than the markup limit stops (the fast path checks it too)", () => {
+    const small = { ...limits, maxStringLength: 10 }
+    const { error } = tokenize([`<a${" ".repeat(200_000)}/>`], small)
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+  })
+
+  it("a duplicate among many attributes is found (past the linear check, in the Set)", () => {
+    const attrs = Array.from({ length: 20 }, (_, i) => `a${i}="${i}"`).join(" ")
+    expect(one(`<x ${attrs} a17="again"/>`).error).toMatchObject({ _tag: "MalformedFile", reason: "duplicate attribute a17 in <x>" })
+    expect(one(`<x ${attrs} a3="again"/>`).error).toMatchObject({ _tag: "MalformedFile", reason: "duplicate attribute a3 in <x>" })
+    expect(one(`<x ${attrs}/>`).error).toBeUndefined()
+  })
+
+  it("CDATA longer than maxStringLength (but within the markup slack) stops", () => {
+    const small = { ...limits, maxStringLength: 1000 }
+    const { error } = one(`<a><![CDATA[${"x".repeat(5000)}]]></a>`, small)
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 5000 })
+  })
+
   it("an attribute flood stops at maxXmlAttributes", () => {
     const attrs = Array.from({ length: 1000 }, (_, i) => `a${i}="${i}"`).join(" ")
     const { error } = one(`<x ${attrs}/>`)
