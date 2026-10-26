@@ -55,6 +55,8 @@ interface PendingCell {
   formula: Array<string> | undefined
   formulaLength: number
   inline: boolean
+  /** The value came from <is> (already unescaped), not from <v>. */
+  fromInline: boolean
 }
 
 /** Collects rows from tokenizer events. */
@@ -122,6 +124,7 @@ class SheetRows implements XmlHandler {
           cell.inline = false
           cell.value = [this.rich.take()]
           cell.type = "inlineStr"
+          cell.fromInline = true
         } else this.rich.close(name)
         return undefined
       }
@@ -205,7 +208,8 @@ class SheetRows implements XmlHandler {
       valueLength: 0,
       formula: undefined,
       formulaLength: 0,
-      inline: false
+      inline: false,
+      fromInline: false
     }
     this.target = undefined
     return undefined
@@ -242,7 +246,8 @@ class SheetRows implements XmlHandler {
       }
       case "inlineStr":
       case "str":
-        return Cell.text(column, pending.type === "str" ? unescapeXstring(raw) : raw, meta)
+        // <is> text is unescaped already; text in <v> (str, or inlineStr written that way) not yet
+        return Cell.text(column, pending.fromInline ? raw : unescapeXstring(raw), meta)
       case "b": {
         const v = raw.trim()
         if (v === "1" || v === "true") return Cell.boolean(column, true, meta)
