@@ -229,10 +229,10 @@ startup deaths the oracle aborts with exit 2, instead of respawning forever (e.g
 - a `timeout` result is retried by the next run without `--force` (H).
 
 Cases that need SheetJS are skipped, not failed, when it is missing. With
-`REQUIRE_ORACLE=1` (as in CI) they fail instead, the same convention as the vitest
-oracle. Temp dirs left by a SIGKILLed selftest are removed at the next start. The parent only writes the expected
-file itself for `timeout` and `crash`; `ok`, `error` and `tooBig` documents come from the
-child.
+`REQUIRE_ORACLE=1` (as in CI) they fail instead, the same convention as the vitest oracle.
+Temp dirs left by a SIGKILLed selftest are removed at the next start. The parent only
+writes the expected file itself for `timeout` and `crash`; `ok`, `error` and `tooBig`
+documents come from the child.
 
 SheetJS calls:
 
