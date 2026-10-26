@@ -37,7 +37,7 @@ const values = (rows: ReadonlyArray<Workbook.Row>) =>
 
 describe("number formats and serial dates", () => {
   it("tells date/time codes from number codes", () => {
-    for (const code of ["yyyy-mm-dd", "m/d/yy", "h:mm", "[h]:mm:ss", "[mm]:ss", "mmss.0", "[$-409]mmmm d, yyyy;@", "dd/mm/yyyy hh:mm:ss.000", "AM/PM h", "\"Date:\" yyyy", "yyyy\\-mm"]) {
+    for (const code of ["yyyy-mm-dd", "m/d/yy", "h:mm", "[h]:mm:ss", "[h]", "[ss]", "[mm]:ss", "mmss.0", "[$-409]mmmm d, yyyy;@", "dd/mm/yyyy hh:mm:ss.000", "AM/PM h", "\"Date:\" yyyy", "yyyy\\-mm"]) {
       expect(isDateCode(code), code).toBe(true)
     }
     for (const code of ["General", "0.00", "#,##0", "0.00E+00", "@", "[Red][<0]\"neg\";0", "\"days\" 0", "0 \\h", "_(* #,##0_)", "# ?/?", "[Color10]0", "0%"]) {
@@ -51,6 +51,10 @@ describe("number formats and serial dates", () => {
     expect(formatFor(4, new Map())).toEqual({ code: "#,##0.00", date: false })
     expect(formatFor(14, new Map([[14, "0.00"]]))).toEqual({ code: "0.00", date: false })
     expect(formatFor(31, new Map())).toEqual({ code: undefined, date: true })
+    // the Thai built-in date/time ids
+    for (let id = 71; id <= 81; id++) expect(formatFor(id, new Map()), String(id)).toEqual({ code: undefined, date: true })
+    expect(formatFor(70, new Map()).date).toBe(false)
+    expect(formatFor(82, new Map()).date).toBe(false)
     expect(formatFor(500, new Map())).toEqual({ code: undefined, date: false })
   })
 
