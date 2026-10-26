@@ -924,10 +924,18 @@ export function childErrorDetail(err) {
   // ends in Error or Exception, so "debug: x", "code: 'ERR_X'" or source lines don't count.
   const isErrorLine = (l) => /^(?:[\w$]*(?:Error|Exception)|[\w$]+ \[[\w$]*(?:Error|Exception)\]): /.test(l)
   let line
-  const first = raw.findIndex(isFrame)
+  // The thrown error's stack is the LAST run of least-indented frames: errors the child logged
+  // earlier (console.error(err), console.trace) print their own frame runs before it, and nested
+  // errors ([errors], properties, [cause]) are indented deeper.
+  const indent = (l) => l.length - l.trimStart().length
+  const frames = raw.filter(isFrame)
+  const minIndent = frames.length ? Math.min(...frames.map(indent)) : 0
+  let first = -1
+  // progress: i decreases every step
+  for (let i = raw.length - 1; i > 0; i--) if (isFrame(raw[i]) && indent(raw[i]) === minIndent && !isFrame(raw[i - 1])) { first = i; break }
   if (first > 0) {
     // An uncaught error: Node prints its header (and any further message lines) after a blank
-    // line, right before the first stack frame. Nested errors (AggregateError [errors], error
+    // line, right before the first frame of that run. Nested errors (AggregateError [errors], error
     // properties, [cause]) are indented and come later, so they never win. In that block, take
     // the first error-like line, else its first line (e.g. "MyErr: mine" for a custom name).
     let start = first

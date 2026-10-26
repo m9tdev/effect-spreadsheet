@@ -275,3 +275,22 @@ test("childErrorDetail: nested errors (AggregateError, error properties, cause, 
   assert.equal(detail('throw new Error("wrapped: TypeError: inner")'), "Error: wrapped: TypeError: inner")
   assert.equal(detail('throw new Error("line one\\nTypeError: inner")'), "Error: line one")
 })
+
+async function thrownDetail(code) {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  try { execFileSync(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { return childErrorDetail(e) }
+  assert.fail("child should fail")
+}
+
+test("childErrorDetail: an Error the child logged earlier doesn't beat the one it throws", async () => {
+  assert.equal(await thrownDetail('console.error(new Error("logged earlier")); throw new TypeError("the real one")'), "TypeError: the real one")
+})
+
+test("childErrorDetail: a console.trace earlier doesn't beat the error the child throws", async () => {
+  assert.equal(await thrownDetail('console.trace("tracing"); throw new TypeError("the real one")'), "TypeError: the real one")
+})
+
+test("childErrorDetail: logged error and trace earlier, then a nested error: the thrown outer one", async () => {
+  assert.equal(await thrownDetail('console.error(new Error("logged")); console.trace("tracing"); throw new AggregateError([new RangeError("b")], "agg")'), "AggregateError: agg")
+})
