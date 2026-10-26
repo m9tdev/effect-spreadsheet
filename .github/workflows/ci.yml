@@ -55,6 +55,8 @@ jobs:
       - name: Corpus checks
         env:
           SHEETJS_DIR: ${{ runner.temp }}/sheetjs
+          # fail instead of skipping the selftest's SheetJS cases if SheetJS is missing
+          REQUIRE_ORACLE: "1"
         run: |
           node --test scripts/corpus/*.test.mjs
           node scripts/corpus/generate.mjs --check
