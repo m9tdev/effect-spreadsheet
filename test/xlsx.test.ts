@@ -212,7 +212,8 @@ describe("xlsx: sheet details", () => {
     Effect.runPromise(Effect.exit(Effect.flatMap(Xlsx.read(bytes, { limits }), (wb) => Workbook.sheetDetails(wb, 0))))
 
   it("hidden columns as merged spans, merges, the declared dimension", async () => {
-    const exit = await details(await withLayout(`<col min="2" max="3" hidden="1"/><col min="4" max="4" hidden="true"/><col min="6" max="6" width="9"/><col min="8" max="20000" hidden="1"/><col min="9" max="9" hidden="1"/>`))
+    // out of order on purpose: spans are sorted before they are merged
+    const exit = await details(await withLayout(`<col min="12" max="12" hidden="1"/><col min="2" max="3" hidden="1"/><col min="4" max="4" hidden="true"/><col min="6" max="6" width="9"/><col min="8" max="20000" hidden="1"/><col min="9" max="9" hidden="1"/>`))
     expect(Exit.isSuccess(exit) && exit.value).toEqual({
       hiddenColumns: [{ first: 1, last: 3 }, { first: 7, last: 16383 }],
       merges: [
