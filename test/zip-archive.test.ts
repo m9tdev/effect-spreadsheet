@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs"
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import { type Archive, inflateBudget, open } from "../src/internal/zip/archive.ts"
-import { crc32 } from "../src/internal/zip/crc32.ts"
+import { crc32, CRC32_START, crc32Final, crc32Update } from "../src/internal/zip/crc32.ts"
 import { readDirectory, type ZipEntry } from "../src/internal/zip/directory.ts"
 import type { Inflater, InflateRaw } from "../src/internal/zip/inflate.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
@@ -41,6 +41,11 @@ describe("crc32", () => {
     const data = pseudoRandom(100_000)
     expect(crc32(data)).toBe(testCrc32(data))
     expect(crc32(new Uint8Array(0))).toBe(0)
+    // every length mod 4, and running updates split anywhere
+    for (let n = 1; n <= 33; n++) expect(crc32(data.subarray(0, n)), `n=${n}`).toBe(testCrc32(data.subarray(0, n)))
+    for (const cut of [1, 2, 3, 5, 4097]) {
+      expect(crc32Final(crc32Update(crc32Update(CRC32_START, data.subarray(0, cut)), data.subarray(cut)))).toBe(testCrc32(data))
+    }
   })
 })
 
