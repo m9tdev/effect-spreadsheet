@@ -133,6 +133,16 @@ describe("xlsx: cells and rows", () => {
     expect(row2[4]!.formula).toBe("NOW()")
   })
 
+  it("_xHHHH_ escapes are decoded once, in <is>, in <v> of str and of inlineStr", async () => {
+    const { sheets } = await readOk({
+      sheets: [{
+        name: "S",
+        data: `<row><c t="inlineStr"><is><t>a_x0041_ _x005F_x0042_</t></is></c><c t="str"><v>b_x0043_</v></c><c t="inlineStr"><v>c_x0044_</v></c></row>`
+      }]
+    })
+    expect(sheets[0]![0]!.cells.map(Cell.value)).toEqual(["aA _x0042_", "bC", "cD"])
+  })
+
   it("number formats come only from <numFmts>, not from conditional formats (<dxfs>)", async () => {
     const { sheets } = await readOk({
       xfs: [0, 164],
@@ -167,14 +177,23 @@ describe("xlsx: cells and rows", () => {
 
   it("sheet visibility, defined names, chart sheets, rows re-runnable", async () => {
     const bytes = await xlsx({
-      sheets: [{ name: "A", data: `<row><c><v>1</v></c></row>` }, { name: "B", state: "hidden" }, { name: "C", state: "veryHidden", kind: "chartsheet" }],
+      sheets: [
+        { name: "A", data: `<row><c><v>1</v></c></row>` },
+        { name: "B", state: "hidden" },
+        // parts that hold cell-like XML, but aren't worksheets: no rows, no details
+        { name: "C", state: "veryHidden", kind: "chartsheet", data: `<row><c><v>9</v></c></row>` },
+        { name: "D", kind: "dialogsheet", data: `<row><c><v>9</v></c></row>` },
+        { name: "E", kind: "xlMacrosheet", data: `<row><c><v>9</v></c></row>` }
+      ],
       definedNames: `<definedName name="Total">A!$A$1</definedName><definedName name="_xlnm.Print_Area" localSheetId="1" hidden="1">B!$A$1:$C$3</definedName><definedName name="Bad" localSheetId="7">#REF!</definedName>`
     })
     const wb = await Effect.runPromise(Xlsx.read(bytes))
     expect(wb.sheets).toEqual([
       { name: "A", index: 0, visibility: "visible" },
       { name: "B", index: 1, visibility: "hidden" },
-      { name: "C", index: 2, visibility: "veryHidden" }
+      { name: "C", index: 2, visibility: "veryHidden" },
+      { name: "D", index: 3, visibility: "visible" },
+      { name: "E", index: 4, visibility: "visible" }
     ])
     expect(wb.definedNames).toEqual([
       { name: "Total", formula: "A!$A$1", hidden: false },
@@ -184,7 +203,10 @@ describe("xlsx: cells and rows", () => {
     const rows = Workbook.rows(wb, "a")
     expect(values(Array.from(await Effect.runPromise(Stream.runCollect(rows))))).toEqual([[0, false, [[0, "Number", 1]]]])
     expect(Array.from(await Effect.runPromise(Stream.runCollect(rows))).length).toBe(1)
-    expect(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, "C"))))).toEqual([])
+    for (const name of ["C", "D", "E"]) {
+      expect(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, name)))), name).toEqual([])
+      expect(await Effect.runPromise(Workbook.sheetDetails(wb, name)), name).toEqual({ hiddenColumns: [], merges: [] })
+    }
   })
 
   it("finds the workbook through the relationships, wherever it is", async () => {
