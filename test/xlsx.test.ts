@@ -309,7 +309,8 @@ describe("xlsx: hostile and broken files", () => {
     const wb = await Effect.runPromise(Xlsx.read(missing))
     expect(wb.sheets.map((s) => s.name)).toEqual(["Good", "Gone"])
     expect(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, "Good")))).length).toBe(1)
-    for (const run of [Stream.runCollect(Workbook.rows(wb, "Gone")), Workbook.sheetDetails(wb, "Gone")]) {
+    const runs: ReadonlyArray<Effect.Effect<unknown, unknown>> = [Stream.runCollect(Workbook.rows(wb, "Gone")), Workbook.sheetDetails(wb, "Gone")]
+    for (const run of runs) {
       expect(failureOf(await Effect.runPromise(Effect.exit(run)))).toMatchObject({
         _tag: "MalformedFile",
         format: "xlsx",
