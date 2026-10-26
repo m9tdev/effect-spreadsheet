@@ -30,6 +30,8 @@ export interface TestWorkbook {
   readonly definedNames?: string
   /** Extra zip entries. */
   readonly extra?: ReadonlyArray<{ readonly name: string; readonly data: Uint8Array }>
+  /** Entries to leave out of the zip (by name), for broken packages. */
+  readonly omit?: ReadonlyArray<string>
   /** Where the workbook part lives (default xl/workbook.xml). */
   readonly workbookPath?: string
 }
@@ -68,5 +70,6 @@ export const xlsx = (book: TestWorkbook): Promise<Uint8Array> => {
   }
   entries.push({ name: `${dir}_rels/${base}.rels`, data: enc(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}</Relationships>`) })
   for (const e of book.extra ?? []) entries.push(e)
-  return buildZip(entries)
+  const omit = new Set(book.omit ?? [])
+  return buildZip(entries.filter((e) => !omit.has(e.name)))
 }

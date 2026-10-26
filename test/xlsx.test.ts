@@ -302,10 +302,20 @@ describe("xlsx: hostile and broken files", () => {
     const noWorkbook = await buildZip([{ name: "_rels/.rels", data: enc(`<Relationships xmlns="x"/>`) }, { name: "xl/other.xml", data: enc("<a/>") }])
     expect(failureOf(await readExit(noWorkbook))).toMatchObject({ _tag: "MalformedFile", reason: "workbook part xl/workbook.xml is missing" })
     // a sheet part that isn't there: that sheet fails, the others read
-    const missing = await xlsx({ sheets: [{ name: "Good", data: `<row><c><v>1</v></c></row>` }, { name: "Gone" }] })
-    const wb = await Effect.runPromise(Xlsx.read(missing.slice()))
-    expect(wb.sheets.length).toBe(2)
-    const book = await xlsx({ sheets: [{ name: "Good", data: `<row><c><v>1</v></c></row>` }] })
+    const missing = await xlsx({
+      sheets: [{ name: "Good", data: `<row><c><v>1</v></c></row>` }, { name: "Gone" }],
+      omit: ["xl/worksheets/sheet2.xml"]
+    })
+    const wb = await Effect.runPromise(Xlsx.read(missing))
+    expect(wb.sheets.map((s) => s.name)).toEqual(["Good", "Gone"])
+    expect(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, "Good")))).length).toBe(1)
+    for (const run of [Stream.runCollect(Workbook.rows(wb, "Gone")), Workbook.sheetDetails(wb, "Gone")]) {
+      expect(failureOf(await Effect.runPromise(Effect.exit(run)))).toMatchObject({
+        _tag: "MalformedFile",
+        format: "xlsx",
+        reason: "sheet part xl/worksheets/sheet2.xml is missing"
+      })
+    }
     const relsXml = `<Relationships xmlns="x"><Relationship Id="rId1" Type="http://x/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://x/worksheet" Target="../../../etc/passwd"/></Relationships>`
     const two = await buildZip([
       { name: "_rels/.rels", data: enc(`<Relationships xmlns="x"><Relationship Id="r" Type="http://x/officeDocument" Target="xl/workbook.xml"/></Relationships>`) },
@@ -319,7 +329,6 @@ describe("xlsx: hostile and broken files", () => {
       const error = failureOf(await Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb2, name)))))
       expect(error, name).toMatchObject({ _tag: "MalformedFile", format: "xlsx" })
     }
-    expect(book.length).toBeGreaterThan(0)
   })
 
   it("a sheet that inflates past the archive budget stops there", async () => {
