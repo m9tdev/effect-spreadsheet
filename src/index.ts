@@ -2,7 +2,8 @@
  * effect-spreadsheet: read spreadsheet files with Effect v4 and pure
  * TypeScript parsers.
  *
- * Per-format readers live in subpaths: `effect-spreadsheet/csv`.
+ * Per-format readers live in subpaths: `effect-spreadsheet/csv`,
+ * `effect-spreadsheet/xlsx`.
  *
  * @since 0.1.0
  */

@@ -147,7 +147,7 @@ describe("format detection", () => {
 describe("Spreadsheet.read dispatch", () => {
   it.effect("unimplemented formats fail with UnsupportedFormat naming the format", () =>
     Effect.gen(function*() {
-      for (const [bytes, format] of [[XLSX, "xlsx"], [XLSB, "xlsb"], [CFB, "cfb"], [enc("%PDF-1.4"), "pdf"]] as const) {
+      for (const [bytes, format] of [[XLSB, "xlsb"], [CFB, "cfb"], [enc("%PDF-1.4"), "pdf"]] as const) {
         const error = yield* Effect.flip(Spreadsheet.read(bytes))
         assert.strictEqual(error._tag, "UnsupportedFormat")
         if (error._tag === "UnsupportedFormat") assert.strictEqual(error.format, format)
@@ -159,11 +159,15 @@ describe("Spreadsheet.read dispatch", () => {
       // A caller holding "report.csv" can only pass the bytes (plus options
       // that carry no name); the bytes decide.
       const options = { csv: { sheetName: "report.csv" } } as const
-      for (const bytes of [CFB, XLSX, XLSB]) {
+      for (const bytes of [CFB, XLSB]) {
         const error = yield* Effect.flip(Spreadsheet.read(bytes, options))
         assert.strictEqual(error._tag, "UnsupportedFormat")
         if (error._tag === "UnsupportedFormat") assert.notStrictEqual(error.format, "csv")
       }
+      // the XLSX stub has empty parts: the XLSX reader rejects it, not the CSV one
+      const xlsx = yield* Effect.flip(Spreadsheet.read(XLSX, options))
+      assert.strictEqual(xlsx._tag, "MalformedFile")
+      if (xlsx._tag === "MalformedFile") assert.notStrictEqual(xlsx.format, "csv")
       // and text named like a workbook is still CSV
       const wb = yield* Spreadsheet.read(enc("a,b\n"), { csv: { sheetName: "book.xlsx" } })
       assert.strictEqual(wb.format, "csv")

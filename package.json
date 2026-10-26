@@ -23,6 +23,10 @@
     "./csv": {
       "types": "./dist/csv/index.d.ts",
       "default": "./dist/csv/index.js"
+    },
+    "./xlsx": {
+      "types": "./dist/xlsx/index.d.ts",
+      "default": "./dist/xlsx/index.js"
     }
   },
   "scripts": {

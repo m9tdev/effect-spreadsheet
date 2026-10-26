@@ -13,7 +13,9 @@ describe("src rules (AGENTS.md)", () => {
     for (const file of files(srcDir)) {
       const text = readFileSync(file, "utf8")
       expect(text, file).not.toMatch(/from\s+["']node:|import\(\s*["']node:|\brequire\(/)
-      expect(text, file).not.toMatch(/from\s+["'][^"']*(xlsx|sheetjs)[^"']*["']/i)
+      // a package import of SheetJS / "xlsx" (not a relative path, not our own subpath)
+      expect(text, file).not.toMatch(/from\s+["'](?![./]|effect-spreadsheet\/)[^"']*(xlsx|sheetjs)[^"']*["']/i)
+      expect('import X from "xlsx"').toMatch(/from\s+["'](?![./]|effect-spreadsheet\/)[^"']*(xlsx|sheetjs)[^"']*["']/i)
     }
   })
 

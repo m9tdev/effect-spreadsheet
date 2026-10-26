@@ -105,6 +105,24 @@ export type Format =
   | "unknown"
 
 /**
+ * A defined name (named range, print area, ...), as metadata only: its
+ * formula text is not evaluated. `scope` is the index of the sheet it
+ * belongs to (in `sheets` order), absent for workbook-wide names.
+ *
+ * @since 0.1.0
+ * @category schemas
+ */
+export const DefinedName = Schema.Struct({
+  name: Schema.String,
+  formula: Schema.String,
+  scope: Schema.optionalKey(Schema.Int),
+  hidden: Schema.Boolean
+})
+
+/** @since 0.1.0 @category models */
+export type DefinedName = typeof DefinedName.Type
+
+/**
  * Options for {@link rows}.
  *
  * @since 0.1.0
@@ -133,6 +151,8 @@ export interface Workbook {
   /** The format the workbook was read from, e.g. `"csv"`, `"xlsx"`. */
   readonly format: Format
   readonly sheets: ReadonlyArray<SheetInfo>
+  /** Defined names (metadata only; empty for formats without them). */
+  readonly definedNames: ReadonlyArray<DefinedName>
   /** The limits resolved when the workbook was read; {@link rows} applies its overrides on top. */
   readonly limits: Limits
   /** @internal */
@@ -152,11 +172,13 @@ export interface Workbook {
 export const make = (options: {
   readonly format: Format
   readonly sheets: ReadonlyArray<SheetInfo>
+  readonly definedNames?: ReadonlyArray<DefinedName> | undefined
   readonly limits: Limits
   readonly rows: (sheet: SheetInfo, limits: Limits) => Stream.Stream<Row, SpreadsheetError>
 }): Workbook => ({
   format: options.format,
   sheets: options.sheets,
+  definedNames: options.definedNames ?? [],
   limits: options.limits,
   [RowsSource]: options.rows
 })
