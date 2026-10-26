@@ -210,8 +210,15 @@ test("childErrorDetail: a timeout or signal is kept when the child wrote to stde
   const { childErrorDetail } = await import("./lib.mjs")
   const { execFileSync } = await import("node:child_process")
   const fail = (args, opts = {}) => { try { execFileSync(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], ...opts }) } catch (e) { return e } assert.fail("child should fail") }
-  // writes a line, then hangs until the timeout kills it
-  const t = fail(["-e", 'process.stderr.write("partial output\\n"); setTimeout(() => {}, 60_000)'], { timeout: 500, killSignal: "SIGKILL" })
+  // writes a line, then hangs until the timeout kills it. Under heavy load Node can take longer
+  // than a short timeout just to start, and is then killed before it writes anything; so retry
+  // with a longer timeout until the line is there (normally the first 500 ms try is enough).
+  let t
+  for (const timeout of [500, 2_000, 8_000, 30_000]) {
+    t = fail(["-e", 'process.stderr.write("partial output\\n"); setTimeout(() => {}, 60_000)'], { timeout, killSignal: "SIGKILL" })
+    if (t.stderr?.toString().includes("partial output")) break
+  }
+  assert.equal(t.code, "ETIMEDOUT")
   assert.equal(childErrorDetail(t), "ETIMEDOUT: partial output")
   // killed by a signal
   const s = fail(["-e", 'process.stderr.write("about to die\\n"); process.kill(process.pid, "SIGTERM")'])
