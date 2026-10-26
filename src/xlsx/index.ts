@@ -85,6 +85,23 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     const relationships = yield* readRelationships(archive, workbookEntry.name, limits)
     const byId = new Map(relationships.map((r) => [r.id, r]))
 
+    // Two sheets may not read the same worksheet part: the inflate budget
+    // counts each part once, so N sheets on one part would inflate it N
+    // times for free. Excel never writes this.
+    const owners = new Map<string, string>()
+    // progress: one sheet per iteration (bounded by maxSheets)
+    for (const sheet of workbook.sheets) {
+      const rel = sheet.relationshipId === undefined ? undefined : byId.get(sheet.relationshipId)
+      if (rel === undefined || rel.part === undefined || relationshipKind(rel.type) !== "worksheet") continue
+      const part = archive.find(rel.part)?.name ?? rel.part
+      const key = part.toLowerCase()
+      const owner = owners.get(key)
+      if (owner !== undefined) {
+        return yield* malformed(`sheets ${JSON.stringify(owner)} and ${JSON.stringify(sheet.name)} share part ${part}`, workbookEntry.name)
+      }
+      owners.set(key, sheet.name)
+    }
+
     const partEntry = (kind: string) => {
       const rel = relationships.find((r) => relationshipKind(r.type) === kind && r.part !== undefined)
       return rel === undefined ? undefined : archive.find(rel.part!)

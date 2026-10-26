@@ -359,6 +359,29 @@ describe("xlsx: hostile and broken files", () => {
     }
   })
 
+  it("sheets sharing one worksheet part are MalformedFile (each would re-inflate it for free)", async () => {
+    const enc8 = (s: string) => new TextEncoder().encode(s)
+    const pkg = (sheets: string, rels: string) =>
+      buildZip([
+        { name: "_rels/.rels", data: enc8(`<Relationships xmlns="x"><Relationship Id="r" Type="http://x/officeDocument" Target="xl/workbook.xml"/></Relationships>`) },
+        { name: "xl/workbook.xml", data: enc8(`<workbook xmlns="x" xmlns:r="y"><sheets>${sheets}</sheets></workbook>`) },
+        { name: "xl/_rels/workbook.xml.rels", data: enc8(`<Relationships xmlns="x">${rels}</Relationships>`) },
+        { name: "xl/worksheets/sheet1.xml", data: enc8(sheetXml(`<row><c><v>1</v></c></row>`)) }
+      ])
+    const rel = (id: string, target = "worksheets/sheet1.xml") => `<Relationship Id="${id}" Type="http://x/worksheet" Target="${target}"/>`
+    // N sheets on one r:id
+    const sameId = await pkg(Array.from({ length: 50 }, (_, i) => `<sheet name="S${i}" r:id="rId1"/>`).join(""), rel("rId1"))
+    expect(failureOf(await readExit(sameId))).toMatchObject({
+      _tag: "MalformedFile",
+      reason: `sheets "S0" and "S1" share part xl/worksheets/sheet1.xml`
+    })
+    // two relationships with the same target (written differently)
+    const sameTarget = await pkg(`<sheet name="A" r:id="rId1"/><sheet name="B" r:id="rId2"/>`, rel("rId1") + rel("rId2", "/XL/worksheets/sheet1.xml"))
+    expect(failureOf(await readExit(sameTarget))).toMatchObject({ _tag: "MalformedFile", reason: `sheets "A" and "B" share part xl/worksheets/sheet1.xml` })
+    // one sheet on it is fine
+    expect(Exit.isSuccess(await readExit(await pkg(`<sheet name="A" r:id="rId1"/>`, rel("rId1"))))).toBe(true)
+  })
+
   it("a sheet that inflates past the archive budget stops there", async () => {
     // ~96 MiB of whitespace and unknown elements inside sheetData: tiny
     // compressed, past the 64 MiB floor
