@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { FuzzHost } from "./fuzz/host.ts"
 import type { FuzzTask } from "./fuzz/tasks.ts"
 import { enc } from "./helpers/run.ts"
+import { xlsx } from "./helpers/xlsx.ts"
 import { makeZip } from "./helpers/zip.ts"
 
 // Per case, in a worker that is terminated when it overruns. The point is
@@ -158,4 +159,19 @@ describe("fuzz: never a defect, never a hang", () => {
       { numRuns: 500 }
     )
   })
+
+  it("xlsx: random sheet contents in a valid package", async () => {
+    const fragment = fc.constantFrom(
+      "<row>", "</row>", "<row r=\"3\" hidden=\"1\">", "<row r=\"0\">", "<row r=\"1048577\">", "<c>", "</c>", "<c r=\"B2\" t=\"s\">", "<c t=\"inlineStr\"><is><t>x</t></is>",
+      "<c r=\"XFE1\">", "<c s=\"1\">", "<c t=\"b\">", "<c t=\"e\">", "<c t=\"d\">", "<v>", "</v>", "1", "0", "-2.5e3", "2026-01-02", "#N/A", "<f>", "</f>", "SUM(A1)",
+      "<is>", "</is>", "<t>", "</t>", "<rPh>", "</rPh>", "&amp;", "_x0041_", "<x/>", " "
+    )
+    await fc.assert(
+      fc.asyncProperty(fc.array(fragment, { maxLength: 60 }), async (parts) => {
+        const bytes = await xlsx({ sharedStrings: ["a", "b"], xfs: [0, 14], sheets: [{ name: "S", data: parts.join("") }] })
+        await terminates({ op: "read", bytes })
+      }),
+      { numRuns: 300 }
+    )
+  }, 120_000)
 })

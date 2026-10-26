@@ -4,7 +4,7 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { open } from "../src/internal/zip/archive.ts"
 import { parse, XmlDecoder } from "../src/internal/xml/parse.ts"
-import { type XmlHandler, XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
+import { isName, type XmlHandler, XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
 import { isSpreadsheetError, type SpreadsheetError } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import { failureOf } from "./helpers/run.ts"
@@ -205,6 +205,20 @@ describe("xml tokenizer: split invariance and cost", () => {
 
 })
 
+describe("xml names", () => {
+  it("accepts and rejects exactly what the original name regex did", () => {
+    const NAME = /^[^\s<>/=!?"'&\-.\d][^\s<>/=!?"'&]*$/
+    const chars = [..."ab:_-.09<>/=!?\"'&", "\t", "\n", "\v", "\f", "\r", " ", "\u0001", "\u001F", "\u0085", "\u00A0", "\u1680", "\u2000", "\u200A", "\u200B", "\u2028", "\u2029", "\u202F", "\u205F", "\u3000", "\uFEFF", "é"]
+    fc.assert(
+      fc.property(fc.array(fc.constantFrom(...chars), { maxLength: 6 }), (parts) => {
+        const name = parts.join("")
+        expect(isName(name), JSON.stringify(name)).toBe(NAME.test(name))
+      }),
+      { numRuns: 5000 }
+    )
+  })
+})
+
 describe("xml tokenizer: normalization (XML 1.0)", () => {
   it("line ends in text and CDATA become LF (§2.11), however split; &#13; stays", () => {
     const doc = "<a>x\r\ny\rz\n<![CDATA[p\r\nq\rr]]>&#13;</a>"
@@ -263,6 +277,25 @@ describe("xml tokenizer: rejected input", () => {
     const { error, work } = one(doc)
     expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxXmlDepth", max: 128 })
     expect(work).toBeLessThan(2_000)
+  })
+
+  it("a tag complete in one piece but longer than the markup limit stops (the fast path checks it too)", () => {
+    const small = { ...limits, maxStringLength: 10 }
+    const { error } = tokenize([`<a${" ".repeat(200_000)}/>`], small)
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+  })
+
+  it("a duplicate among many attributes is found (past the linear check, in the Set)", () => {
+    const attrs = Array.from({ length: 20 }, (_, i) => `a${i}="${i}"`).join(" ")
+    expect(one(`<x ${attrs} a17="again"/>`).error).toMatchObject({ _tag: "MalformedFile", reason: "duplicate attribute a17 in <x>" })
+    expect(one(`<x ${attrs} a3="again"/>`).error).toMatchObject({ _tag: "MalformedFile", reason: "duplicate attribute a3 in <x>" })
+    expect(one(`<x ${attrs}/>`).error).toBeUndefined()
+  })
+
+  it("CDATA longer than maxStringLength (but within the markup slack) stops", () => {
+    const small = { ...limits, maxStringLength: 1000 }
+    const { error } = one(`<a><![CDATA[${"x".repeat(5000)}]]></a>`, small)
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 5000 })
   })
 
   it("an attribute flood stops at maxXmlAttributes", () => {
@@ -361,7 +394,7 @@ describe("xml bytes", () => {
         if (!statSync(`${dir}/${name}`).isFile()) continue
         const bytes = new Uint8Array(readFileSync(`${dir}/${name}`))
         if (!(bytes[0] === 0x50 && bytes[1] === 0x4B)) continue
-        const archive = open(bytes, { ...limits, maxCompressionRatio: 10_000 })
+        const archive = open(bytes, limits)
         if ("_tag" in archive) throw new Error(`${name}: ${archive._tag}`)
         for (const entry of archive.entries.filter((e) => /\.(xml|rels)$/.test(e.name))) {
           const handler: XmlHandler = { open: () => undefined, close: () => undefined, text: () => undefined }

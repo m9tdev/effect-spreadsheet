@@ -9,11 +9,24 @@ const files = (dir: string): Array<string> =>
   )
 
 describe("src rules (AGENTS.md)", () => {
+  // a package import of SheetJS / "xlsx" (not a relative path, not our own subpath)
+  const PACKAGE_XLSX = /from\s+["'](?![./]|effect-spreadsheet\/)[^"']*(xlsx|sheetjs)[^"']*["']/i
+  // anything named sheetjs, relative paths included
+  const ANY_SHEETJS = /from\s+["'][^"']*sheetjs/i
+
+  it("the import patterns catch what they should, and allow our own modules", () => {
+    expect('import X from "xlsx"').toMatch(PACKAGE_XLSX)
+    expect('import X from "../../sheetjs/xlsx.mjs"').toMatch(ANY_SHEETJS)
+    expect('import X from "./xlsx/index.ts"').not.toMatch(PACKAGE_XLSX)
+    expect('import X from "effect-spreadsheet/xlsx"').not.toMatch(PACKAGE_XLSX)
+  })
+
   it("no node: imports, no require, no SheetJS import under src", () => {
     for (const file of files(srcDir)) {
       const text = readFileSync(file, "utf8")
       expect(text, file).not.toMatch(/from\s+["']node:|import\(\s*["']node:|\brequire\(/)
-      expect(text, file).not.toMatch(/from\s+["'][^"']*(xlsx|sheetjs)[^"']*["']/i)
+      expect(text, file).not.toMatch(PACKAGE_XLSX)
+      expect(text, file).not.toMatch(ANY_SHEETJS)
     }
   })
 

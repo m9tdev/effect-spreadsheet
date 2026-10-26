@@ -105,6 +105,58 @@ export type Format =
   | "unknown"
 
 /**
+ * A defined name (named range, print area, ...), as metadata only: its
+ * formula text is not evaluated. `scope` is the index of the sheet it
+ * belongs to (in `sheets` order), absent for workbook-wide names.
+ *
+ * @since 0.1.0
+ * @category schemas
+ */
+export const DefinedName = Schema.Struct({
+  name: Schema.String,
+  formula: Schema.String,
+  scope: Schema.optionalKey(Schema.Int),
+  hidden: Schema.Boolean
+})
+
+/** @since 0.1.0 @category models */
+export type DefinedName = typeof DefinedName.Type
+
+/**
+ * A run of columns, 0-based and inclusive.
+ *
+ * @since 0.1.0
+ * @category schemas
+ */
+export const ColumnSpan = Schema.Struct({ first: Schema.Int, last: Schema.Int })
+
+/** @since 0.1.0 @category models */
+export type ColumnSpan = typeof ColumnSpan.Type
+
+/**
+ * Sheet layout that isn't part of the rows: hidden columns (sorted,
+ * merged spans), merged ranges (as the file lists them) and the declared
+ * dimension (informative only, absent if the file has none). From
+ * {@link sheetDetails}.
+ *
+ * @since 0.1.0
+ * @category schemas
+ */
+export const SheetDetails = Schema.Struct({
+  hiddenColumns: Schema.Array(ColumnSpan),
+  merges: Schema.Array(Range),
+  dimension: Schema.optionalKey(Range)
+})
+
+/** @since 0.1.0 @category models */
+export type SheetDetails = typeof SheetDetails.Type
+
+const NO_DETAILS: SheetDetails = { hiddenColumns: [], merges: [] }
+
+/** @internal */
+export const DetailsSource: unique symbol = Symbol.for("effect-spreadsheet/Workbook/details") as never
+
+/**
  * Options for {@link rows}.
  *
  * @since 0.1.0
@@ -133,10 +185,14 @@ export interface Workbook {
   /** The format the workbook was read from, e.g. `"csv"`, `"xlsx"`. */
   readonly format: Format
   readonly sheets: ReadonlyArray<SheetInfo>
+  /** Defined names (metadata only; empty for formats without them). */
+  readonly definedNames: ReadonlyArray<DefinedName>
   /** The limits resolved when the workbook was read; {@link rows} applies its overrides on top. */
   readonly limits: Limits
   /** @internal */
   readonly [RowsSource]: (sheet: SheetInfo, limits: Limits) => Stream.Stream<Row, SpreadsheetError>
+  /** @internal */
+  readonly [DetailsSource]: (sheet: SheetInfo, limits: Limits) => Effect.Effect<SheetDetails, SpreadsheetError>
 }
 
 /**
@@ -152,13 +208,18 @@ export interface Workbook {
 export const make = (options: {
   readonly format: Format
   readonly sheets: ReadonlyArray<SheetInfo>
+  readonly definedNames?: ReadonlyArray<DefinedName> | undefined
   readonly limits: Limits
   readonly rows: (sheet: SheetInfo, limits: Limits) => Stream.Stream<Row, SpreadsheetError>
+  /** Sheet layout; formats without any give no hidden columns, no merges, no dimension. */
+  readonly details?: ((sheet: SheetInfo, limits: Limits) => Effect.Effect<SheetDetails, SpreadsheetError>) | undefined
 }): Workbook => ({
   format: options.format,
   sheets: options.sheets,
+  definedNames: options.definedNames ?? [],
   limits: options.limits,
-  [RowsSource]: options.rows
+  [RowsSource]: options.rows,
+  [DetailsSource]: options.details ?? (() => Effect.succeed(NO_DETAILS))
 })
 
 /**
@@ -204,4 +265,23 @@ export const rows = (
   if (found === undefined) return Stream.fail(new SheetNotFound({ sheet }))
   // suspend: invalid limit overrides (merge throws) die when the stream runs
   return Stream.suspend(() => workbook[RowsSource](found, merge(workbook.limits, options?.limits)))
+}
+
+/**
+ * A sheet's hidden columns, merged ranges and declared dimension, read in
+ * one bounded pass over the sheet (cell data is skipped, not collected).
+ * For formats without them (CSV) all are empty. Uses the workbook's
+ * limits, with `options.limits` on top.
+ *
+ * @since 0.1.0
+ * @category getters
+ */
+export const sheetDetails = (
+  workbook: Workbook,
+  sheet: string | number,
+  options?: RowsOptions
+): Effect.Effect<SheetDetails, SpreadsheetError> => {
+  const found = findSheet(workbook, sheet)
+  if (found === undefined) return Effect.fail(new SheetNotFound({ sheet }))
+  return Effect.suspend(() => workbook[DetailsSource](found, merge(workbook.limits, options?.limits)))
 }

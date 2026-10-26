@@ -101,8 +101,30 @@ const localName = (qname: string): string => {
 
 const isSpace = (c: number): boolean => c === 0x20 || c === 0x09 || c === 0x0A || c === 0x0D
 
-/** A rough XML name check: no whitespace or markup characters, not starting with `-`, `.` or a digit. */
-const NAME = /^[^\s<>/=!?"'&\-.\d][^\s<>/=!?"'&]*$/
+/**
+ * A rough XML name check: non-empty, no whitespace or markup characters
+ * (`< > / = ! ? " ' &`), not starting with `-`, `.` or a digit.
+ * "Whitespace" is exactly JavaScript's `\s` (the earlier regex used it):
+ * tab to CR, space, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029,
+ * U+202F, U+205F, U+3000, U+FEFF. Other control characters are allowed.
+ */
+export const isName = (s: string): boolean => {
+  const n = s.length
+  if (n === 0) return false
+  const first = s.charCodeAt(0)
+  if (first === 0x2D || first === 0x2E || (first >= 0x30 && first <= 0x39)) return false
+  // progress: k increases up to n
+  for (let k = 0; k < n; k++) {
+    const c = s.charCodeAt(k)
+    if (
+      (c >= 0x09 && c <= 0x0D) || c === 0x20 || c === 0x3C || c === 0x3E || c === 0x2F || c === 0x3D || c === 0x21 ||
+      c === 0x3F || c === 0x22 || c === 0x27 || c === 0x26 || c === 0xA0 || c === 0x1680 ||
+      (c >= 0x2000 && c <= 0x200A) || c === 0x2028 || c === 0x2029 || c === 0x202F || c === 0x205F ||
+      c === 0x3000 || c === 0xFEFF
+    ) return false
+  }
+  return true
+}
 
 export class XmlTokenizer {
   /** Characters examined so far (each input character a bounded number of times). */
@@ -174,13 +196,18 @@ export class XmlTokenizer {
         } else {
           this.flushText()
           this.markupStart = this.consumed + lt
-          this.inMarkup = true
-          this.kind = Kind.Unknown
-          this.markup = []
-          this.markupLength = 0
-          this.quote = 0
-          this.tail = ""
-          i = lt + 1
+          const whole = this.failure === undefined ? this.wholeTag(chunk, lt) : -1
+          if (whole > lt) {
+            i = whole // the tag was complete in this piece and is handled
+          } else {
+            this.inMarkup = true
+            this.kind = Kind.Unknown
+            this.markup = []
+            this.markupLength = 0
+            this.quote = 0
+            this.tail = ""
+            i = lt + 1
+          }
         }
       } else {
         i = this.scanMarkup(chunk, i)
@@ -244,6 +271,42 @@ export class XmlTokenizer {
     if (this.markupLength > this.limits.maxStringLength + MARKUP_SLACK) {
       this.fail(new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: this.markupLength }))
     }
+  }
+
+  /**
+   * Fast path for the common case: a start or end tag that ends within this
+   * piece. Handles it exactly as the general path would (same markup, same
+   * checks, same work count) and returns the position after its `>`; or -1
+   * (nothing done) when the tag is something else or continues in the next
+   * piece.
+   */
+  private wholeTag(chunk: string, lt: number): number {
+    const n = chunk.length
+    const first = chunk.charCodeAt(lt + 1)
+    if (lt + 1 >= n || first === 0x21 || first === 0x3F) return -1
+    const start = first !== 0x2F
+    let quote = 0
+    let j = lt + 1
+    // progress: j increases up to n
+    for (; j < n; j++) {
+      const c = chunk.charCodeAt(j)
+      if (quote !== 0) {
+        if (c === quote) quote = 0
+      } else if (c === 0x3E) break
+      else if (start && (c === 0x22 || c === 0x27)) quote = c
+    }
+    if (j >= n) return -1
+    const length = j - lt - 1
+    this.work += 2 * length + 1
+    if (length > this.limits.maxStringLength + MARKUP_SLACK) {
+      this.fail(new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: length }))
+      return j + 1
+    }
+    const markup = chunk.slice(lt + 1, j)
+    this.kind = start ? Kind.Start : Kind.End
+    if (start) this.startTag(markup)
+    else this.endTag(markup)
+    return j + 1
   }
 
   /** Scans markup from `chunk[i]`; returns the next position (> i, or i on failure). */
@@ -382,7 +445,7 @@ export class XmlTokenizer {
     // progress: p increases up to the end of the name
     while (p < n && !isSpace(body.charCodeAt(p))) p++
     const qname = body.slice(0, p)
-    if (!NAME.test(qname)) {
+    if (!isName(qname)) {
       this.fail(this.malformed(`bad element name ${JSON.stringify(qname.slice(0, 40))}`, this.markupStart))
       return
     }
@@ -391,7 +454,8 @@ export class XmlTokenizer {
       return
     }
     const attributes: Array<readonly [string, string]> = []
-    const seen = new Set<string>()
+    // duplicates: a linear check for the usual few attributes, a Set past that
+    let seen: Set<string> | undefined
     // progress: each iteration consumes one attribute (p moves past its
     // closing quote) or ends the loop
     while (p < n) {
@@ -411,15 +475,25 @@ export class XmlTokenizer {
         return
       }
       const close = body.indexOf(String.fromCharCode(quote), q + 1)
-      if (close < 0 || !NAME.test(name)) {
+      if (close < 0 || !isName(name)) {
         this.fail(this.malformed(`bad attribute in <${qname}>`, this.markupStart))
         return
       }
-      if (seen.has(name)) {
+      let duplicate = false
+      if (seen !== undefined) duplicate = seen.has(name)
+      else {
+        // progress: k increases up to attributes.length (< 16 here)
+        for (let k = 0; k < attributes.length && !duplicate; k++) duplicate = attributes[k]![0] === name
+      }
+      if (duplicate) {
         this.fail(this.malformed(`duplicate attribute ${name} in <${qname}>`, this.markupStart))
         return
       }
-      seen.add(name)
+      if (seen !== undefined) seen.add(name)
+      else if (attributes.length >= 15) {
+        seen = new Set(attributes.map((a) => a[0]))
+        seen.add(name)
+      }
       if (attributes.length >= this.limits.maxXmlAttributes) {
         this.fail(
           new LimitExceeded({ limit: "maxXmlAttributes", max: this.limits.maxXmlAttributes, actual: attributes.length + 1 })

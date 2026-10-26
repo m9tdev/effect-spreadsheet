@@ -36,8 +36,9 @@ const CFB_MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 const ODS_MIME = "application/vnd.oasis.opendocument.spreadsheet"
 
 const detectZip = (bytes: Uint8Array, limits: Limits): Format | MalformedFile | LimitExceeded => {
-  const entries = readDirectory(bytes, limits)
-  if (!Array.isArray(entries)) return entries as MalformedFile | LimitExceeded
+  const directory = readDirectory(bytes, limits)
+  if (directory instanceof MalformedFile || directory instanceof LimitExceeded) return directory
+  const entries = directory.entries
   let xlsxPart = false
   let xlsbPart = false
   let mimetype: string | undefined
