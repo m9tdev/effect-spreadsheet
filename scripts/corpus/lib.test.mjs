@@ -247,3 +247,24 @@ test("childErrorDetail: the last error line wins over earlier lines the child pr
   assert.equal(childErrorDetail({ stderr: Buffer.from("debug: x\nlast words\n\n"), message: "m" }), "last words")
   assert.equal(childErrorDetail({ stderr: Buffer.from(""), message: "m" }), "m")
 })
+
+test("childErrorDetail: an error whose name doesn't end in Error gives its header, not a stack frame", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  let err
+  try { execFileSync(process.execPath, ["--input-type=module", "-e", 'class MyErr extends Error { name = "MyErr" }; throw new MyErr("mine")'], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { err = e }
+  assert.equal(childErrorDetail(err), "MyErr: mine")
+  // no stack, but stack-frame-looking lines last (e.g. a child that printed a trace): skipped
+  assert.equal(childErrorDetail({ stderr: Buffer.from("custom failure\n    at somewhere (x.js:1:1)\n"), message: "m" }), "custom failure")
+})
+
+test("childErrorDetail: nested errors (AggregateError, error properties, cause, multi-line message) give the outer one", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  const detail = (code) => { try { execFileSync(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { return childErrorDetail(e) } assert.fail("child should fail") }
+  assert.equal(detail('throw new AggregateError([new TypeError("a"), new RangeError("b")], "agg")'), "AggregateError: agg")
+  assert.equal(detail('const e = new Error("outer"); e.originalError = new TypeError("inner"); throw e'), "Error: outer")
+  assert.equal(detail('throw new Error("outer", { cause: new TypeError("inner") })'), "Error: outer")
+  assert.equal(detail('throw new Error("wrapped: TypeError: inner")'), "Error: wrapped: TypeError: inner")
+  assert.equal(detail('throw new Error("line one\\nTypeError: inner")'), "Error: line one")
+})

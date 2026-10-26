@@ -909,23 +909,39 @@ export function stripWriterBoilerplate(buf) {
 // ---------------------------------------------------------------- child-process errors
 
 /**
- * One useful line from a failed child process (execFileSync error): the last stderr line
- * that names an error ("RangeError: ...", "DOMException [AbortError]: ..."), else the last
- * stderr line apart from Node's "Node.js vNN" footer and --trace-uncaught hint, else the
- * error's own message. Node's first stderr line is only the throwing location. A timeout
- * or signal (err.code, else err.signal) goes in front, e.g. "ETIMEDOUT: <line>".
+ * One useful line from a failed child process (execFileSync error): the header of the
+ * uncaught error ("RangeError: ...", "DOMException [AbortError]: ...", "MyErr: ..."), else
+ * the last stderr line that names an error, else the last stderr line apart from stack
+ * frames, Node's "Node.js vNN" footer and its --trace-uncaught hint, else the error's own
+ * message. Node's first stderr line is only the throwing location. A timeout or signal
+ * (err.code, else err.signal) goes in front, e.g. "ETIMEDOUT: <line>".
  */
 export function childErrorDetail(err) {
-  const lines = (err?.stderr?.toString() ?? "").trim().split("\n").map((l) => l.trim()).filter(Boolean)
-  // The LAST error-like line: "TypeError: x", "DOMException [AbortError]: x", "MyErr [Error]: x".
-  // The name (or its [tag]) must end in Error or Exception, so earlier lines the child printed
-  // itself ("debug: x"), source lines ("Error.captureStackTrace(...)"), locations
-  // ("node:internal/...:107") and the property lines Node prints after a stack ("code: 'ERR_X'")
-  // don't count.
-  const named = lines.findLast((l) => /^(?:[\w$]*(?:Error|Exception)|[\w$]+ \[[\w$]*(?:Error|Exception)\]): /.test(l))
-  // otherwise the last line that isn't Node's own footer (a thrown string or object ends up here)
-  const tail = lines.filter((l) => !/^Node\.js v\d/.test(l) && !/^\(Use `node --trace-uncaught/.test(l)).at(-1)
-  const line = named ?? tail ?? String(err?.message ?? err)
+  const raw = (err?.stderr?.toString() ?? "").split("\n").map((l) => l.replace(/\s+$/, ""))
+  const isFrame = (l) => /^\s+at /.test(l)
+  const isFooter = (l) => /^Node\.js v\d/.test(l) || /^\(Use `node --trace-uncaught/.test(l)
+  // "TypeError: x", "DOMException [AbortError]: x", "MyErr [Error]: x": the name (or its [tag])
+  // ends in Error or Exception, so "debug: x", "code: 'ERR_X'" or source lines don't count.
+  const isErrorLine = (l) => /^(?:[\w$]*(?:Error|Exception)|[\w$]+ \[[\w$]*(?:Error|Exception)\]): /.test(l)
+  let line
+  const first = raw.findIndex(isFrame)
+  if (first > 0) {
+    // An uncaught error: Node prints its header (and any further message lines) after a blank
+    // line, right before the first stack frame. Nested errors (AggregateError [errors], error
+    // properties, [cause]) are indented and come later, so they never win. In that block, take
+    // the first error-like line, else its first line (e.g. "MyErr: mine" for a custom name).
+    let start = first
+    while (start > 0 && raw[start - 1].trim() !== "") start--
+    const block = raw.slice(start, first).filter((l) => l.trim() !== "")
+    line = (block.find(isErrorLine) ?? block[0])?.trim()
+  }
+  if (!line) {
+    // No stack: the last column-0 error-like line (a child that printed its own error and
+    // exited), else the last line that isn't Node's footer or a stack frame (a thrown string or
+    // object), else the error's own message.
+    const lines = raw.filter((l) => l.trim() !== "" && !isFooter(l.trim()) && !/^at /.test(l.trim()))
+    line = (lines.findLast(isErrorLine) ?? lines.at(-1))?.trim() ?? String(err?.message ?? err)
+  }
   // a timeout or a signal is the real cause even when the child already wrote to stderr
   const why = err?.code ?? err?.signal
   return why ? `${why}: ${line}` : line
