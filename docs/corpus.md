@@ -229,8 +229,8 @@ startup deaths the oracle aborts with exit 2, instead of respawning forever (e.g
 - a `timeout` result is retried by the next run without `--force` (H).
 
 Cases that need SheetJS are skipped, not failed, when it is missing. With
-`REQUIRE_ORACLE=1` (as in CI) they fail instead, the same convention as the vitest oracle. Temp dirs left by
-a SIGKILLed selftest are removed at the next start. The parent only writes the expected
+`REQUIRE_ORACLE=1` (as in CI) they fail instead, the same convention as the vitest
+oracle. Temp dirs left by a SIGKILLed selftest are removed at the next start. The parent only writes the expected
 file itself for `timeout` and `crash`; `ok`, `error` and `tooBig` documents come from the
 child.
 
@@ -256,12 +256,14 @@ G1 runs the whole oracle under `TZ=Pacific/Auckland`. Since the children still g
 in Pacific/Auckland, so it fails as soon as `UTC: true` is dropped. The G2 child exits 3
 when its zone gives a UTC offset of 0, because an unknown zone such as `Bogus/Zone` silently
 does. That keeps G2 from passing without testing anything. A failing or hanging (60 s) child
-is a failed check that shows its error line. The selftest reads three environment variables:
+is a failed check that shows its error line. The selftest reads four environment variables:
 - `ORACLE_SELFTEST_ONLY=G,H` runs only those cases (A–H, G1, G2). An unknown name exits 2, and
   a run where no check ran fails.
 - `ORACLE_SELFTEST_G2_TIMEOUT_MS` sets the G2 child timeout (a positive integer; anything
   else exits 2).
 - `ORACLE_SELFTEST_G2_TZ` sets G2's zone. It is only for showing the offset-0 guard.
+- `REQUIRE_ORACLE=1` makes the cases that need SheetJS fail, instead of skipping, when
+  SheetJS is missing. `oracle.mjs` then exits 1 instead of skipping too. CI sets it.
 
 Schema 1 files had local-time Dates. We never
 use `XLSX.stream.to_json` for expected output, because that is where the hang is (below).

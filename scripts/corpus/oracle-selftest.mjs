@@ -28,8 +28,9 @@
 //   H. a timeout is not a cached result: after a run where every parse times out
 //      (--timeout 0.001), a run without --force parses those files again.
 // Needs SheetJS (SHEETJS_DIR, default ~/sheetjs) for A, B, E, F, G and H: they are skipped,
-// not failed, without it (C and D use a fake SheetJS); with REQUIRE_ORACLE=1 they fail. Linux `ps` for the child lookup.
-// Stale temp dirs from a SIGKILLed run are removed at the next start.
+// not failed, without it (C and D use a fake SheetJS); with REQUIRE_ORACLE=1 they fail.
+// Linux `ps` for the child lookup. Stale temp dirs from a SIGKILLed run are removed at the
+// next start.
 // Usage: node scripts/corpus/oracle-selftest.mjs
 //   ORACLE_SELFTEST_ONLY=G,H        run only these cases (A-H, G1, G2; unknown names exit 2)
 //   ORACLE_SELFTEST_G2_TIMEOUT_MS=N G2 child timeout in ms (positive integer, default 60000)
