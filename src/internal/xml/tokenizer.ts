@@ -104,8 +104,11 @@ const isSpace = (c: number): boolean => c === 0x20 || c === 0x09 || c === 0x0A |
 /**
  * A rough XML name check: non-empty, no whitespace or markup characters
  * (`< > / = ! ? " ' &`), not starting with `-`, `.` or a digit.
+ * "Whitespace" is exactly JavaScript's `\s` (the earlier regex used it):
+ * tab to CR, space, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029,
+ * U+202F, U+205F, U+3000, U+FEFF. Other control characters are allowed.
  */
-const isName = (s: string): boolean => {
+export const isName = (s: string): boolean => {
   const n = s.length
   if (n === 0) return false
   const first = s.charCodeAt(0)
@@ -114,8 +117,8 @@ const isName = (s: string): boolean => {
   for (let k = 0; k < n; k++) {
     const c = s.charCodeAt(k)
     if (
-      c <= 0x20 || c === 0x3C || c === 0x3E || c === 0x2F || c === 0x3D || c === 0x21 || c === 0x3F ||
-      c === 0x22 || c === 0x27 || c === 0x26 || c === 0x85 || c === 0xA0 || c === 0x1680 ||
+      (c >= 0x09 && c <= 0x0D) || c === 0x20 || c === 0x3C || c === 0x3E || c === 0x2F || c === 0x3D || c === 0x21 ||
+      c === 0x3F || c === 0x22 || c === 0x27 || c === 0x26 || c === 0xA0 || c === 0x1680 ||
       (c >= 0x2000 && c <= 0x200A) || c === 0x2028 || c === 0x2029 || c === 0x202F || c === 0x205F ||
       c === 0x3000 || c === 0xFEFF
     ) return false

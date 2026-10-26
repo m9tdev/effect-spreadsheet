@@ -4,7 +4,7 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { open } from "../src/internal/zip/archive.ts"
 import { parse, XmlDecoder } from "../src/internal/xml/parse.ts"
-import { type XmlHandler, XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
+import { isName, type XmlHandler, XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
 import { isSpreadsheetError, type SpreadsheetError } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import { failureOf } from "./helpers/run.ts"
@@ -203,6 +203,20 @@ describe("xml tokenizer: split invariance and cost", () => {
     expect(work).toBeLessThanOrEqual(6 * doc.length)
   })
 
+})
+
+describe("xml names", () => {
+  it("accepts and rejects exactly what the original name regex did", () => {
+    const NAME = /^[^\s<>/=!?"'&\-.\d][^\s<>/=!?"'&]*$/
+    const chars = [..."ab:_-.09<>/=!?\"'&", "\t", "\n", "\v", "\f", "\r", " ", "\u0001", "\u001F", "\u0085", "\u00A0", "\u1680", "\u2000", "\u200A", "\u200B", "\u2028", "\u2029", "\u202F", "\u205F", "\u3000", "\uFEFF", "é"]
+    fc.assert(
+      fc.property(fc.array(fc.constantFrom(...chars), { maxLength: 6 }), (parts) => {
+        const name = parts.join("")
+        expect(isName(name), JSON.stringify(name)).toBe(NAME.test(name))
+      }),
+      { numRuns: 5000 }
+    )
+  })
 })
 
 describe("xml tokenizer: normalization (XML 1.0)", () => {
