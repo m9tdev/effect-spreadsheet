@@ -62,6 +62,11 @@ const toSerial = (date: Date, date1904: boolean): number => {
 const notADate = (serial: number, date1904: boolean): boolean =>
   serial < 0 || serial >= (date1904 ? 2_958_466 - 1462 : 2_958_466) || (!date1904 && serial >= 60 && serial < 61)
 
+/** ISO-dated cells (t="d"): Dates for us, serials without a date format for the oracle. */
+const ISO_DATE_CELLS: Record<string, ReadonlyArray<string>> = {
+  "generated/strings.xlsx": ["Strings!1:5"]
+}
+
 /** Cells of a shared formula after its first: the oracle expands the formula, we don't. */
 const SHARED_FORMULA_CHILDREN: Record<string, ReadonlyArray<string>> = {
   "generated/formulas.xlsx": ["Formulas!1:2", "Formulas!2:2"]
@@ -139,7 +144,9 @@ describe("xlsx vs the committed SheetJS expectations", () => {
             case "n":
               if (mine!._tag === "Date") {
                 // a date for us: the oracle has the serial and a date format
-                expect(cell.z !== undefined && isDateCode(cell.z) || Number.isFinite(value), where).toBe(true)
+                // the oracle has the serial and a date format (or the cell is an ISO date)
+                const iso = (ISO_DATE_CELLS[file] ?? []).includes(where)
+                expect(iso || (cell.z !== undefined && isDateCode(cell.z)), `${where} z=${cell.z}`).toBe(true)
                 expect(Math.abs(toSerial(mine!.value, date1904) - (value as number)), where).toBeLessThan(1e-8)
               } else {
                 expect([mine!._tag, (mine as Cell.NumberCell).value], where).toEqual(["Number", value])
