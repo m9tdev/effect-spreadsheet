@@ -302,6 +302,15 @@ describe("xlsx: hostile and broken files", () => {
     expect(await errorOf(sheet(`<row r="1"/>`.repeat(5)), { maxRows: 3 })).toMatchObject({ limit: "maxRows", actual: 4 })
   })
 
+  it("the input size and defined names have limits", async () => {
+    const bytes = await xlsx({ sheets: [{ name: "S" }] })
+    const error = failureOf(await readExit(bytes, { maxInputBytes: 10 }))
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxInputBytes", max: 10, actual: bytes.length })
+    // text runs split by comments: each is short, together they're too long
+    const longName = await errorOf({ sheets: [{ name: "S" }], definedNames: `<definedName name="N">${"A1,<!-- -->".repeat(100)}</definedName>` }, { maxStringLength: 100 })
+    expect(longName).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 100 })
+  })
+
   it("sheets, shared strings and string lengths have limits", async () => {
     expect(await errorOf({ sheets: [{ name: "A" }, { name: "B" }, { name: "C" }] }, { maxSheets: 2 })).toMatchObject({ limit: "maxSheets", max: 2 })
     expect(await errorOf({ sharedStrings: ["a", "b", "c"], sheets: [{ name: "S" }] }, { maxSharedStrings: 2 })).toMatchObject({ limit: "maxSharedStrings" })
