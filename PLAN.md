@@ -40,7 +40,10 @@ Spreadsheet.readCsv(input: Uint8Array | Stream<Uint8Array>, options?): ...
 // Per-format entry points: effect-spreadsheet/csv, /xlsx, /xls, /xlsb
 
 workbook.sheets                     // ReadonlyArray<SheetInfo>: name, index, visibility, dimension
+workbook.definedNames               // ReadonlyArray<DefinedName>: name, formula text, scope?, hidden (metadata only)
 Workbook.rows(workbook, sheet, opts): Stream<Row, SpreadsheetError>
+Workbook.sheetDetails(workbook, sheet, opts): Effect<SheetDetails, SpreadsheetError>
+SheetDetails = { hiddenColumns: ColumnSpan[], merges: Range[], dimension?: Range } // one bounded pass, cells skipped
 Row  = { index: number, hidden: boolean, cells: ReadonlyArray<Cell> } // cells sparse-safe (column index on each cell)
 Cell = Empty | Text | Number | Boolean | Date | Error   (tagged, Schema-defined)
        + optional formula, numFmt
@@ -51,9 +54,15 @@ Spreadsheet.toRecords(rows, { header: "first-row" | number | string[] }) // like
   `UnsupportedFormat`, `MalformedFile { format, part, offset, reason }`,
   `LimitExceeded { limit, max, actual }`, `Encrypted`. Bad input must never
   throw a defect.
+- Sheet layout: hidden columns, merges and the declared dimension come from
+  `Workbook.sheetDetails`, not from the rows: in XLSX they sit around the
+  cell data (merges after it), so one separate pass over the sheet reads
+  them, skipping the cells. Defined names are workbook metadata
+  (`workbook.definedNames`); they are not evaluated.
 - Limits: a `SpreadsheetLimits` reference with safe defaults, overridable per
-  call or by layer. It covers input bytes, decompressed bytes, compression
-  ratio, zip entries, sheets, rows, columns, cells per sheet, string length,
+  call or by layer. It covers input bytes, decompressed bytes (a hard cap,
+  plus an archive-wide inflate budget of max(64 MiB, 200 × archive size)),
+  zip entries, sheets, rows, columns, cells per sheet, string length,
   shared-string count, XML depth/attributes, and CFB sector-chain length.
 - Streaming: rows come out in bounded chunks, so the event loop yields between
   them (fine in a worker or on the main thread). XLSX/XLS need random access,

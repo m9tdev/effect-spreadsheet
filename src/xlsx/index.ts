@@ -14,7 +14,9 @@
  * Reading opens the zip, follows the package relationships to the workbook
  * part, and reads the sheet list, defined names, date system, shared
  * strings and number formats. Sheets are read lazily: each
- * `Workbook.rows` run inflates and parses that sheet's part as a stream.
+ * `Workbook.rows` run inflates and parses that sheet's part as a stream;
+ * `Workbook.sheetDetails` reads its hidden columns, merges and declared
+ * dimension in one pass.
  * Macro-enabled workbooks (`.xlsm`) read the same way; their macros are
  * ignored. Chart sheets, dialog sheets and macro sheets have no rows.
  *
@@ -40,6 +42,7 @@ import {
   relationshipKind,
   type Styles
 } from "../internal/xlsx/parts.ts"
+import { sheetDetails } from "../internal/xlsx/details.ts"
 import { sheetRows } from "../internal/xlsx/sheet.ts"
 import { LimitExceeded, type SpreadsheetError } from "../SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../SpreadsheetLimits.ts"
@@ -102,30 +105,39 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
       ...(d.scope !== undefined && d.scope < sheets.length ? { scope: d.scope } : {})
     }))
 
+    /** The worksheet part of a sheet; `undefined` for chart, dialog and macro sheets (no cells). */
+    const sheetPart = (sheet: Workbook.SheetInfo) => {
+      const entry = workbook.sheets[sheet.index]!
+      const rel = entry.relationshipId === undefined ? undefined : byId.get(entry.relationshipId)
+      if (rel === undefined || rel.part === undefined) {
+        return malformed(`sheet ${JSON.stringify(sheet.name)} has no part`, workbookEntry.name)
+      }
+      if (relationshipKind(rel.type) !== "worksheet") return undefined
+      return archive.find(rel.part) ?? malformed(`sheet part ${rel.part} is missing`, workbookEntry.name)
+    }
+
     return Workbook.make({
       format: "xlsx",
       sheets,
       definedNames,
       limits,
       rows: (sheet, effective) => {
-        const entry = workbook.sheets[sheet.index]!
-        const rel = entry.relationshipId === undefined ? undefined : byId.get(entry.relationshipId)
-        if (rel === undefined || rel.part === undefined) {
-          return Stream.fail(malformed(`sheet ${JSON.stringify(sheet.name)} has no part`, workbookEntry.name))
-        }
-        // chart, dialog and macro sheets hold no cells
-        if (relationshipKind(rel.type) !== "worksheet") return Stream.empty
-        const sheetEntry = archive.find(rel.part)
-        if (sheetEntry === undefined) {
-          return Stream.fail(malformed(`sheet part ${rel.part} is missing`, workbookEntry.name))
-        }
-        return sheetRows(archive.read(sheetEntry), {
-          part: sheetEntry.name,
+        const part = sheetPart(sheet)
+        if (part === undefined) return Stream.empty
+        if ("_tag" in part) return Stream.fail(part)
+        return sheetRows(archive.read(part), {
+          part: part.name,
           strings,
           styles,
           date1904: workbook.date1904,
           limits: effective
         })
+      },
+      details: (sheet, effective) => {
+        const part = sheetPart(sheet)
+        if (part === undefined) return Effect.succeed({ hiddenColumns: [], merges: [] })
+        if ("_tag" in part) return Effect.fail(part)
+        return sheetDetails(archive.read(part), part.name, effective)
       }
     })
   })

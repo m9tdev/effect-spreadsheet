@@ -195,6 +195,44 @@ describe("xlsx: cells and rows", () => {
   })
 })
 
+describe("xlsx: sheet details", () => {
+  const withLayout = (layout: string, data = `<row><c><v>1</v></c></row>`) =>
+    xlsx({ sheets: [{ name: "S", raw: `<worksheet xmlns="x"><dimension ref="B2:D9"/><cols>${layout}</cols><sheetData>${data}</sheetData><mergeCells><mergeCell ref="A1:C1"/><mergeCell ref="B3:B4"/></mergeCells></worksheet>` }] })
+  const details = async (bytes: Uint8Array, limits?: LimitOverrides) =>
+    Effect.runPromise(Effect.exit(Effect.flatMap(Xlsx.read(bytes, { limits }), (wb) => Workbook.sheetDetails(wb, 0))))
+
+  it("hidden columns as merged spans, merges, the declared dimension", async () => {
+    const exit = await details(await withLayout(`<col min="2" max="3" hidden="1"/><col min="4" max="4" hidden="true"/><col min="6" max="6" width="9"/><col min="8" max="20000" hidden="1"/><col min="9" max="9" hidden="1"/>`))
+    expect(Exit.isSuccess(exit) && exit.value).toEqual({
+      hiddenColumns: [{ first: 1, last: 3 }, { first: 7, last: 16383 }],
+      merges: [
+        { firstRow: 0, firstColumn: 0, lastRow: 0, lastColumn: 2 },
+        { firstRow: 2, firstColumn: 1, lastRow: 3, lastColumn: 1 }
+      ],
+      dimension: { firstRow: 1, firstColumn: 1, lastRow: 8, lastColumn: 3 }
+    })
+  })
+
+  it("cell data is skipped, CSV has no details, missing sheets fail", async () => {
+    const bytes = await withLayout("", `<row><c><v>1</v></c></row>`.repeat(10_000))
+    const exit = await details(bytes)
+    expect(Exit.isSuccess(exit) && exit.value.merges.length).toBe(2)
+    const csv = await Effect.runPromise(Effect.flatMap(Spreadsheet.read(enc("a,b\n")), (wb) => Workbook.sheetDetails(wb, 0)))
+    expect(csv).toEqual({ hiddenColumns: [], merges: [] })
+    const wb = await Effect.runPromise(Xlsx.read(bytes))
+    expect(failureOf(await Effect.runPromise(Effect.exit(Workbook.sheetDetails(wb, "nope"))))).toMatchObject({ _tag: "SheetNotFound" })
+  })
+
+  it("bad ranges are MalformedFile; spans and merges have limits", async () => {
+    expect(failureOf(await details(await withLayout(`<col min="0" max="2" hidden="1"/>`)))).toMatchObject({ _tag: "MalformedFile" })
+    expect(failureOf(await details(await withLayout(`<col min="x" max="2" hidden="1"/>`)))).toMatchObject({ _tag: "MalformedFile" })
+    const badMerge = await xlsx({ sheets: [{ name: "S", raw: `<worksheet xmlns="x"><sheetData/><mergeCells><mergeCell ref="A1:"/></mergeCells></worksheet>` }] })
+    expect(failureOf(await details(badMerge))).toMatchObject({ _tag: "MalformedFile" })
+    expect(failureOf(await details(await withLayout(`<col min="1" max="1"/>`.repeat(5)), { maxColumns: 4 }))).toMatchObject({ limit: "maxColumns" })
+    expect(failureOf(await details(await withLayout(""), { maxCellsPerSheet: 1 }))).toMatchObject({ limit: "maxCellsPerSheet" })
+  })
+})
+
 describe("xlsx: hostile and broken files", () => {
   const sheet = (data: string): TestWorkbook => ({ sheets: [{ name: "S", data }] })
 
