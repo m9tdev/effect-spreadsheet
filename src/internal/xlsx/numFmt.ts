@@ -38,10 +38,15 @@ export const BUILTIN_FORMATS: ReadonlyMap<number, string> = new Map([
 ])
 
 /**
- * Built-in ids whose code depends on the locale (East Asian date formats):
- * they format dates, but have no fixed code.
+ * Built-in ids whose code depends on the locale: East Asian (27-36, 50-58)
+ * and Thai (71-81) date and time formats. They format dates, but have no
+ * fixed code.
  */
-const LOCALE_DATE_IDS = new Set([27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 50, 51, 52, 53, 54, 55, 56, 57, 58])
+const LOCALE_DATE_IDS = new Set([
+  27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+  50, 51, 52, 53, 54, 55, 56, 57, 58,
+  71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81
+])
 
 /**
  * Whether a format code shows a date or time: after dropping quoted text,
