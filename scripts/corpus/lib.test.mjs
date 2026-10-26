@@ -232,3 +232,18 @@ test("childErrorDetail: thrown strings, objects, DOMException and subclassed err
   // a source line that starts like an error name isn't taken for the error line
   assert.equal(detail('Error.captureStackTrace({}); throw new TypeError("bad type")'), "TypeError: bad type")
 })
+
+test("childErrorDetail: the last error line wins over earlier lines the child printed", async () => {
+  const { childErrorDetail } = await import("./lib.mjs")
+  const { execFileSync } = await import("node:child_process")
+  const detail = (code) => { try { execFileSync(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "pipe", "pipe"] }) } catch (e) { return childErrorDetail(e) } assert.fail("child should fail") }
+  assert.equal(detail('console.error("debug: x"); throw new TypeError("bad")'), "TypeError: bad")
+  assert.equal(detail('console.error("Warning: an earlier Error: not this one"); throw new RangeError("this one")'), "RangeError: this one")
+  // Node prints error properties after the stack ("code: 'ERR_X'"); they aren't the error line
+  assert.equal(detail('console.error("debug: x"); const e = new Error("boom"); e.code = "ERR_X"; throw e'), "Error: boom")
+  // a child that printed an earlier error line and then exits on its own: the last one
+  assert.equal(childErrorDetail({ stderr: Buffer.from("SyntaxError: first\ndebug: x\nTypeError: second\n"), message: "Command failed" }), "TypeError: second")
+  // nothing error-like: the last non-empty line, then the message
+  assert.equal(childErrorDetail({ stderr: Buffer.from("debug: x\nlast words\n\n"), message: "m" }), "last words")
+  assert.equal(childErrorDetail({ stderr: Buffer.from(""), message: "m" }), "m")
+})
