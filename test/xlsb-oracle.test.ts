@@ -213,6 +213,7 @@ describe("xlsb vs the committed SheetJS expectations", () => {
         expect(layout.hiddenColumns.flatMap((s) => Array.from({ length: s.last - s.first + 1 }, (_, i) => s.first + i)), oracle.name).toEqual(oracle.hiddenCols)
         expect(layout.merges.map(a1), oracle.name).toEqual(oracle.merges)
         if (layout.dimension !== undefined) expect(a1(layout.dimension), oracle.name).toBe(oracle.ref)
+        else expect(oracle.ref, `${oracle.name}: no dimension for us, none for SheetJS`).toBeUndefined()
       })
     })
   }

@@ -48,8 +48,8 @@ export const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array => {
 
 // ---- records (MS-XLSB record numbers) ----
 
-/** A Cell structure: column u32, style u24 and a flags byte. */
-const cellHead = (column: number, style = 0) => [...u32(column), ...u32(style & 0xFFFFFF)]
+/** A Cell structure: column u32, style u24 and a flags byte (`style` above 24 bits sets the flags). */
+const cellHead = (column: number, style = 0) => [...u32(column), ...u32(style)]
 
 export const beginBook = () => record(0x83)
 export const endBook = () => record(0x84)

@@ -99,6 +99,11 @@ describe("xlsb reader", () => {
     expect(sheets[0]![1]!.cells.every((c) => c.formula === undefined)).toBe(true)
   })
 
+  it("a cell's style is its low 24 bits: the flags byte above (fPhShow) doesn't change it", async () => {
+    const { sheets } = await readOk(one([B.rowHdr(0), B.real(0, 45000, 1 | 0x01000000)], STYLES))
+    expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Date", "2023-03-15T00:00:00.000Z"]]]])
+  })
+
   it("dates in the 1904 system; serials outside Excel's dates stay numbers", async () => {
     const { sheets } = await readOk(one([B.rowHdr(0), B.real(0, 0, 1), B.real(1, -1, 1), B.real(2, 1e9, 1)], { ...STYLES, date1904: true }))
     expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Date", "1904-01-01T00:00:00.000Z"], [1, "Number", -1], [2, "Number", 1e9]]]])
