@@ -267,6 +267,16 @@ describe("xls: hostile and broken files", () => {
     expect(await errorOf(one([X.colInfo(0, 0, true), X.colInfo(1, 1, true)]), { maxColumns: 1 })).toMatchObject({ limit: "maxColumns" })
     expect(await errorOf(one([X.mergeCells([[0, 0, 0, 1], [1, 1, 0, 1]])]), { maxCellsPerSheet: 1 })).toMatchObject({ limit: "maxCellsPerSheet", actual: 2 })
     expect(await errorOf(one([X.label5(0, 0, 0, new Array(50).fill(0x41))], [], 5), { maxStringLength: 10 })).toMatchObject({ limit: "maxStringLength" })
+    // a formula's string result (STRING) and a sheet name (BOUNDSHEET)
+    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.string("z".repeat(50))]), { maxStringLength: 10 })).toMatchObject({ limit: "maxStringLength" })
+    for (const biff of [8, 5] as const) {
+      expect(await errorOf({ biff, sheets: [{ name: "n".repeat(50), records: [] }] }, { maxStringLength: 10 })).toMatchObject({ limit: "maxStringLength" })
+    }
+  })
+
+  it("a hidden column span past the last column is clamped to maxColumns", async () => {
+    const { details } = await readOk(one([X.colInfo(2, 0xFFFF, true)]), { maxColumns: 256 })
+    expect(details[0]!.hiddenColumns).toEqual([{ first: 2, last: 255 }])
   })
 
   it("an SST split across CONTINUE records reads, the strings' widths switching at the boundary", async () => {

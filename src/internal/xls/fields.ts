@@ -95,6 +95,7 @@ export const readString = (
     // ShortXLUnicodeString: u8 count, flags, characters
     if (rest.length < 2) return undefined
     const count = rest[0]!
+    if (count > text.maxLength) return null
     const wide = (rest[1]! & 0x01) !== 0
     const bytes = count * (wide ? 2 : 1)
     if (2 + bytes > rest.length) return undefined
