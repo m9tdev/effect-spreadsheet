@@ -170,6 +170,9 @@ export const readWorkbookPart = (
           return
         }
         case "definedName": {
+          if (definedNames.length >= limits.maxDefinedNames) {
+            return new LimitExceeded({ limit: "maxDefinedNames", max: limits.maxDefinedNames, actual: definedNames.length + 1 })
+          }
           const local = attr(attributes, "localSheetId")
           const scope = local !== undefined && /^\d{1,9}$/.test(local) ? Number(local) : undefined
           name = { name: attr(attributes, "name") ?? "", scope, hidden: isTrue(attr(attributes, "hidden")), text: [], length: 0 }

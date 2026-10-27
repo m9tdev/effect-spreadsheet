@@ -38,9 +38,10 @@ export interface Limits {
   /** Columns per row: column indexes must be `< maxColumns`. */
   readonly maxColumns: number
   /**
-   * Cells emitted for one sheet: every cell in every `Row.cells`, `Empty`
-   * cells included (a styled blank in XLSX counts). Positions without a
-   * cell (sparse gaps, CSV empty fields) don't count.
+   * Cells read in one sheet: every cell the reader reads, `Empty` cells
+   * included (a styled blank in XLSX counts), and repeated cells of a
+   * column count each time. Positions without a cell (sparse gaps, CSV
+   * empty fields) don't count.
    */
   readonly maxCellsPerSheet: number
   /**
@@ -54,6 +55,8 @@ export interface Limits {
   readonly maxStringLength: number
   /** Entries in a shared-string table. */
   readonly maxSharedStrings: number
+  /** Defined names in a workbook (XLS NAME records, XLSX `definedName` elements). */
+  readonly maxDefinedNames: number
   /** Element nesting depth of an XML part. */
   readonly maxXmlDepth: number
   /** Attributes on one XML element. */
@@ -90,6 +93,7 @@ export type LimitOverrides = { readonly [K in keyof Limits]?: number | undefined
  * | maxRecordFields | 1 048 576 | defval fills per toRecords run: ~1M keys, well under a second |
  * | maxStringLength | 262 144 | 8x Excel's 32 767-character cell limit, room for CSV blobs |
  * | maxSharedStrings | 5 000 000 | |
+ * | maxDefinedNames | 500 000 | ~90x the most in a 1 200-workbook corpus (5 576); a name costs ~80 bytes kept, ~300 while reading |
  * | maxXmlDepth | 128 | worksheet XML is about 6 levels deep |
  * | maxXmlAttributes | 512 | |
  * | maxSectorChain | 1 048 576 | 512 MiB of 512-byte sectors |
@@ -111,6 +115,7 @@ export const defaults: Limits = {
   maxRecordFields: 1_048_576,
   maxStringLength: 262_144,
   maxSharedStrings: 5_000_000,
+  maxDefinedNames: 500_000,
   maxXmlDepth: 128,
   maxXmlAttributes: 512,
   maxSectorChain: 1_048_576,

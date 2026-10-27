@@ -5,7 +5,7 @@
  * names (NAME with EXTERNSHEET and SUPBOOK) and encryption (FILEPASS).
  *
  * The walk reads records from the first BOF to its EOF; every record
- * advances the reader. Limits: sheets, shared strings, string lengths, and
+ * advances the reader. Limits: sheets, defined names, shared strings, string lengths, and
  * the SST's and each SUPBOOK's total size (maxDecompressedBytes).
  *
  * @internal
@@ -396,6 +396,9 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
         const wide = (flags & 0x01) !== 0
         const nameEnd = 15 + cch * (wide ? 2 : 1)
         if (nameEnd + cce > record.data.length) continue
+        if (names.length >= limits.maxDefinedNames) {
+          return new LimitExceeded({ limit: "maxDefinedNames", max: limits.maxDefinedNames, actual: names.length + 1 })
+        }
         const raw = record.data.subarray(15, nameEnd)
         const chars = wide ? utf16.decode(raw) : String.fromCharCode(...raw)
         const builtin = (grbit & 0x20) !== 0
