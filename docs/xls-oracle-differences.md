@@ -40,7 +40,7 @@ These are the intended differences:
 | defined names: a deleted sheet, or a sheet index past the workbook's sheets | `#REF!$A$1` | `#REF!$A$1`; a placeholder sheet name when out of range |
 | defined names: a reference to deleted cells (PtgRefErr3d, PtgAreaErr3d) | `Sheet!#REF!` (`#REF!` when the sheet is gone too) | `#REF!` |
 | defined names: whole columns | `Data!$A:$C`, as Excel writes them (whole rows `Data!$1:$2` agree) | `Data!$A$1:$C$65536` (some real files also give `$A$1:$IV$n` for whole rows) |
-| defined names: sheet-name quoting | as Excel: quoted when not name-like or when it reads as a cell reference; letters beyond ASCII need no quotes (`Données!$A$1`); a span `Jan:Mar!$A$1`, quoted as a whole when one name needs it | quotes non-ASCII names and every span (`'Jan:Mar'!$A$1`) |
+| defined names: sheet-name quoting | as Excel: quoted when not name-like or when it reads as a cell reference; letters beyond ASCII need no quotes (`Données!$A$1`); a span `Jan:Mar!$A$1`, quoted as a whole when one name needs it | doesn't quote names that start with a digit or read as a cell reference (`910617!`, `S2!`, `Top10!`, quoted by us); quotes some non-ASCII names (Cyrillic `'Лист3'!`, Hangul) but not others (kana and CJK ideographs `日本語のみ!`); quotes every span (`'Jan:Mar'!$A$1`) |
 | defined names: formulas other than a single 3-D reference or area | `""` (formulas aren't decompiled) | the decompiled formula (e.g. `42`) |
 | defined names: `hidden` | the NAME's fHidden flag (e.g. `_xlnm._FilterDatabase`) | never reported for XLS names |
 | defined names in BIFF5 files | none | reads them |
