@@ -89,6 +89,55 @@ describe("cfb: reading", () => {
     expect(fragmented.buffer).not.toBe(bytes.buffer)
   })
 
+  /**
+   * SAMPLE with Workbook's 20 sectors moved past the end of the file, sector
+   * j to `place(j)` sectors after it (FAT links and directory start
+   * patched); the sectors between them hold 0xEE. The FAT (one sector of
+   * 128 entries) still covers them all.
+   */
+  const relocated = (place: (j: number) => number) => {
+    const layout = writeCfb(SAMPLE)
+    const s = layout.streams.get("Workbook")!.start
+    const base = layout.bytes.length / 512 - 1
+    const spots = Array.from({ length: 20 }, (_, j) => base + place(j))
+    expect(spots.at(-1)!).toBeLessThan(128)
+    const bytes = new Uint8Array(sectorOffset(spots.at(-1)! + 1)).fill(0xEE)
+    bytes.set(layout.bytes)
+    const fat = sectorOffset(layout.fatSectors[0]!)
+    spots.forEach((spot, j) => {
+      bytes.set(layout.bytes.subarray(sectorOffset(s + j), sectorOffset(s + j + 1)), sectorOffset(spot))
+      patch32(bytes, fat + 4 * spot, j + 1 < spots.length ? spots[j + 1]! : 0xFFFFFFFE)
+    })
+    patch32(bytes, sectorOffset(layout.directorySectors[0]!) + layout.streams.get("Workbook")!.id * 128 + 116, spots[0]!)
+    return bytes
+  }
+
+  it("a chain consecutive only at its start, or increasing with gaps, is gathered, not viewed", () => {
+    // s, s+1, then a gap: s+3, s+4, ...
+    const gapLater = relocated((j) => (j < 2 ? j : j + 1))
+    const a = readOk(openOk(gapLater), "Workbook")
+    expect(a).toEqual(pseudoRandom(10_000, 1))
+    expect(a.buffer).not.toBe(gapLater.buffer)
+    // s, s+2, s+4, ...
+    const everyOther = relocated((j) => 2 * j)
+    const b = readOk(openOk(everyOther), "Workbook")
+    expect(b).toEqual(pseudoRandom(10_000, 1))
+    expect(b.buffer).not.toBe(everyOther.buffer)
+    // and laid out consecutively there, it is a view again
+    const moved = relocated((j) => j)
+    const c = readOk(openOk(moved), "Workbook")
+    expect(c).toEqual(pseudoRandom(10_000, 1))
+    expect(c.buffer).toBe(moved.buffer)
+  })
+
+  it("a consecutive stream running past the end of a truncated file is MalformedFile, not a short view", () => {
+    // Workbook ends the file: its last sector holds 10 000 - 19 * 512 = 272 bytes; keep 100 of them
+    const bytes = relocated((j) => j)
+    const cut = bytes.subarray(0, bytes.length - 512 + 100)
+    const cfb = openOk(cut)
+    expect(reasonOf(cfb.read(cfb.find("Workbook")!))).toBe("stream runs past the end of the file")
+  })
+
   it("reads version 4 files (4096-byte sectors), with 64-bit sizes", () => {
     const layout = writeCfb(SAMPLE, { version: 4 })
     expect(layout.sectorSize).toBe(4096)
