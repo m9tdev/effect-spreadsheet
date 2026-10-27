@@ -28,8 +28,8 @@
  * external workbook, `#REF!$A$1` for a deleted sheet), `""` otherwise;
  * BIFF5 workbooks give no defined names.
  *
- * BIFF2, BIFF3 and BIFF4 files (Excel 2.x-4.x) fail with
- * `UnsupportedFormat` naming the version; a password-protected workbook
+ * BIFF2, BIFF3 and BIFF4 files (Excel 2.x-4.x), bare or in a compound
+ * file, fail with `UnsupportedFormat` naming the version; a password-protected workbook
  * (FILEPASS) or an encrypted OOXML package in a compound file fails with
  * `Encrypted`.
  *
@@ -57,6 +57,14 @@ const CFB_MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 /** BOF record types of BIFF2-4, by version. */
 const OLD_BOFS: ReadonlyMap<number, string> = new Map([[0x0009, "biff2"], [0x0209, "biff3"], [0x0409, "biff4"]])
 
+/** `UnsupportedFormat` if a stream starts with a BIFF2, BIFF3 or BIFF4 BOF. */
+const oldBiff = (stream: Uint8Array): UnsupportedFormat | undefined => {
+  const old = stream.length >= 2 ? OLD_BOFS.get(stream[0]! | (stream[1]! << 8)) : undefined
+  return old === undefined
+    ? undefined
+    : new UnsupportedFormat({ format: old, reason: `${old.toUpperCase()} (Excel 2.x-4.x) workbooks aren't supported` })
+}
+
 /** The workbook stream: from a compound file, or the bytes themselves when they are a bare BIFF stream. */
 const workbookStream = (bytes: Uint8Array, limits: SpreadsheetLimits.Limits): Uint8Array | SpreadsheetError => {
   if (CFB_MAGIC.every((b, k) => bytes[k] === b)) {
@@ -67,14 +75,12 @@ const workbookStream = (bytes: Uint8Array, limits: SpreadsheetLimits.Limits): Ui
       if (cfb.find("EncryptedPackage") !== undefined) return new Encrypted({ format: "xlsx" })
       return new UnsupportedFormat({ format: "cfb", reason: "compound file without a Workbook or Book stream" })
     }
-    return cfb.read(entry)
+    const stream = cfb.read(entry)
+    return "_tag" in stream ? stream : oldBiff(stream) ?? stream
   }
-  const type = bytes.length >= 2 ? bytes[0]! | (bytes[1]! << 8) : -1
-  const old = OLD_BOFS.get(type)
-  if (old !== undefined) {
-    return new UnsupportedFormat({ format: old, reason: `${old.toUpperCase()} (Excel 2.x-4.x) workbooks aren't supported` })
-  }
-  if (type === 0x0809) return bytes // a bare BIFF5/8 workbook stream
+  const old = oldBiff(bytes)
+  if (old !== undefined) return old
+  if (bytes.length >= 2 && (bytes[0]! | (bytes[1]! << 8)) === 0x0809) return bytes // a bare BIFF5/8 workbook stream
   return new MalformedFile({ format: "xls", reason: "neither a compound file nor a BIFF stream" })
 }
 

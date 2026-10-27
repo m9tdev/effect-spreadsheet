@@ -1,4 +1,5 @@
 /** XLS workbook globals: defined-name text (SUPBOOK/EXTERNSHEET), BOF versions, sheet visibility, SST, text decoding, containers. */
+import { readFileSync } from "node:fs"
 import { Effect, Exit, Stream } from "effect"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
@@ -243,5 +244,17 @@ describe("xls globals: text decoders and containers", () => {
     const wb = await read({ biff: 5, globals: [X.codepage(28602)], sheets: [{ name: "x", name5: [0x80, 0x41], records: [X.label5(0, 0, 0, [0x80])] }] })
     expect(wb.sheets[0]!.name).toBe("\u20ACA")
     expect(await texts(wb)).toEqual(["\u20AC"])
+  })
+
+  it("a compound file whose workbook stream is BIFF2-4 is UnsupportedFormat naming the version", async () => {
+    for (const v of [2, 3, 4]) {
+      const biff = new Uint8Array(readFileSync(`test/corpus/generated/basic.biff${v}.xls`))
+      for (const stream of ["Book", "Workbook"]) {
+        const bytes = writeCfb([{ name: stream, data: biff }]).bytes
+        for (const exit of [await run(bytes), await Effect.runPromise(Effect.exit(Spreadsheet.read(bytes)))]) {
+          expect(failureOf(exit)).toMatchObject({ _tag: "UnsupportedFormat", format: `biff${v}` })
+        }
+      }
+    }
   })
 })

@@ -35,8 +35,11 @@ export interface ReadOptions {
 
 /**
  * Detects the format from the bytes alone (magic numbers and structure;
- * there is no file-name input, on purpose). Only zip containers are looked
- * into (their central directory), so this is cheap.
+ * there is no file-name input, on purpose). Containers are looked into, so
+ * this stays cheap: a zip's central directory, and a compound file's
+ * directory (`"xls"` if it has a Workbook or Book stream, `"cfb"` if not).
+ * A broken container fails with a typed error (`MalformedFile`,
+ * `LimitExceeded`) rather than giving a format.
  *
  * @since 0.1.0
  * @category detection

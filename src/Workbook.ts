@@ -92,7 +92,7 @@ export type Format =
   | "ods"
   | "spreadsheetml"
   | "sylk"
-  /** OLE compound file: legacy .xls, or an encrypted OOXML workbook (told apart once the CFB reader exists). */
+  /** An OLE compound file without a workbook stream: an encrypted OOXML workbook, or another document (a compound file with one is `"xls"`). */
   | "cfb"
   /** A zip that isn't a known workbook. */
   | "zip"
