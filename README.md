@@ -68,8 +68,8 @@ not from the workbook the rows were read from.
 ## XLS behaviour
 
 - `effect-spreadsheet/xls` (`Xls.read(bytes)`), or `Spreadsheet.read`, which detects an `.xls` from its compound file's workbook stream. BIFF8 (Excel 97-2003) and BIFF5 (Excel 5/95) workbooks read, also as a bare workbook stream. BIFF2, BIFF3 and BIFF4 files (Excel 2.x-4.x) fail with `UnsupportedFormat` naming the version (`biff2`, `biff3`, `biff4`).
-- The same `Workbook` API as XLSX: `workbook.sheets` (names, visibility), `workbook.definedNames` (BIFF8; formula text for single 3-D references and areas, `""` otherwise), `Workbook.rows` (hidden rows flagged, never skipped), `Workbook.sheetDetails` (hidden columns, merges, declared dimension).
-- Values: shared strings and labels are `Text` (BIFF5 strings in the workbook's code page via `TextDecoder`; unknown code pages as windows-1252); numbers (NUMBER, RK, MULRK), booleans and error codes keep their type; formula cells give their cached result (formula text isn't decompiled). Dates and `numFmt` work as in XLSX. Styled blanks are `Empty`.
+- The same `Workbook` API as XLSX: `workbook.sheets` (names, visibility), `workbook.definedNames` (BIFF8; a single 3-D reference or area is written as Excel writes it in XLSX: `Sheet!$A$1`, `'My Sheet'!$A$1:$B$2`, `Jan:Mar!$A$1`, whole rows `$1:$2` and columns `$A:$C`, `[1]Sheet!$A$1` for an external workbook, `#REF!` forms for deleted sheets or cells; other formulas `""`), `Workbook.rows` (hidden rows flagged, never skipped; chart and macro sheets have no rows), `Workbook.sheetDetails` (hidden columns, merges, the declared DIMENSIONS).
+- Values: shared strings and labels are `Text` (BIFF5 strings in the workbook's code page via `TextDecoder`; unknown code pages as windows-1252); numbers (NUMBER, RK, MULRK), booleans and error codes keep their type (NaN and infinities are `#NUM!` errors, unknown error codes `#N/A`); formula cells give their cached result (formula text isn't decompiled). Dates and `numFmt` work as in XLSX. Styled blanks are `Empty`.
 - A password-protected workbook, or an encrypted OOXML package in a compound file, fails with `Encrypted`.
 
 ### Comparison with other readers
