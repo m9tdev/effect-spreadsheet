@@ -31,7 +31,8 @@ export const effectOf = (task: FuzzTask): Effect.Effect<unknown, unknown> => {
   switch (task.op) {
     case "read":
       return Effect.flatMap(Spreadsheet.read(task.bytes, { limits: task.limits }), (wb) =>
-        Effect.forEach(wb.sheets, (sheet) => Stream.runDrain(Workbook.rows(wb, sheet.index))))
+        Effect.forEach(wb.sheets, (sheet) =>
+          Effect.andThen(Stream.runDrain(Workbook.rows(wb, sheet.index)), Workbook.sheetDetails(wb, sheet.index))))
     case "detect":
       return Spreadsheet.detectFormat(task.bytes)
     case "csv":
