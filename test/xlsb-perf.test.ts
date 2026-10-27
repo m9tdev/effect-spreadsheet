@@ -3,7 +3,9 @@
  * in work linear in its size. Checked without wall-clock limits: records
  * and rows per turn as counts; linearity as the reader's own record
  * counter (`work`, exact whatever the load) from n to 16n rows, and as the
- * scaling of its CPU time, with a margin for load.
+ * scaling of its CPU time, with a margin for load. The record counter only
+ * shows that records aren't read twice: work per record growing with the
+ * sheet (quadratic work) shows in the CPU-time test alone.
  */
 import { Effect, Stream } from "effect"
 import { describe, expect, it } from "vitest"
@@ -103,6 +105,7 @@ describe("xlsb: 200 000 rows", () => {
     expect(details.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
   }, 300_000)
 
+  // records only: quadratic work inside a record's handling is the CPU-time test's to catch
   it("read in linear work: 16x the rows take 16x the records", async () => {
     const records = async (rows: number) => {
       const wb = await Effect.runPromise(Xlsb.read(await bigXlsb(rows)))

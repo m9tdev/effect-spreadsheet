@@ -456,6 +456,17 @@ describe("xlsb limits and malformed input", () => {
     expect(await errorOf(one([B.rowHdr(0), B.cellSt(0, "x".repeat(100))]), { maxRecordBytes: 64 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxRecordBytes" })
   })
 
+  it("a sheet part that inflates past the archive's inflate budget fails when its rows are read (zip bomb)", async () => {
+    // 3.3 MB of rows deflates to about 210 KB; a 1 MiB floor and a ratio of 2 make the budget 1 MiB
+    const body = Array.from({ length: 100_000 }, (_, r) => [B.rowHdr(r), B.rk(0, B.rkInt(1))]).flat()
+    const bytes = await B.xlsb({ sheets: [{ name: "S", part: B.sheetBin(body) }] })
+    expect(bytes.length).toBeLessThan(500_000)
+    const exit = await readExit(bytes, { inflateFloorBytes: 1 << 20, maxInflateRatio: 2 })
+    expect(failureOf(exit)).toMatchObject({ _tag: "LimitExceeded", limit: "maxInflateRatio", max: 2 })
+    // and the default budget reads it
+    expect(Exit.isSuccess(await readExit(bytes))).toBe(true)
+  })
+
   it("broken records are MalformedFile at their offset", async () => {
     expect(await errorOf(one([B.rk(0, 1)]))).toMatchObject({ _tag: "MalformedFile", format: "xlsb", part: "xl/worksheets/sheet1.bin", reason: "cell record 0x2 outside a row" })
     expect(await errorOf(one([B.record(0, [1, 0, 0, 0])]))).toMatchObject({ _tag: "MalformedFile", reason: "truncated row header" })
