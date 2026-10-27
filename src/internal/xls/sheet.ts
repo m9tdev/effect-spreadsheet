@@ -41,7 +41,7 @@ import type { Globals } from "./globals.ts"
 
 /**
  * Steps of the rows reader's loops (records scanned and read, cells, rows,
- * queue and sort steps), summed over every read in this process. Tests use
+ * queue and sort steps) and of sheetDetails' record walk, summed over every read in this process. Tests use
  * it to check that the work grows linearly with the sheet, whatever the
  * machine's load; it costs one increment per step.
  */
@@ -81,6 +81,8 @@ const MERGECELLS = 0x00E5
 export interface SheetContext {
   readonly stream: Uint8Array
   readonly offset: number
+  /** End of the substream: reading stops there (see `SheetEntry.end`). */
+  readonly end: number
   readonly part: string
   readonly globals: Globals
   readonly limits: Limits
@@ -108,7 +110,7 @@ const openSubstream = (context: SheetContext): RecordReader | SpreadsheetError =
   if (context.offset < 0 || context.offset + 4 > context.stream.length) {
     return malformed(context.part, `sheet offset ${context.offset} is outside the workbook stream`)
   }
-  const reader = new RecordReader(context.stream, context.part, context.offset)
+  const reader = new RecordReader(context.stream, context.part, context.offset, context.end)
   const bof = reader.next()
   if (bof === undefined) return malformed(context.part, "the sheet has no BOF", context.offset)
   if (bof instanceof MalformedFile) return bof
@@ -134,7 +136,7 @@ class RowScan {
   private readonly reader: RecordReader
 
   constructor(context: SheetContext, offset: number) {
-    this.reader = new RecordReader(context.stream, context.part, offset)
+    this.reader = new RecordReader(context.stream, context.part, offset, context.end)
   }
 
   /** Reads up to `max` records; `done` at the sheet's EOF or where the records stop (the main pass reports why). */
@@ -609,6 +611,7 @@ export const sheetDetails = (context: SheetContext): Effect.Effect<SheetDetails,
     let nested = 0
     // progress: every next() advances the reader
     for (let k = 1;; k++) {
+      work.steps++
       if (k % BATCH_RECORDS === 0) yield* Effect.yieldNow
       const record = opened.next()
       if (record === undefined) return yield* Effect.fail(malformed(part, "the sheet has no EOF"))

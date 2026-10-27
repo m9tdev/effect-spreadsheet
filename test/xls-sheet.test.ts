@@ -7,7 +7,7 @@
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
-import { BATCH_RECORDS, Rows, type SheetContext } from "../src/internal/xls/sheet.ts"
+import { BATCH_RECORDS, Rows, type SheetContext, work } from "../src/internal/xls/sheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
@@ -335,5 +335,142 @@ describe("xls sheet: sheetDetails", () => {
     const reason = "the sheet doesn't start with a BOF"
     expect(failureOf(await Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, 0)))))).toMatchObject({ _tag: "MalformedFile", reason })
     expect(failureOf(await Effect.runPromise(Effect.exit(Workbook.sheetDetails(wb, 0))))).toMatchObject({ _tag: "MalformedFile", reason })
+  })
+})
+
+/** A substream for `layout`: its records, as given (no EOF added). */
+interface Sub {
+  readonly name: string
+  /** BOUNDSHEET dt: 0 worksheet, 2 chart, 6 VB module. */
+  readonly dt?: number
+  readonly records: ReadonlyArray<Uint8Array>
+  /** The BOUNDSHEET offset instead of the substream's own (globals end and substream offsets given). */
+  readonly at?: (globalsEnd: number, offsets: ReadonlyArray<number>) => number
+}
+
+const concat = (parts: ReadonlyArray<Uint8Array>) => {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+  let at = 0
+  // progress: one part per iteration
+  for (const p of parts) {
+    out.set(p, at)
+    at += p.length
+  }
+  return out
+}
+
+/**
+ * A BIFF8 workbook stream: globals with one BOUNDSHEET per sub (in `listed`
+ * order, default as given), then the substreams in the order given.
+ */
+const layout = (subs: ReadonlyArray<Sub>, listed: ReadonlyArray<number> = subs.map((_, k) => k)): Uint8Array => {
+  const boundsheet = (s: Sub, offset: number) => X.record(0x0085, [...X.u32(offset), 0, s.dt ?? 0, ...X.shortString(s.name)])
+  const bodies = subs.map((s) => concat(s.records))
+  const globalsEnd = concat([X.bof(0x0005), ...listed.map((k) => boundsheet(subs[k]!, 0)), X.eof()]).length
+  const offsets: Array<number> = []
+  let at = globalsEnd
+  // progress: one substream per iteration
+  for (const body of bodies) {
+    offsets.push(at)
+    at += body.length
+  }
+  const listing = listed.map((k) => boundsheet(subs[k]!, subs[k]!.at?.(globalsEnd, offsets) ?? offsets[k]!))
+  return concat([X.bof(0x0005), ...listing, X.eof(), ...bodies])
+}
+const fromStream = (stream: Uint8Array) => writeCfb([{ name: "Workbook", data: stream }]).bytes
+const rowsOf = (wb: Workbook.Workbook, sheet: number) => Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, sheet))))
+const detailsOf = (wb: Workbook.Workbook, sheet: number) => Effect.runPromise(Effect.exit(Workbook.sheetDetails(wb, sheet)))
+const sheet = (name: string, records: ReadonlyArray<Uint8Array>, eof = true): Sub => ({ name, records: [X.bof(0x0010), ...records, ...(eof ? [X.eof()] : [])] })
+/** Many records that are no cells (a filler record type the reader ignores). */
+const filler = (n: number) => Array.from({ length: n }, () => X.record(0x0225, X.u16(0)))
+
+describe("xls sheet: each sheet reads its own substream once", () => {
+  it("two sheets at the same offset, or one inside the globals (offset 0 too), are MalformedFile", async () => {
+    const same = layout([sheet("A", [X.number(0, 0, 0, 1)]), { ...sheet("B", []), at: (_, offsets) => offsets[0]! }])
+    const shared = failureOf(await Effect.runPromise(Effect.exit(Xls.read(fromStream(same)))))
+    expect(shared).toMatchObject({ _tag: "MalformedFile" })
+    expect((shared as { reason: string }).reason).toMatch(/^sheets "A" and "B" both start at \d+$/)
+    for (const at of [0, 4, -1]) {
+      const inside = layout([{ ...sheet("A", []), at: (globalsEnd) => (at === -1 ? globalsEnd - 4 : at) }])
+      const failure = failureOf(await Effect.runPromise(Effect.exit(Xls.read(fromStream(inside)))))
+      expect(failure, String(at)).toMatchObject({ _tag: "MalformedFile" })
+      expect((failure as { reason: string }).reason, String(at)).toContain("inside the workbook globals")
+    }
+  })
+
+  it("BOUNDSHEETs out of offset order still read; each sheet ends where the next substream starts", async () => {
+    // listed B, A while A's substream comes first; A has no EOF
+    const stream = layout([sheet("A", [X.number(0, 0, 0, 1)], false), sheet("B", [X.number(0, 0, 0, 2)])], [1, 0])
+    const wb = await Effect.runPromise(Xls.read(fromStream(stream)))
+    expect(wb.sheets.map((s) => s.name)).toEqual(["B", "A"])
+    const b = await rowsOf(wb, 0)
+    expect(Exit.isSuccess(b) && Array.from(b.value).flatMap((r) => r.cells.map(Cell.value))).toEqual([2])
+    expect(failureOf(await rowsOf(wb, 1))).toMatchObject({ _tag: "MalformedFile", reason: "the sheet has no EOF" })
+    expect(failureOf(await detailsOf(wb, 1))).toMatchObject({ _tag: "MalformedFile", reason: "the sheet has no EOF" })
+  })
+
+  it("a sheet without EOF stops at the next sheet, a nested BOF without EOF at the sheet's end: not reading on", async () => {
+    const big = filler(20_000)
+    const cases: Array<[string, Sub]> = [
+      ["no EOF", sheet("A", [X.number(0, 0, 0, 1)], false)],
+      ["nested BOF without EOF", sheet("A", [X.number(0, 0, 0, 1), X.bof(0x0020), X.number(0, 1, 0, 1)])]
+    ]
+    for (const [label, a] of cases) {
+      const wb = await Effect.runPromise(Xls.read(fromStream(layout([a, sheet("B", big)]))))
+      const before = work.steps
+      expect(failureOf(await rowsOf(wb, 0)), label).toMatchObject({ _tag: "MalformedFile", reason: "the sheet has no EOF" })
+      expect(failureOf(await detailsOf(wb, 0)), label).toMatchObject({ _tag: "MalformedFile", reason: "the sheet has no EOF" })
+      // a few steps per record of A, none for B's 20 000
+      expect(work.steps - before, label).toBeLessThan(100)
+    }
+    // the last sheet ends at the stream's end
+    const wb = await Effect.runPromise(Xls.read(fromStream(layout([sheet("A", [X.number(0, 0, 0, 1), X.bof(0x0020)])]))))
+    expect(failureOf(await rowsOf(wb, 0))).toMatchObject({ reason: "the sheet has no EOF" })
+  })
+
+  it("a record running past its substream's end is MalformedFile", async () => {
+    // A's last record claims 30 bytes: past A's end, into B
+    const a = sheet("A", [X.number(0, 0, 0, 1), new Uint8Array([...X.u16(0x0225), ...X.u16(30), 0, 0])], false)
+    const wb = await Effect.runPromise(Xls.read(fromStream(layout([a, sheet("B", filler(10))]))))
+    expect(failureOf(await rowsOf(wb, 0))).toMatchObject({ _tag: "MalformedFile", reason: "record 0x225 runs past the end of its substream" })
+    expect(failureOf(await detailsOf(wb, 0))).toMatchObject({ _tag: "MalformedFile", reason: "record 0x225 runs past the end of its substream" })
+  })
+
+  it("VB module offsets: a stale one (0) is ignored, one at a BOF past the globals ends the sheet before it", async () => {
+    const module = (at: (globalsEnd: number, offsets: ReadonlyArray<number>) => number): Sub => ({ name: "Module1", dt: 6, records: [X.bof(0x0006), ...filler(5000), X.eof()], at })
+    // listed: sheet A (no EOF), the module (its substream right after A), sheet B
+    const stream = layout([sheet("A", [X.number(0, 0, 0, 1)], false), module((_, offsets) => offsets[1]!), sheet("B", [X.number(0, 0, 0, 2)])])
+    const wb = await Effect.runPromise(Xls.read(fromStream(stream)))
+    expect(wb.sheets.map((s) => s.name)).toEqual(["A", "B"])
+    const before = work.steps
+    expect(failureOf(await rowsOf(wb, 0))).toMatchObject({ reason: "the sheet has no EOF" })
+    expect(work.steps - before).toBeLessThan(100)
+    // a module at offset 0 or inside the globals is no error and no substream start
+    const stale = layout([sheet("A", [X.number(0, 0, 0, 1)]), { name: "Module1", dt: 6, records: [], at: () => 0 }, sheet("B", [X.number(0, 0, 0, 2)])])
+    const ok = await Effect.runPromise(Xls.read(fromStream(stale)))
+    const rows = await rowsOf(ok, 1)
+    expect(Exit.isSuccess(rows) && Array.from(rows.value).flatMap((r) => r.cells.map(Cell.value))).toEqual([2])
+  })
+
+  it("many sheets cost at most the stream: total steps over all sheets' rows and details grow with its records", async () => {
+    // 512 sheets without EOF of 20 records each: each used to walk on to the stream's end
+    const subs = Array.from({ length: 512 }, (_, k) => sheet(`S${k}`, filler(20), false))
+    const stream = layout(subs)
+    const wb = await Effect.runPromise(Xls.read(fromStream(stream)))
+    const records = 512 * 21
+    const before = work.steps
+    // progress: one sheet per iteration
+    for (let k = 0; k < 512; k++) {
+      expect(failureOf(await rowsOf(wb, k))).toMatchObject({ reason: "the sheet has no EOF" })
+      expect(failureOf(await detailsOf(wb, k))).toMatchObject({ reason: "the sheet has no EOF" })
+    }
+    // rows: the header pass and the main pass, details: one pass (each step at most once per record)
+    expect(work.steps - before).toBeLessThanOrEqual(3 * records)
+  })
+
+  it("the rows reader's header pass yields in bounded batches before the first row", async () => {
+    const wb = await Effect.runPromise(Xls.read(X.xls(one([X.number(0, 0, 0, 1), ...filler(10 * BATCH_RECORDS)]))))
+    const run = await countYields(() => Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 1))))
+    expect(run.yields).toBeGreaterThanOrEqual(9)
   })
 })

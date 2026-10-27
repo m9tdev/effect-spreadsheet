@@ -12,7 +12,7 @@
  */
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import { type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
+import { BOF_BIFF5_8, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { readRichString, SegmentReader, utf16 } from "../biff/segments.ts"
 import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
 import { codepageLabel, Fields, readString, type Text, textDecoder } from "./fields.ts"
@@ -35,6 +35,12 @@ export interface SheetEntry {
   readonly visibility: "visible" | "hidden" | "veryHidden"
   /** Offset of the sheet's BOF in the workbook stream. */
   readonly offset: number
+  /**
+   * Where its substream must end: the next substream's offset (in offset
+   * order, whatever the BOUNDSHEET order), or the stream's end. Substreams
+   * don't overlap, so all sheets together read the stream at most once.
+   */
+  readonly end: number
   readonly kind: SheetKind
 }
 
@@ -209,6 +215,45 @@ const nameFormula = (
   return ""
 }
 
+/**
+ * Each sheet's substream end (see `SheetEntry.end`), after checking that
+ * no sheet starts inside the globals (which end at `globalsEnd`) and that
+ * no two sheets share a substream: either would let a small file make the
+ * reader walk the same records once per sheet. VB module offsets count as
+ * substream starts only where they point at a BOF past the globals (they
+ * are often 0 or stale: a module's code lives outside the workbook stream).
+ */
+const sheetEnds = (
+  stream: Uint8Array,
+  globalsEnd: number,
+  sheets: ReadonlyArray<Omit<SheetEntry, "end">>,
+  modules: ReadonlyArray<number>
+): Array<SheetEntry> | MalformedFile => {
+  const owner = new Map<number, string>()
+  // progress: one sheet per iteration (at most maxSheets)
+  for (const sheet of sheets) {
+    if (sheet.offset < globalsEnd) {
+      return malformed(`sheet ${JSON.stringify(sheet.name)} starts at ${sheet.offset}, inside the workbook globals (which end at ${globalsEnd})`)
+    }
+    const other = owner.get(sheet.offset)
+    if (other !== undefined) {
+      return malformed(`sheets ${JSON.stringify(other)} and ${JSON.stringify(sheet.name)} both start at ${sheet.offset}`)
+    }
+    owner.set(sheet.offset, sheet.name)
+  }
+  const view = new DataView(stream.buffer, stream.byteOffset, stream.byteLength)
+  const unique = new Set(owner.keys())
+  // progress: one module per iteration (bounded by the BOUNDSHEET records read)
+  for (const offset of modules) {
+    if (offset >= globalsEnd && offset + 4 <= stream.length && view.getUint16(offset, true) === BOF_BIFF5_8) unique.add(offset)
+  }
+  const starts = Float64Array.from(unique).sort()
+  const ends = new Map<number, number>()
+  // progress: k up to starts.length
+  for (let k = 0; k < starts.length; k++) ends.set(starts[k]!, k + 1 < starts.length ? starts[k + 1]! : stream.length)
+  return sheets.map((sheet) => ({ ...sheet, end: ends.get(sheet.offset)! }))
+}
+
 /** Reads the globals of a workbook stream (its first substream). */
 export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | SpreadsheetError => {
   const reader = new RecordReader(stream, "workbook globals")
@@ -224,7 +269,9 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
   const biff8 = bof.version === 0x0600
   let text: Text = { biff8, decoder: textDecoder("windows-1252"), maxLength: limits.maxStringLength }
   let date1904 = false
-  const sheets: Array<SheetEntry> = []
+  const sheets: Array<Omit<SheetEntry, "end">> = []
+  /** Offsets of VB module BOUNDSHEETs: not sheets, but they may start a substream. */
+  const modules: Array<number> = []
   const custom = new Map<number, string>()
   const xfFormats: Array<number> = []
   let strings: Array<string> = []
@@ -303,7 +350,10 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
           return malformed("truncated BOUNDSHEET", record.offset)
         }
         if (name === null) return tooLong(limits)
-        if (dt === 6) continue // a VB module, not a sheet
+        if (dt === 6) {
+          modules.push(offset) // a VB module, not a sheet
+          continue
+        }
         sheets.push({
           name: name.value,
           visibility: (state & 0x03) === 1 ? "hidden" : (state & 0x03) === 2 ? "veryHidden" : "visible",
@@ -357,16 +407,18 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
     break // EOF
   }
 
+  const ended = sheetEnds(stream, reader.offset, sheets, modules)
+  if (ended instanceof MalformedFile) return ended
   return {
     biff8,
     text,
     date1904,
-    sheets,
+    sheets: ended,
     formats: xfFormats.map((id) => formatFor(id, custom)),
     strings,
     definedNames: names.map((n) => ({
       name: n.name,
-      formula: nameFormula(n.rgce, xtis, books, sheets),
+      formula: nameFormula(n.rgce, xtis, books, ended),
       hidden: n.hidden,
       scope: n.scope !== undefined && n.scope < sheets.length ? n.scope : undefined
     }))

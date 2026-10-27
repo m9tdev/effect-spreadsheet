@@ -112,7 +112,7 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
       const entry = globals.sheets[sheet.index]!
       return entry.kind !== "worksheet"
         ? undefined
-        : { stream, offset: entry.offset, part: `sheet ${JSON.stringify(sheet.name)}`, globals, limits: effective }
+        : { stream, offset: entry.offset, end: entry.end, part: `sheet ${JSON.stringify(sheet.name)}`, globals, limits: effective }
     }
     return Workbook.make({
       format: "xls",
