@@ -405,8 +405,9 @@ describe("xlsb defined names", () => {
   })
 
   it("supporting books and XTIs past 65 536 aren't kept; self and add-in books share one object", async () => {
+    // self, add-in and external books in turn, past the cap (externals among those past it too)
     const floods = B.concat([
-      ...Array.from({ length: MAX_BOOKS + 10 }, (_, k) => (k % 2 === 0 ? B.supSelf() : B.supAddin())),
+      ...Array.from({ length: MAX_BOOKS + 10 }, (_, k) => (k % 3 === 0 ? B.supSelf() : k % 3 === 1 ? B.supAddin() : B.supBookSrc("rIdX1"))),
       B.externSheet(Array.from({ length: 40_000 }, () => [0, 0, 0] as const)),
       B.externSheet(Array.from({ length: 40_000 }, () => [0, 0, 0] as const))
     ])
@@ -415,9 +416,12 @@ describe("xlsb defined names", () => {
     const archive = open(bytes, limits)
     if ("_tag" in archive) throw new Error(archive._tag)
     const workbook = await Effect.runPromise(readWorkbookBin(archive, archive.find("xl/workbook.bin")!, limits))
-    expect(workbook.books).toHaveLength(MAX_BOOKS)
-    expect(workbook.books[0]).toBe(workbook.books[2])
-    expect(workbook.books[1]).toBe(workbook.books[3])
+    expect(workbook.books.length).toBe(MAX_BOOKS)
+    expect(workbook.books[0]).toBe(workbook.books[3])
+    expect(workbook.books[1]).toBe(workbook.books[4])
+    // external books are numbered in record order: the last one kept (book 65 534) is the 21 845th
+    expect(workbook.books[2]).toEqual({ kind: "external", link: 1, relationshipId: "rIdX1" })
+    expect(workbook.books[MAX_BOOKS - 2]).toEqual({ kind: "external", link: (MAX_BOOKS - 2 - 2) / 3 + 1, relationshipId: "rIdX1" })
     expect(workbook.xtis).toHaveLength(3 * MAX_XTIS)
     // the last XTI kept still resolves
     expect(definedNames(workbook, new Map())).toEqual([{ name: "N", formula: "S!$A$1", hidden: false }])
