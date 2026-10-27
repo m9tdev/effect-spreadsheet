@@ -1,9 +1,12 @@
 /** XLS workbook globals: defined-name text (SUPBOOK/EXTERNSHEET), BOF versions, sheet visibility, SST, text decoding, containers. */
-import { Effect, Exit } from "effect"
+import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
+import * as Cell from "../src/Cell.ts"
+import * as Spreadsheet from "../src/Spreadsheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xls from "../src/xls/index.ts"
+import { writeCfb } from "./helpers/cfb.ts"
 import { failureOf } from "./helpers/run.ts"
 import * as X from "./helpers/xls.ts"
 
@@ -14,6 +17,8 @@ const read = async (book: X.TestBook, limits?: LimitOverrides) => {
   return exit.value
 }
 const errorOf = async (book: X.TestBook, limits?: LimitOverrides) => failureOf(await run(X.xls(book), limits))
+const texts = async (wb: Workbook.Workbook, sheet = 0) =>
+  Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, sheet)))).flatMap((r) => r.cells.map((c) => Cell.value(c)))
 
 // SUPBOOK records: this workbook (ctab, 0x0401), an add-in (0x3A01), an external workbook (ctab, path, sheet names)
 const SUPBOOK = 0x01AE
@@ -185,5 +190,30 @@ describe("xls defined names: reference text", () => {
       { name: "First", formula: "One!$A$1", hidden: false, scope: 2 },
       { name: "Lost", formula: "Three!$A$1", hidden: false }
     ])
+  })
+})
+
+/** The workbook stream with the globals BOF's version word replaced. */
+const withVersion = (book: X.TestBook, version: number) => {
+  const stream = X.workbookStream(book)
+  stream.set(X.u16(version), 4)
+  return stream
+}
+
+describe("xls globals: BOF version, sheets, SST", () => {
+  it("BOF versions 0x0500-0x05FF are BIFF5, in a compound file or bare; others are UnsupportedFormat", async () => {
+    const book: X.TestBook = { biff: 5, sheets: [{ name: "Five", records: [X.label5(0, 0, 0, [0x68, 0x69])] }] }
+    for (const version of [0x0500, 0x0580, 0x05FF]) {
+      const stream = withVersion(book, version)
+      for (const bytes of [writeCfb([{ name: "Book", data: stream }]).bytes, stream]) {
+        const exit = await Effect.runPromise(Effect.exit(Spreadsheet.read(bytes)))
+        expect(Exit.isSuccess(exit) && exit.value.sheets.map((s) => s.name)).toEqual(["Five"])
+        if (Exit.isSuccess(exit)) expect(await texts(exit.value)).toEqual(["hi"])
+      }
+    }
+    for (const version of [0x0400, 0x04FF, 0x0601, 0x0700, 0x0000]) {
+      const later = writeCfb([{ name: "Book", data: withVersion(book, version) }]).bytes
+      expect(failureOf(await run(later))).toMatchObject({ _tag: "UnsupportedFormat", format: "xls", reason: `BIFF version 0x${version.toString(16)} in a BIFF5/8 BOF` })
+    }
   })
 })

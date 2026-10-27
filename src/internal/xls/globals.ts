@@ -210,7 +210,8 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
   if (first instanceof MalformedFile) return first
   const bof = readBof(first)
   if (bof === undefined || bof.kind !== 0x0005) return malformed("the workbook stream doesn't start with a workbook BOF", 0)
-  if (bof.version !== 0x0600 && bof.version !== 0x0500) {
+  // BIFF5 writers put 0x0500 or another 0x05xx (e.g. 0x0580) here
+  if (bof.version !== 0x0600 && (bof.version & 0xFF00) !== 0x0500) {
     return new UnsupportedFormat({ format: "xls", reason: `BIFF version 0x${bof.version.toString(16)} in a BIFF5/8 BOF` })
   }
   const biff8 = bof.version === 0x0600

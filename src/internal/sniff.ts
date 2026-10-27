@@ -65,7 +65,7 @@ const BOF_DATA_TYPES = new Set([0x0005, 0x0006, 0x0010, 0x0020, 0x0040, 0x0100])
 /**
  * A raw BIFF BOF record with the length its version uses and a known data
  * type: BIFF2 (0x0009, length 4), BIFF3/4 (0x0209/0x0409, length 6), BIFF5/8
- * (0x0809, length 8 or 16, version word 0x0500/0x0600). The strict check
+ * (0x0809, length 8 or 16, version word 0x05xx/0x0600). The strict check
  * keeps UTF-16LE text starting with tabs (`09 00 09 00`) out.
  */
 const isBiffBof = (bytes: Uint8Array): boolean => {
@@ -82,7 +82,7 @@ const isBiffBof = (bytes: Uint8Array): boolean => {
       return length === 6 && BOF_DATA_TYPES.has(dataType)
     case 0x0809: {
       const version = word(4)
-      return (length === 8 || length === 16) && (version === 0x0500 || version === 0x0600) && BOF_DATA_TYPES.has(dataType)
+      return (length === 8 || length === 16) && ((version & 0xFF00) === 0x0500 || version === 0x0600) && BOF_DATA_TYPES.has(dataType)
     }
     default:
       return false
