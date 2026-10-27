@@ -68,6 +68,27 @@ describe("cfb: reading", () => {
     expect(cfb.sectorsVisited()).toBeLessThanOrEqual(3 * (bytes.length / 512))
   })
 
+  it("a stream in consecutive sectors is a view of the file; a fragmented one is gathered", () => {
+    const layout = writeCfb(SAMPLE)
+    const contiguous = openOk(layout.bytes)
+    const view = readOk(contiguous, "Workbook")
+    expect(view).toEqual(pseudoRandom(10_000, 1))
+    expect(view.buffer).toBe(layout.bytes.buffer)
+    // swap Workbook's 2nd and 3rd sectors, data and FAT links: same stream, out of order
+    const s = layout.streams.get("Workbook")!.start
+    const bytes = layout.bytes.slice()
+    const second = bytes.slice(sectorOffset(s + 1), sectorOffset(s + 2))
+    bytes.copyWithin(sectorOffset(s + 1), sectorOffset(s + 2), sectorOffset(s + 3))
+    bytes.set(second, sectorOffset(s + 2))
+    const fat = sectorOffset(layout.fatSectors[0]!)
+    patch32(bytes, fat + 4 * s, s + 2)
+    patch32(bytes, fat + 4 * (s + 2), s + 1)
+    patch32(bytes, fat + 4 * (s + 1), s + 3)
+    const fragmented = readOk(openOk(bytes), "Workbook")
+    expect(fragmented).toEqual(pseudoRandom(10_000, 1))
+    expect(fragmented.buffer).not.toBe(bytes.buffer)
+  })
+
   it("reads version 4 files (4096-byte sectors), with 64-bit sizes", () => {
     const layout = writeCfb(SAMPLE, { version: 4 })
     expect(layout.sectorSize).toBe(4096)
