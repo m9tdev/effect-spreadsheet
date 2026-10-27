@@ -140,6 +140,32 @@ describe("xls defined names: which workbook a reference points at", () => {
 })
 
 describe("xls defined names: reference text", () => {
+  it("references to deleted cells (PtgRefErr3d, PtgAreaErr3d, every class) are Sheet!#REF!, or #REF! with no sheet", async () => {
+    const err = (ptg: number, ixti: number) => [ptg, ...X.u16(ixti), ...new Array(ptg % 16 === 0x0C ? 4 : 8).fill(0)]
+    const wb = await read({
+      globals: [
+        selfBook(2),
+        externalBook("\u0001x.xls", ["Ext"]),
+        xtis([[0, 0, 0], [0, 1, 1], [0, 0xFFFF, 0xFFFF], [1, 0, 0]]),
+        ...[0x3C, 0x5C, 0x7C, 0x3D, 0x5D, 0x7D].map((ptg) => X.name(`P${ptg.toString(16)}`, err(ptg, 0))),
+        X.name("Quoted", err(0x3C, 1)),
+        X.name("NoSheet", err(0x3D, 2)),
+        X.name("External", err(0x3C, 3)),
+        X.name("NoXti", err(0x3C, 9)),
+        X.name("Trailing", [...err(0x3C, 0), 0x03])
+      ],
+      sheets: sheets("Data", "My Sheet")
+    })
+    expect(formulas(wb)).toEqual({
+      P3c: "Data!#REF!", P5c: "Data!#REF!", P7c: "Data!#REF!", P3d: "Data!#REF!", P5d: "Data!#REF!", P7d: "Data!#REF!",
+      Quoted: "'My Sheet'!#REF!",
+      NoSheet: "#REF!",
+      External: "[1]Ext!#REF!",
+      NoXti: "",
+      Trailing: ""
+    })
+  })
+
   it("relative flags, every token class, whole rows and columns", async () => {
     const wb = await read({
       globals: [

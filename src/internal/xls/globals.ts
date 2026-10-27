@@ -167,7 +167,9 @@ const areaText = (r1: number, r2: number, c1: number, c2: number): string => {
  * The formula of a defined name, for the forms names usually take: a
  * single 3-D reference or area, written as Excel writes it in XLSX
  * (`Sheet!$A$1`, `'My Sheet'!$A$1:$B$2`, `Jan:Mar!$A$1`, `[1]Data!$A:$A`).
- * A reference to a deleted or missing sheet gives `#REF!$A$1`; one whose
+ * A reference to a deleted or missing sheet gives `#REF!$A$1`; one to
+ * deleted cells (PtgRefErr3d, PtgAreaErr3d) `Sheet!#REF!`, or `#REF!` when
+ * its sheet is gone too; one whose
  * EXTERNSHEET entry is missing gives `""`, like anything else (formulas
  * aren't decompiled). With no SUPBOOK at all (writers that leave it out),
  * the entries of SUPBOOK 0 are taken to point at this workbook.
@@ -198,6 +200,11 @@ const nameFormula = (
   if ((ptg === 0x3B || ptg === 0x5B || ptg === 0x7B) && rgce.length === 11) {
     const sheet = prefix(f.u16(1)!)
     return sheet === undefined ? "" : sheet + areaText(f.u16(3)!, f.u16(5)!, f.u16(7)!, f.u16(9)!)
+  }
+  // PtgRefErr3d / PtgAreaErr3d: a reference whose cells were deleted
+  if (((ptg === 0x3C || ptg === 0x5C || ptg === 0x7C) && rgce.length === 7) || ((ptg === 0x3D || ptg === 0x5D || ptg === 0x7D) && rgce.length === 11)) {
+    const sheet = prefix(f.u16(1)!)
+    return sheet === undefined ? "" : sheet === "#REF!" ? sheet : `${sheet}#REF!`
   }
   return ""
 }
