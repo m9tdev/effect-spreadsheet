@@ -66,7 +66,7 @@ interface PendingCell {
  * Sorts a row's cells by column in place, keeping the last cell of each
  * column (`sort` is stable), and returns them.
  */
-const compact = (cells: Array<Cell.Cell>): Array<Cell.Cell> => {
+export const compact = (cells: Array<Cell.Cell>): Array<Cell.Cell> => {
   cells.sort((a, b) => a.column - b.column)
   let kept = 0
   // progress: k up to cells.length
