@@ -69,7 +69,13 @@ export interface Limits {
   readonly maxSectorChain: number
   /** Nesting depth of storages in a CFB container (a workbook's are 1-3 deep). */
   readonly maxStorageDepth: number
-  /** Bytes in one XLSB (BIFF12) record, checked from its header before its data is held. */
+  /**
+   * Bytes in one XLSB (BIFF12) record, checked from its header before its
+   * data is held. A record that spans inflated pieces gets one buffer of
+   * its declared size when its header is read, so `Infinity` lets a single
+   * header make the reader allocate up to 2^28 - 1 bytes (256 MiB, the
+   * largest size a header can declare).
+   */
   readonly maxRecordBytes: number
 }
 
