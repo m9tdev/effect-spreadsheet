@@ -10,6 +10,9 @@
  *   Hidden rows (`hidden="1"`) are emitted with `hidden: true`.
  * - Cells: `<c r>` gives the column, else the previous cell's + 1. A row
  *   whose cells are out of order is sorted, keeping the last of duplicates.
+ *   An unsorted row is compacted that way as soon as it holds more than
+ *   2 x `maxColumns` cells, so repeated columns don't pile up (a row holds
+ *   at most that many cells, and the sorting work is amortized).
  * - Values by type (`t`): shared string (`s`), inline string, formula
  *   string (`str`), boolean, error, ISO date (`d`) and number (default).
  *   A number whose style has a date format becomes a `Date` (1900 or 1904
@@ -59,8 +62,24 @@ interface PendingCell {
   fromInline: boolean
 }
 
-/** Collects rows from tokenizer events. */
-class SheetRows implements XmlHandler {
+/**
+ * Sorts a row's cells by column in place, keeping the last cell of each
+ * column (`sort` is stable), and returns them.
+ */
+const compact = (cells: Array<Cell.Cell>): Array<Cell.Cell> => {
+  cells.sort((a, b) => a.column - b.column)
+  let kept = 0
+  // progress: k up to cells.length
+  for (let k = 0; k < cells.length; k++) {
+    const next = cells[k + 1]
+    if (next === undefined || next.column !== cells[k]!.column) cells[kept++] = cells[k]!
+  }
+  cells.length = kept
+  return cells
+}
+
+/** Collects rows from tokenizer events. Exported for tests. */
+export class SheetRows implements XmlHandler {
   /** Completed rows not yet emitted. */
   out: Array<Row> = []
   /** Cells emitted so far (for maxCellsPerSheet), and rows. */
@@ -72,6 +91,7 @@ class SheetRows implements XmlHandler {
   private rowExplicit = false
   private rowHidden = false
   private rowCells: Array<Cell.Cell> = []
+  /** `rowCells` is in strictly increasing column order. */
   private rowSorted = true
   private lastColumn = -1
   private previousRow = -1
@@ -197,7 +217,6 @@ class SheetRows implements XmlHandler {
     if (column >= limits.maxColumns) {
       return new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: column + 1 })
     }
-    if (column <= this.lastColumn) this.rowSorted = false
     this.lastColumn = column
     const s = attr(attributes, "s")
     this.cell = {
@@ -222,8 +241,21 @@ class SheetRows implements XmlHandler {
     if (cell instanceof MalformedFile) return cell
     const max = this.context.limits.maxCellsPerSheet
     if (++this.cells > max) return new LimitExceeded({ limit: "maxCellsPerSheet", max, actual: this.cells })
-    this.rowCells.push(cell)
+    const cells = this.rowCells
+    if (cells.length > 0 && cell.column <= cells[cells.length - 1]!.column) this.rowSorted = false
+    cells.push(cell)
+    // repeated columns don't pile up: past 2 x maxColumns cells an unsorted
+    // row is compacted (to at most maxColumns), so the work is amortized
+    if (!this.rowSorted && cells.length > 2 * this.context.limits.maxColumns) {
+      compact(cells)
+      this.rowSorted = true
+    }
     return undefined
+  }
+
+  /** Cells held for the open row (for tests). */
+  get heldCells(): number {
+    return this.rowCells.length
   }
 
   private toCell(pending: PendingCell): Cell.Cell | MalformedFile {
@@ -297,17 +329,7 @@ class SheetRows implements XmlHandler {
     if (++this.rowCount > limits.maxRows) {
       return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: this.rowCount })
     }
-    let cells = this.rowCells
-    if (!this.rowSorted) {
-      // stable sort by column, then keep the last cell of each column
-      const sorted = cells.map((c, k) => [c, k] as const).sort((a, b) => a[0].column - b[0].column || a[1] - b[1])
-      cells = []
-      // progress: one cell per iteration
-      for (let k = 0; k < sorted.length; k++) {
-        const next = sorted[k + 1]
-        if (next === undefined || next[0].column !== sorted[k]![0].column) cells.push(sorted[k]![0])
-      }
-    }
+    const cells = this.rowSorted ? this.rowCells : compact(this.rowCells)
     this.out.push({ index, hidden: this.rowHidden, cells })
     this.previousRow = index
     this.rowIndex = undefined

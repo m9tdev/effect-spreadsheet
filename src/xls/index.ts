@@ -87,6 +87,12 @@ const workbookStream = (bytes: Uint8Array, limits: SpreadsheetLimits.Limits): Ui
 /**
  * Opens an XLS workbook from its bytes.
  *
+ * The workbook keeps using `bytes` after this returns: a bare BIFF stream,
+ * or a workbook stream in consecutive sectors of its compound file, is a
+ * view of them, not a copy, and sheets are read from it when their rows
+ * are. Don't change them while the workbook is in use; pass a copy if the
+ * buffer is reused.
+ *
  * @since 0.1.0
  * @category readers
  */
@@ -98,16 +104,9 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     }
     const stream = workbookStream(bytes, limits)
     if ("_tag" in stream) return yield* Effect.fail(stream)
-    const globals = readGlobals(stream, limits)
-    if ("_tag" in globals) return yield* Effect.fail(globals)
+    const globals = yield* readGlobals(stream, limits)
 
     const sheets: Array<Workbook.SheetInfo> = globals.sheets.map((s, index) => ({ name: s.name, index, visibility: s.visibility }))
-    const definedNames: Array<Workbook.DefinedName> = globals.definedNames.map((d) => ({
-      name: d.name,
-      formula: d.formula,
-      hidden: d.hidden,
-      ...(d.scope === undefined ? {} : { scope: d.scope })
-    }))
     const context = (sheet: Workbook.SheetInfo, effective: SpreadsheetLimits.Limits) => {
       const entry = globals.sheets[sheet.index]!
       return entry.kind !== "worksheet"
@@ -117,7 +116,7 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     return Workbook.make({
       format: "xls",
       sheets,
-      definedNames,
+      definedNames: globals.definedNames,
       limits,
       // chart, macro and other sheets hold no cells
       rows: (sheet, effective) => {

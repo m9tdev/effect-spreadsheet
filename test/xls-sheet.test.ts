@@ -5,7 +5,7 @@
  * error codes, and sheetDetails edge cases. Synthetic records only.
  */
 import { Effect, Exit, Stream } from "effect"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { BATCH_RECORDS, caps, Rows, type SheetContext, work } from "../src/internal/xls/sheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
@@ -17,8 +17,13 @@ import { failureOf } from "./helpers/run.ts"
 import { countYields } from "./helpers/yields.ts"
 import * as X from "./helpers/xls.ts"
 
+// A reader that stops advancing (e.g. a broken `behind`) loops with yields
+// instead of ending: reads time out in seconds, and tests in 10, rather than
+// each waiting for the run's 60-second test timeout.
+vi.setConfig({ testTimeout: 10_000 })
+
 const readExit = (bytes: Uint8Array, limits?: LimitOverrides) =>
-  Effect.runPromise(Effect.exit(Effect.gen(function*() {
+  Effect.runPromise(Effect.exit(Effect.timeout(Effect.gen(function*() {
     const wb = yield* Xls.read(bytes, { limits })
     const sheets: Array<Array<Workbook.Row>> = []
     const details: Array<Workbook.SheetDetails> = []
@@ -27,7 +32,7 @@ const readExit = (bytes: Uint8Array, limits?: LimitOverrides) =>
       details.push(yield* Workbook.sheetDetails(wb, sheet.index))
     }
     return { wb, sheets, details }
-  })))
+  }), "5 seconds")))
 
 const readOk = async (book: X.TestBook, limits?: LimitOverrides) => {
   const exit = await readExit(X.xls(book), limits)
@@ -316,6 +321,97 @@ describe("xls sheet: emitting rows", () => {
     expect(rows.complete(Infinity)).toBeUndefined()
     expect(rows.take().map((r) => r.index)).toEqual([0])
   })
+
+  it("ROW-only rows count towards a batch: complete() and end() stop at the budget and go on in the next batch", () => {
+    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
+    // rows 0-999 declared by ROW records only, row 1000 with a cell (its last at offset 5), row 2000 declared after it
+    rows.start(new Map([[1000, 5]]))
+    // progress: r up to 1000
+    for (let r = 0; r < 1000; r++) rows.row(r, r % 3 === 0)
+    rows.row(2000, false)
+    expect(rows.cell(1000, Cell.number(0, 1))).toBeUndefined()
+    const out: Array<number> = []
+    const drain = () => {
+      // progress: each take() takes at least one row
+      while (rows.queued()) out.push(...rows.take().map((r) => r.index))
+    }
+    // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
+    for (let batch = 0; rows.behind(5); batch++) {
+      if (batch > 1002) throw new Error("complete() doesn't go on")
+      rows.budget = rows.effort + 100
+      expect(rows.complete(5)).toBeUndefined()
+      const before = out.length
+      drain()
+      // a budget of 100: at most 100 rows, one more for the row it ends with
+      expect(out.length - before).toBeLessThanOrEqual(101)
+    }
+    expect(out).toEqual(Array.from({ length: 1001 }, (_, r) => r))
+    // after the EOF: rows the scan didn't place and the declared rest, through end()
+    expect(rows.cell(1500, Cell.number(0, 2))).toBeUndefined()
+    // progress: r up to 1000
+    for (let r = 0; r < 1000; r++) rows.row(3000 + r, false)
+    let ended: unknown = false
+    // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
+    for (let batch = 0; ended !== true; batch++) {
+      if (batch > 1002) throw new Error("end() doesn't go on")
+      rows.budget = rows.effort + 100
+      ended = rows.end()
+      expect(typeof ended).toBe("boolean")
+      const before = out.length
+      drain()
+      expect(out.length - before).toBeLessThanOrEqual(101)
+    }
+    expect(out.slice(1001)).toEqual([1500, 2000, ...Array.from({ length: 1000 }, (_, r) => 3000 + r)])
+  })
+
+  it("end() emits rows the scan didn't place within the budget, over several batches", () => {
+    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
+    rows.start(new Map())
+    // 1 000 rows with a cell each, none placed by the scan: all left for end()
+    // progress: r up to 1000
+    for (let r = 0; r < 1000; r++) expect(rows.cell(999 - r, Cell.number(0, r))).toBeUndefined()
+    const out: Array<number> = []
+    let ended: unknown = false
+    let batches = 0
+    // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
+    for (; ended !== true; batches++) {
+      if (batches > 1002) throw new Error("end() doesn't go on")
+      rows.budget = rows.effort + 100
+      ended = rows.end()
+      expect(typeof ended).toBe("boolean")
+      const before = out.length
+      // progress: each take() takes at least one row
+      while (rows.queued()) out.push(...rows.take().map((r) => r.index))
+      expect(out.length - before).toBeLessThanOrEqual(101)
+    }
+    expect(batches).toBeGreaterThanOrEqual(10)
+    expect(out).toEqual(Array.from({ length: 1000 }, (_, r) => r))
+  })
+
+  it("a repeated ROW record isn't queued again: a flood of one row costs one step to emit", () => {
+    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
+    rows.start(new Map())
+    // progress: k up to 10 000
+    for (let k = 0; k < 10_000; k++) rows.row(k % 2, k === 7)
+    const before = work.steps
+    expect(rows.end()).toBe(true)
+    expect(work.steps - before).toBeLessThanOrEqual(2)
+    expect(rows.take().map((r) => [r.index, r.hidden])).toEqual([[0, false], [1, true]])
+  })
+
+  it("a row waiting for its formula's STRING doesn't stop the reader: the read ends at once (pending STRING isn't behind)", async () => {
+    // if behind() took a row waiting for its STRING as due, the reader
+    // would stop reading and loop (yielding) forever: the timeout catches
+    // it in a second instead of the test's own
+    const book = one([X.number(0, 0, 0, 1), X.formula(0, 1, 0, { kind: 0 }), companion(SHRFMLA), X.string("s"), X.number(1, 0, 0, 2)])
+    const wb = await Effect.runPromise(Xls.read(X.xls(book)))
+    const exit = await Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, 0)).pipe(Effect.timeout("1 second"))))
+    if (Exit.isFailure(exit)) throw new Error(`read failed: ${JSON.stringify(failureOf(exit))}`)
+    expect(values(Array.from(exit.value))).toEqual([
+      [0, false, [[0, "Number", 1], [1, "Text", "s"]]],
+      [1, false, [[0, "Number", 2]]]
+    ])
+  })
 })
 
 describe("xls sheet: repeated columns", () => {
@@ -330,7 +426,7 @@ describe("xls sheet: repeated columns", () => {
       most = Math.max(most, (rows as unknown as { open: Map<number, { cells: Array<unknown> }> }).open.get(0)!.cells.length)
     }
     expect(most).toBeLessThanOrEqual(2 * 8 + 1)
-    expect(rows.end()).toBeUndefined()
+    expect(rows.end()).toBe(true)
     const [row] = rows.take()
     expect(row.cells.map((c) => [c.column, Cell.value(c)])).toEqual(Array.from({ length: 8 }, (_, c) => [c, 8000 - 8 + 7 - c]))
     // read end to end: the same rule over many MULBLANK and NUMBER records on the same columns

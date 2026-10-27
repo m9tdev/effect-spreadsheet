@@ -63,6 +63,11 @@ export interface ReadOptions {
  * `MalformedFile` for a broken package, `LimitExceeded` when a limit is
  * hit, `Encrypted` for encrypted zip entries.
  *
+ * The workbook keeps using `bytes` after this returns: its zip entries are
+ * views of them, not copies, inflated when a sheet's rows are read. Don't
+ * change them while the workbook is in use; pass a copy if the buffer is
+ * reused.
+ *
  * @since 0.1.0
  * @category readers
  */

@@ -137,6 +137,13 @@ class Chains {
 
 const utf16 = new TextDecoder("utf-16le")
 
+/** Whether each sector follows the one before it. */
+const consecutive = (sectors: ReadonlyArray<number>): boolean => {
+  // progress: k up to sectors.length
+  for (let k = 1; k < sectors.length; k++) if (sectors[k] !== sectors[k - 1]! + 1) return false
+  return true
+}
+
 /** Opens a compound file. */
 export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | LimitExceeded => {
   if (bytes.length < 512) return malformed("file shorter than a CFB header")
@@ -389,6 +396,10 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
       }
       const sectors = chains.walk(entry.start, Math.ceil(size / sectorSize), entry.id + 1)
       if (!Array.isArray(sectors)) return sectors
+      // a stream in consecutive sectors (as writers lay out big streams) is a
+      // view of the file, not a copy: no pause to copy hundreds of MiB
+      const at = sectors.length > 0 ? (sectors[0]! + 1) * sectorSize : 0
+      if (sectors.length * sectorSize >= size && at + size <= bytes.length && consecutive(sectors)) return bytes.subarray(at, at + size)
       return gather(sectors, size, sectorSize, sectorAt)
     },
     sectorsVisited: () => {

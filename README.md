@@ -48,6 +48,11 @@ it would otherwise silently switch the check off.
 `defval` fills) from the context where the records are produced, plus its own `limits` option,
 not from the workbook the rows were read from.
 
+The bytes passed to `read` stay in use after it returns: the workbook keeps views of them, not
+copies (XLSX zip entries, a bare BIFF stream, and an XLS workbook stream laid out in consecutive
+sectors of its compound file), and sheets are read from them when their rows are. Don't change
+those bytes while the workbook is in use; pass a copy if the buffer is reused.
+
 ## CSV behaviour
 
 - Encoding: a BOM (UTF-8, UTF-16LE/BE) always wins, even over a forced `encoding`, and is dropped; otherwise `"auto"` decides on the first 64 KiB: UTF-16 by NUL pattern, else UTF-8 if valid, else windows-1252. `encoding` forces any `TextDecoder` label for input without a BOM.

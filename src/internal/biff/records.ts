@@ -93,36 +93,69 @@ export class RecordReader {
   nextWithContinues(maxBytes: number, limit: string): ContinuedRecord | undefined | MalformedFile | LimitExceeded {
     const first = this.next()
     if (first === undefined || first instanceof MalformedFile) return first
-    // ranges of the stream, in a growable array: no object per segment
-    let bounds = new Uint32Array(16)
+    const gathering = this.startContinues(first, maxBytes, limit)
+    const done = this.continues(gathering, Infinity)
+    return done === true ? continued(gathering) : done === false ? undefined : done
+  }
+
+  /** Starts gathering the `CONTINUE`s after `first` (a record this reader just read), within `maxBytes` (named `limit`). */
+  startContinues(first: BiffRecord, maxBytes: number, limit: string): Gathering {
+    const bounds = new Uint32Array(16)
     bounds[0] = first.offset + 4
     bounds[1] = first.offset + 4 + first.data.length
-    let count = 1
-    let total = 4 + first.data.length
-    const bytes = this.bytes
-    // progress: each iteration consumes one CONTINUE record (offset grows by 4 + length)
-    while (this.offset + 4 <= this.end && this.view.getUint16(this.offset, true) === CONTINUE) {
+    return { first, bytes: this.bytes, maxBytes, limit, bounds, count: 1, total: 4 + first.data.length }
+  }
+
+  /**
+   * Reads at most `max` more of the `CONTINUE` records after `gathering`'s
+   * record (see `nextWithContinues`), so that a long run of them can be
+   * read in bounded steps: true once the next record isn't a `CONTINUE`
+   * (then `continued` gives the record), false while some may be left.
+   */
+  continues(gathering: Gathering, max: number): boolean | MalformedFile | LimitExceeded {
+    const g = gathering
+    // progress: each iteration consumes one CONTINUE record (offset grows by 4 + length), at most max
+    for (let k = 0; k < max; k++) {
+      if (this.offset + 4 > this.end || this.view.getUint16(this.offset, true) !== CONTINUE) return true
       const at = this.offset
       const length = this.view.getUint16(at + 2, true)
       const end = at + 4 + length
       if (end > this.end) return this.pastEnd(at, CONTINUE)
       this.offset = end
       this.records++
-      total += 4 + length
-      if (total > maxBytes) return new LimitExceeded({ limit, max: maxBytes, actual: total })
+      g.total += 4 + length
+      if (g.total > g.maxBytes) return new LimitExceeded({ limit: g.limit, max: g.maxBytes, actual: g.total })
       if (length === 0) continue // nothing to continue: the offset advanced above
-      if (2 * count + 2 > bounds.length) {
-        const grown = new Uint32Array(bounds.length * 2)
-        grown.set(bounds)
-        bounds = grown
+      if (2 * g.count + 2 > g.bounds.length) {
+        const grown = new Uint32Array(g.bounds.length * 2)
+        grown.set(g.bounds)
+        g.bounds = grown
       }
-      bounds[2 * count] = at + 4
-      bounds[2 * count + 1] = end
-      count++
+      g.bounds[2 * g.count] = at + 4
+      g.bounds[2 * g.count + 1] = end
+      g.count++
     }
-    // a view of the used part, no copy (at most 2x the used size is kept)
-    return { ...first, segments: { bytes, bounds: bounds.subarray(0, 2 * count), count } }
+    return this.offset + 4 > this.end || this.view.getUint16(this.offset, true) !== CONTINUE
   }
+}
+
+/** A record whose `CONTINUE`s are being read (see `RecordReader.continues`). */
+export interface Gathering {
+  readonly first: BiffRecord
+  /** The reader's stream, which `bounds` index. */
+  readonly bytes: Uint8Array
+  readonly maxBytes: number
+  readonly limit: string
+  /** Ranges of the stream, in a growable array: no object per segment. */
+  bounds: Uint32Array
+  count: number
+  total: number
+}
+
+/** The record and its `CONTINUE`s gathered so far. */
+export const continued = (g: Gathering): ContinuedRecord => {
+  // a view of the used part, no copy (at most 2x the used size is kept)
+  return { ...g.first, segments: { bytes: g.bytes, bounds: g.bounds.subarray(0, 2 * g.count), count: g.count } }
 }
 
 /** A BOF record: the BIFF version and what the substream holds. */
