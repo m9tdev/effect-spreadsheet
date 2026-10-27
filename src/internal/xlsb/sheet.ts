@@ -40,15 +40,15 @@ import { type Biff12Record, readRecords, RecordSplitter } from "../biff12/record
 import { decodeRk, ERROR_CODES } from "../xls/fields.ts"
 import { mergeSpans } from "../xlsx/details.ts"
 import { serialToDate } from "../xlsx/numFmt.ts"
-import type { Styles } from "../xlsx/parts.ts"
 import { compact } from "../xlsx/sheet.ts"
+import type { CellStyles } from "./parts.ts"
 import { sliced } from "./slices.ts"
 import { malformed } from "./workbook.ts"
 
 export interface SheetContext {
   readonly part: string
   readonly strings: ReadonlyArray<string> | undefined
-  readonly styles: Styles
+  readonly styles: CellStyles
   readonly date1904: boolean
   readonly limits: Limits
 }
@@ -288,7 +288,7 @@ export class SheetRows {
 
   /** A number cell, a Date when its style has a date format. */
   private numberCell(column: number, style: number, value: number): Cell.Cell {
-    const format = this.context.styles.formats[style]
+    const format = this.context.styles.format(style)
     const meta: Cell.Meta | undefined = format?.code === undefined ? undefined : { numFmt: format.code }
     if (format?.date === true) {
       const date = serialToDate(value, this.context.date1904)

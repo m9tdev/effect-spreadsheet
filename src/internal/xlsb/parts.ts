@@ -9,8 +9,7 @@ import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import { Fields, readRichStr, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords } from "../biff12/records.ts"
-import { formatFor } from "../xlsx/numFmt.ts"
-import type { Styles } from "../xlsx/parts.ts"
+import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
 import { sliced } from "./slices.ts"
@@ -50,19 +49,55 @@ export const readSharedStrings = (
   })
 
 /**
+ * The number formats of the cell styles: a cell's style index (u24) is an
+ * index into the BrtXF records of BrtBeginCellXFs. Kept as one u16 format
+ * id per style (at most `caps.cellXfs` styles, the u24 range), with one
+ * `NumberFormat` per format id, made when a cell first uses it: a flood
+ * of tiny BrtXF records costs 2 bytes each.
+ */
+export interface CellStyles {
+  /** The number format of a cell style; `undefined` past the styles. */
+  readonly format: (style: number) => NumberFormat | undefined
+  /** Styles kept. */
+  readonly count: number
+}
+
+/** Cell styles kept at most: a cell's style index is 24 bits. Tests may lower it. */
+export const caps = { cellXfs: 0x1000000 }
+
+const cellStyles = (ids: Uint16Array, count: number, custom: ReadonlyMap<number, string>): CellStyles => {
+  const byId = new Map<number, NumberFormat>()
+  return {
+    count,
+    format: (style) => {
+      if (style >= count) return undefined
+      const id = ids[style]!
+      let format = byId.get(id)
+      if (format === undefined) {
+        format = formatFor(id, custom)
+        byId.set(id, format)
+      }
+      return format
+    }
+  }
+}
+
+export const NO_STYLES: CellStyles = cellStyles(new Uint16Array(0), 0, new Map())
+
+/**
  * Reads the number formats (BrtFmt in BrtBeginFmts) and the cell styles
- * that use them (BrtXF in BrtBeginCellXFs: a cell's style index is an
- * index into these), as for XLSX. BrtXF records elsewhere (cell style
- * XFs, differential formats) don't count.
+ * that use them (BrtXF in BrtBeginCellXFs), as for XLSX. BrtXF records
+ * elsewhere (cell style XFs, differential formats) don't count.
  */
 export const readStyles = (
   archive: Archive,
   entry: ZipEntry,
   limits: Limits
-): Effect.Effect<Styles, SpreadsheetError> =>
+): Effect.Effect<CellStyles, SpreadsheetError> =>
   Effect.suspend(() => {
     const custom = new Map<number, string>()
-    const xfIds: Array<number> = []
+    let ids = new Uint16Array(64)
+    let count = 0
     let inFmts = false
     let inCellXfs = false
     const handle = (record: Biff12Record): SpreadsheetError | undefined => {
@@ -94,14 +129,19 @@ export const readStyles = (
           // ixfeParent u16, iFmt u16, ...
           const id = new Fields(record.data).u16(2)
           if (id === undefined) return malformed("truncated cell format", entry.name, record.offset)
-          xfIds.push(id)
+          // styles past the u24 range can't be used by any cell
+          if (count >= caps.cellXfs) return undefined
+          if (count === ids.length) {
+            const grown = new Uint16Array(Math.min(2 * ids.length, caps.cellXfs))
+            grown.set(ids)
+            ids = grown
+          }
+          ids[count++] = id
           return undefined
         }
         default:
           return undefined
       }
     }
-    return Effect.map(readRecords(sliced(archive.read(entry)), handle, limits, entry.name), (): Styles => ({
-      formats: xfIds.map((id) => formatFor(id, custom))
-    }))
+    return Effect.map(readRecords(sliced(archive.read(entry)), handle, limits, entry.name), () => cellStyles(ids, count, custom))
   })

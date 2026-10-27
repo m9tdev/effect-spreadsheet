@@ -7,6 +7,7 @@
  */
 import { Effect, Stream } from "effect"
 import { describe, expect, it } from "vitest"
+import { NO_STYLES } from "../src/internal/xlsb/parts.ts"
 import { sheetDetails, sheetRows, work } from "../src/internal/xlsb/sheet.ts"
 import { SLICE_BYTES } from "../src/internal/xlsb/slices.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
@@ -79,7 +80,7 @@ describe("xlsb: 200 000 rows", () => {
     for (let r = 0; r < ROWS; r++) body.push(B.rowHdr(r), B.rk(0, B.rkInt(r)))
     const part = B.sheetBin(body)
     const limits = SpreadsheetLimits.defaults
-    const context = { part: "one.bin", strings: undefined, styles: { formats: [] }, date1904: false, limits }
+    const context = { part: "one.bin", strings: undefined, styles: NO_STYLES, date1904: false, limits }
     let rows = 0
     const run = await countYields(
       () => Effect.runPromise(Stream.runForEach(sheetRows(Stream.make(part), context), () => Effect.sync(() => void rows++))),

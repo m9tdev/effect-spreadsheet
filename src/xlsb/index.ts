@@ -36,9 +36,9 @@
  */
 import { Effect, Stream } from "effect"
 import { sheetDetails, sheetRows } from "../internal/xlsb/sheet.ts"
-import { readSharedStrings, readStyles } from "../internal/xlsb/parts.ts"
+import { type CellStyles, NO_STYLES, readSharedStrings, readStyles } from "../internal/xlsb/parts.ts"
 import { definedNames, malformed, readExternalBooks, readWorkbookBin } from "../internal/xlsb/workbook.ts"
-import { NO_STYLES, readRelationships, relationshipKind, type Styles } from "../internal/xlsx/parts.ts"
+import { readRelationships, relationshipKind } from "../internal/xlsx/parts.ts"
 import { open } from "../internal/zip/archive.ts"
 import { LimitExceeded, type SpreadsheetError } from "../SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../SpreadsheetLimits.ts"
@@ -109,7 +109,7 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     const stringsEntry = partEntry("sharedStrings")
     const stylesEntry = partEntry("styles")
     const strings = stringsEntry === undefined ? undefined : yield* readSharedStrings(archive, stringsEntry, limits)
-    const styles: Styles = stylesEntry === undefined ? NO_STYLES : yield* readStyles(archive, stylesEntry, limits)
+    const styles: CellStyles = stylesEntry === undefined ? NO_STYLES : yield* readStyles(archive, stylesEntry, limits)
 
     // the sheet names of external workbooks that defined names point into
     // (each external link part read once, however many books share it; a missing one leaves #REF!)
