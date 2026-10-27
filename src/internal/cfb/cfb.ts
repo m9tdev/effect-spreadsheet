@@ -70,6 +70,13 @@ const malformed = (reason: string, offset?: number) =>
  * `maxSectorChain`).
  */
 class Chains {
+  /**
+   * Who owns each sector: 0 none, `id + 1` for directory entry `id`, a
+   * negative value for the container's own structures. A sector may be
+   * claimed once: two streams sharing sectors would let reading every
+   * stream copy the same data again and again.
+   */
+  private readonly owners: Int32Array
   private readonly stamps: Uint32Array
   private stamp = 0
   visited = 0
@@ -81,13 +88,23 @@ class Chains {
   constructor(table: Uint32Array, limitSectors: number, maxChain: number, what: string) {
     this.table = table
     this.stamps = new Uint32Array(table.length)
+    this.owners = new Int32Array(table.length)
     this.limitSectors = limitSectors
     this.maxChain = maxChain
     this.what = what
   }
 
-  /** Up to `count` sectors of the chain from `start` (all of them when `count` is undefined). */
-  walk(start: number, count: number | undefined): Array<number> | MalformedFile | LimitExceeded {
+  /** Marks a sector as the container's own (FAT, DIFAT). */
+  reserve(sector: number, owner: number): void {
+    if (sector < this.owners.length) this.owners[sector] = owner
+  }
+
+  /**
+   * Up to `count` sectors of the chain from `start` (all of them when
+   * `count` is undefined), claimed for `owner`: a sector another owner has
+   * claimed is a `MalformedFile` (the same owner may walk it again).
+   */
+  walk(start: number, count: number | undefined, owner: number): Array<number> | MalformedFile | LimitExceeded {
     const out: Array<number> = []
     if (count === 0) return out
     this.stamp++
@@ -101,6 +118,9 @@ class Chains {
       if (out.length >= this.maxChain) {
         return new LimitExceeded({ limit: "maxSectorChain", max: this.maxChain, actual: out.length + 1 })
       }
+      const holder = this.owners[sector]!
+      if (holder !== 0 && holder !== owner) return malformed(`sector ${sector} of the ${this.what} belongs to two streams`)
+      this.owners[sector] = owner
       this.stamps[sector] = this.stamp
       out.push(sector)
       this.visited++
@@ -184,6 +204,12 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
     for (let i = words; i < perSector; i++) fat[k * perSector + i] = FREESECT
   }
   const chains = new Chains(fat, fileSectors, maxChain, "FAT")
+  const OWN_FAT = -1
+  const OWN_DIRECTORY = -2
+  const OWN_MINIFAT = -3
+  // progress: one sector per iteration
+  for (const sector of fatSectors) chains.reserve(sector, OWN_FAT)
+  for (const sector of difatSeen) chains.reserve(sector, OWN_FAT)
 
   /** Copies `size` bytes of a chain of `unit`-byte sectors. */
   const gather = (
@@ -208,7 +234,7 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
   }
 
   // the directory
-  const dirChain = chains.walk(u32(48), undefined)
+  const dirChain = chains.walk(u32(48), undefined, OWN_DIRECTORY)
   if (!Array.isArray(dirChain)) return dirChain
   const dirBytes = gather(dirChain, dirChain.length * sectorSize, sectorSize, sectorAt)
   if (dirBytes instanceof MalformedFile) return dirBytes
@@ -284,7 +310,7 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
   const loadMini = () => {
     if (mini !== undefined) return mini
     const numMiniFat = u32(64)
-    const miniFatChain = chains.walk(u32(60), numMiniFat)
+    const miniFatChain = chains.walk(u32(60), numMiniFat, OWN_MINIFAT)
     if (!Array.isArray(miniFatChain)) return (mini = miniFatChain)
     if (miniFatChain.length < numMiniFat) return (mini = malformed("miniFAT chain is shorter than the header says"))
     const table = new Uint32Array(miniFatChain.length * perSector)
@@ -295,7 +321,7 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
     if (!Number.isFinite(root.size) || root.size > fileSectors * sectorSize) {
       return (mini = malformed("mini stream is larger than the file"))
     }
-    const rootChain = chains.walk(root.start, Math.ceil(root.size / sectorSize))
+    const rootChain = chains.walk(root.start, Math.ceil(root.size / sectorSize), 1)
     if (!Array.isArray(rootChain)) return (mini = rootChain)
     const data = gather(rootChain, root.size, sectorSize, sectorAt)
     if (data instanceof MalformedFile) return (mini = data)
@@ -317,11 +343,11 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
         if (size === 0) return new Uint8Array(0)
         const m = loadMini()
         if (!("data" in m)) return m
-        const sectors = m.chains.walk(entry.start, Math.ceil(size / MINI_SECTOR))
+        const sectors = m.chains.walk(entry.start, Math.ceil(size / MINI_SECTOR), entry.id + 1)
         if (!Array.isArray(sectors)) return sectors
         return gather(sectors, size, MINI_SECTOR, (s) => m.data.subarray(s * MINI_SECTOR, s * MINI_SECTOR + MINI_SECTOR))
       }
-      const sectors = chains.walk(entry.start, Math.ceil(size / sectorSize))
+      const sectors = chains.walk(entry.start, Math.ceil(size / sectorSize), entry.id + 1)
       if (!Array.isArray(sectors)) return sectors
       return gather(sectors, size, sectorSize, sectorAt)
     },

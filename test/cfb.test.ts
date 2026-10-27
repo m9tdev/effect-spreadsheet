@@ -219,6 +219,32 @@ describe("cfb: hostile and broken files", () => {
     expect(reasonOf(open(tooMany, limits))).toMatch(/header lists 1000000 FAT sectors/)
   })
 
+  it("streams that share sectors are MalformedFile; reading one stream twice is fine", () => {
+    const layout = writeCfb([...SAMPLE, { name: "Second", data: pseudoRandom(10_000, 8) }])
+    const dir = sectorOffset(layout.directorySectors[0]!)
+    const startOf = (path: string) => layout.streams.get(path)!
+    // Second's directory entry pointed at Workbook's sectors
+    const shared = layout.bytes.slice()
+    patch32(shared, dir + startOf("Second").id * 128 + 116, startOf("Workbook").start)
+    const a = openOk(shared)
+    expect(readOk(a, "Workbook")).toEqual(pseudoRandom(10_000, 1))
+    expect(readOk(a, "Workbook")).toEqual(pseudoRandom(10_000, 1))
+    expect(reasonOf(a.read(a.find("Second")!))).toMatch(/belongs to two streams/)
+    // in the mini stream too
+    const sharedMini = layout.bytes.slice()
+    patch32(sharedMini, dir + startOf("Edge").id * 128 + 116, startOf("\u0005SummaryInformation").start)
+    const b = openOk(sharedMini)
+    readOk(b, "\u0005SummaryInformation")
+    expect(reasonOf(b.read(b.find("Edge")!))).toMatch(/miniFAT belongs to two streams/)
+    // a stream running into the directory or a FAT sector
+    for (const sector of [layout.directorySectors[0]!, layout.fatSectors[0]!]) {
+      const intoOwn = layout.bytes.slice()
+      patch32(intoOwn, dir + startOf("Second").id * 128 + 116, sector)
+      const c = openOk(intoOwn)
+      expect(reasonOf(c.read(c.find("Second")!)), String(sector)).toMatch(/belongs to two streams/)
+    }
+  })
+
   it("deeply nested storages stop at maxStorageDepth (paths would cost depth²)", () => {
     let item: CfbItem = { name: "leaf", data: new Uint8Array([1]) }
     for (let k = 0; k < 10_000; k++) item = { name: `s${k % 10}`, children: [item] }
