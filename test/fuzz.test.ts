@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { FuzzHost } from "./fuzz/host.ts"
 import type { FuzzTask } from "./fuzz/tasks.ts"
 import { enc } from "./helpers/run.ts"
+import { writeCfb } from "./helpers/cfb.ts"
 import { xlsx } from "./helpers/xlsx.ts"
 import { makeZip } from "./helpers/zip.ts"
 
@@ -174,4 +175,41 @@ describe("fuzz: never a defect, never a hang", () => {
       { numRuns: 300 }
     )
   }, 120_000)
+
+  it("cfb + biff: truncations and bit flips of the corpus .xls files and a synthetic file", async () => {
+    const samples: Array<Uint8Array> = ["test/corpus/generated/features.xls", "test/corpus/generated/features.biff5.xls", "test/corpus/hidden-rows/hidden-row.xls", "test/corpus/generated/sparse_far.xls"]
+      .map((p) => new Uint8Array(readFileSync(p)))
+    samples.push(writeCfb([{ name: "Workbook", data: new Uint8Array(6000).fill(9) }, { name: "Small", data: new Uint8Array(100).fill(3) }]).bytes)
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...samples).chain((sample) =>
+          fc.tuple(
+            fc.constant(sample),
+            fc.integer({ min: 0, max: sample.length }),
+            fc.array(fc.tuple(fc.nat(), fc.integer({ min: 0, max: 7 })), { maxLength: 12 })
+          )
+        ),
+        async ([sample, length, flips]) => {
+          const bytes = sample.slice(0, length)
+          for (const [at, bit] of flips) if (bytes.length > 0) bytes[at % bytes.length]! ^= 1 << bit
+          await terminates({ op: "cfb", bytes })
+          await terminates({ op: "cfb", bytes, limits: { maxSectorChain: 16, maxStringLength: 64 } })
+        }
+      ),
+      { numRuns: 400 }
+    )
+  }, 120_000)
+
+  it("cfb: random bytes after a valid signature", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.uint8Array({ minLength: 0, maxLength: 4096 }), async (rest) => {
+        const header = writeCfb([{ name: "Workbook", data: new Uint8Array(10) }]).bytes.subarray(0, 512)
+        const bytes = new Uint8Array(512 + rest.length)
+        bytes.set(header)
+        bytes.set(rest, 512)
+        await terminates({ op: "cfb", bytes })
+      }),
+      { numRuns: 300 }
+    )
+  })
 })
