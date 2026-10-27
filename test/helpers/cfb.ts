@@ -1,14 +1,14 @@
 /**
- * A small CFB (version 3, 512-byte sectors) writer for tests: streams and
- * storages, small streams in the mini stream, a DIFAT when the FAT needs
- * more than 109 sectors. Directory siblings are chained through `right`.
+ * A small CFB writer for tests (version 3 with 512-byte sectors, or version
+ * 4 with 4096-byte sectors): streams and storages, small streams in the
+ * mini stream, a DIFAT when the FAT needs more than 109 sectors. Directory
+ * siblings are chained through `right`.
  */
 
 export type CfbItem =
   | { readonly name: string; readonly data: Uint8Array }
   | { readonly name: string; readonly children: ReadonlyArray<CfbItem> }
 
-const SECTOR = 512
 const MINI = 64
 const CUTOFF = 4096
 const ENDOFCHAIN = 0xFFFFFFFE
@@ -28,6 +28,7 @@ interface Flat {
 
 export interface CfbLayout {
   readonly bytes: Uint8Array
+  readonly sectorSize: number
   /** Sector numbers of interest, for tests that patch the file. */
   readonly fatSectors: ReadonlyArray<number>
   readonly difatSectors: ReadonlyArray<number>
@@ -37,9 +38,11 @@ export interface CfbLayout {
   readonly streams: ReadonlyMap<string, { readonly id: number; readonly start: number; readonly mini: boolean }>
 }
 
-export const sectorOffset = (sector: number) => (sector + 1) * SECTOR
+export const sectorOffset = (sector: number, sectorSize = 512) => (sector + 1) * sectorSize
 
-export const writeCfb = (items: ReadonlyArray<CfbItem>): CfbLayout => {
+export const writeCfb = (items: ReadonlyArray<CfbItem>, options: { readonly version?: 3 | 4 } = {}): CfbLayout => {
+  const version = options.version ?? 3
+  const SECTOR = version === 4 ? 4096 : 512
   // flatten the tree: entry 0 is the root
   const flat: Array<Flat> = [{ name: "Root Entry", data: undefined, children: [], start: ENDOFCHAIN, right: NOSTREAM, child: NOSTREAM }]
   const paths = new Map<number, string>()
@@ -186,9 +189,10 @@ export const writeCfb = (items: ReadonlyArray<CfbItem>): CfbLayout => {
   const hv = new DataView(header.buffer)
   header.set([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])
   hv.setUint16(24, 0x3E, true)
-  hv.setUint16(26, 3, true)
+  hv.setUint16(26, version, true)
   hv.setUint16(28, 0xFFFE, true)
-  hv.setUint16(30, 9, true)
+  hv.setUint16(30, version === 4 ? 12 : 9, true)
+  if (version === 4) hv.setUint32(40, directorySectors.length, true)
   hv.setUint16(32, 6, true)
   hv.setUint32(44, numFat, true)
   hv.setUint32(48, dirStart, true)
@@ -202,7 +206,7 @@ export const writeCfb = (items: ReadonlyArray<CfbItem>): CfbLayout => {
   const bytes = new Uint8Array(SECTOR * (sectors.length + 1))
   bytes.set(header, 0)
   sectors.forEach((s, k) => bytes.set(s, (k + 1) * SECTOR))
-  return { bytes, fatSectors, difatSectors, directorySectors, miniFatSectors, streams }
+  return { bytes, sectorSize: SECTOR, fatSectors, difatSectors, directorySectors, miniFatSectors, streams }
 }
 
 /** Little-endian u32 write into a CFB image. */
