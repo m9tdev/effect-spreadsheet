@@ -8,6 +8,7 @@ import { Effect, Stream } from "effect"
 import type * as Cell from "./Cell.ts"
 import * as Csv from "./csv/index.ts"
 import * as Xls from "./xls/index.ts"
+import * as Xlsb from "./xlsb/index.ts"
 import * as Xlsx from "./xlsx/index.ts"
 import { type RecordsOptions, recordsStream } from "./internal/records.ts"
 import { detect } from "./internal/sniff.ts"
@@ -57,7 +58,6 @@ export const detectFormat = (
   })
 
 const unsupported: Partial<Record<Format, string>> = {
-  xlsb: "XLSB reading is not implemented yet",
   cfb: "OLE compound file without a workbook stream",
   ods: "ODS reading is not implemented",
   spreadsheetml: "SpreadsheetML 2003 reading is not implemented yet",
@@ -77,7 +77,7 @@ const unsupported: Partial<Record<Format, string>> = {
  * Formats without a reader fail with `UnsupportedFormat` naming what was
  * found.
  *
- * The workbook keeps using `bytes` after this returns: XLSX zip entries
+ * The workbook keeps using `bytes` after this returns: XLSX and XLSB zip entries
  * and XLS workbook streams (bare, or in consecutive sectors of a compound
  * file) are views of them, not copies, read when a sheet's rows are. Don't
  * change them while the workbook is in use; pass a copy if the buffer is
@@ -93,6 +93,8 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
         return Csv.read(bytes, { ...options?.csv, limits: options?.limits })
       case "xlsx":
         return Xlsx.read(bytes, { limits: options?.limits })
+      case "xlsb":
+        return Xlsb.read(bytes, { limits: options?.limits })
       case "xls":
       case "cfb": // an encrypted OOXML package (Encrypted), or no workbook stream
         return Xls.read(bytes, { limits: options?.limits })

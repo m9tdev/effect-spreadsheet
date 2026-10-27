@@ -154,11 +154,19 @@ describe("format detection", () => {
 describe("Spreadsheet.read dispatch", () => {
   it.effect("unimplemented formats fail with UnsupportedFormat naming the format", () =>
     Effect.gen(function*() {
-      for (const [bytes, format] of [[XLSB, "xlsb"], [CFB, "cfb"], [enc("%PDF-1.4"), "pdf"]] as const) {
+      for (const [bytes, format] of [[CFB, "cfb"], [enc("%PDF-1.4"), "pdf"]] as const) {
         const error = yield* Effect.flip(Spreadsheet.read(bytes))
         assert.strictEqual(error._tag, "UnsupportedFormat")
         if (error._tag === "UnsupportedFormat") assert.strictEqual(error.format, format)
       }
+    }))
+
+  it.effect("xlsb goes to the XLSB reader", () =>
+    Effect.gen(function*() {
+      // a package with an empty workbook part: the XLSB reader's error, not UnsupportedFormat
+      const error = yield* Effect.flip(Spreadsheet.read(XLSB))
+      assert.strictEqual(error._tag, "MalformedFile")
+      if (error._tag === "MalformedFile") assert.strictEqual(error.format, "xlsb")
     }))
 
   it.effect("detection uses content only: there is no file-name input, CFB/ZIP bytes are never read as CSV", () =>
@@ -166,11 +174,12 @@ describe("Spreadsheet.read dispatch", () => {
       // A caller holding "report.csv" can only pass the bytes (plus options
       // that carry no name); the bytes decide.
       const options = { csv: { sheetName: "report.csv" } } as const
-      for (const bytes of [CFB, XLSB]) {
-        const error = yield* Effect.flip(Spreadsheet.read(bytes, options))
-        assert.strictEqual(error._tag, "UnsupportedFormat")
-        if (error._tag === "UnsupportedFormat") assert.notStrictEqual(error.format, "csv")
-      }
+      const cfb = yield* Effect.flip(Spreadsheet.read(CFB, options))
+      assert.strictEqual(cfb._tag, "UnsupportedFormat")
+      if (cfb._tag === "UnsupportedFormat") assert.notStrictEqual(cfb.format, "csv")
+      // the XLSB stub has an empty workbook part: the XLSB reader rejects it, not the CSV one
+      const xlsb = yield* Effect.flip(Spreadsheet.read(XLSB, options))
+      assert.strictEqual(xlsb._tag === "MalformedFile" && xlsb.format, "xlsb")
       // an .xls named report.csv is read as XLS
       const book = yield* Spreadsheet.read(xls({ sheets: [{ name: "S", records: [] }] }), options)
       assert.strictEqual(book.format, "xls")
