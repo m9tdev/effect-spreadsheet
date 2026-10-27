@@ -61,6 +61,19 @@ export type Book =
   | { readonly kind: "addin" }
   | { readonly kind: "external"; readonly link: number; readonly relationshipId: string }
 
+const SELF_BOOK: Book = { kind: "self" }
+const ADDIN_BOOK: Book = { kind: "addin" }
+
+/**
+ * Supporting books and XTIs kept: an XTI's book and a token's XTI are
+ * 16-bit indexes in practice (a name's ixti is a u16), so entries past
+ * 65 536 can't be told apart from missing ones: they aren't kept (a
+ * reference to one is `#REF!`, or `""` for a missing XTI), and a flood of
+ * tiny BrtSup* or XTI records costs no memory past them.
+ */
+export const MAX_BOOKS = 65_536
+export const MAX_XTIS = 65_536
+
 /** A 3-D reference token of a defined name: its XTI and cells. */
 export interface NameRef {
   readonly kind: "ref" | "area" | "refErr" | "areaErr"
@@ -156,23 +169,26 @@ export const readWorkbookBin = (
           return undefined
         case BRT_SUP_SELF:
         case BRT_SUP_SAME:
-          books.push({ kind: "self" })
+          if (books.length < MAX_BOOKS) books.push(SELF_BOOK)
           return undefined
         case BRT_SUP_ADDIN:
-          books.push({ kind: "addin" })
+          if (books.length < MAX_BOOKS) books.push(ADDIN_BOOK)
           return undefined
         case BRT_SUP_BOOK_SRC: {
+          // numbered whether kept or not, as Excel numbers external links
+          const link = ++externals
+          if (books.length >= MAX_BOOKS) return undefined
           const rel = readWideString(record.data, 0, max)
           if (rel === null) return tooLong(limits)
-          books.push({ kind: "external", link: ++externals, relationshipId: rel?.value ?? "" })
+          books.push({ kind: "external", link, relationshipId: rel?.value ?? "" })
           return undefined
         }
         case BRT_EXTERN_SHEET: {
           // cXti u32, then cXti x (iSupBook u32, itabFirst i32, itabLast i32)
           const count = f.u32(0)
           if (count === undefined || 4 + 12 * count > record.data.length) return malformed("truncated external sheet record", part, record.offset)
-          // progress: k up to count, which fits in the record (checked above)
-          for (let k = 0; k < count; k++) xtis.push(f.u32(4 + 12 * k)! | 0, f.u32(8 + 12 * k)! | 0, f.u32(12 + 12 * k)! | 0)
+          // progress: k up to count, which fits in the record (checked above); at most MAX_XTIS kept
+          for (let k = 0; k < count && xtis.length < 3 * MAX_XTIS; k++) xtis.push(f.u32(4 + 12 * k)! | 0, f.u32(8 + 12 * k)! | 0, f.u32(12 + 12 * k)! | 0)
           return undefined
         }
         case BRT_NAME: {
@@ -294,7 +310,7 @@ export const definedNames = (
     const first = xtis[3 * ixti + 1]!
     const last = xtis[3 * ixti + 2]!
     // writers that leave the books out mean this workbook
-    const book: Book | undefined = books.length === 0 && bookIndex === 0 ? { kind: "self" } : books[bookIndex]
+    const book: Book | undefined = books.length === 0 && bookIndex === 0 ? SELF_BOOK : books[bookIndex]
     if (book === undefined || book.kind === "addin") return "#REF!"
     const names = book.kind === "self" ? sheetNames : externalSheets.get(bookIndex)
     if (names === undefined || first < 0 || last < first) return "#REF!"

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { RecordSplitter } from "../src/internal/biff12/records.ts"
 import { SheetRows } from "../src/internal/xlsb/sheet.ts"
-import { readExternalBooks, readWorkbookBin } from "../src/internal/xlsb/workbook.ts"
+import { definedNames, MAX_BOOKS, MAX_XTIS, readExternalBooks, readWorkbookBin } from "../src/internal/xlsb/workbook.ts"
 import { readRelationships } from "../src/internal/xlsx/parts.ts"
 import { open } from "../src/internal/zip/archive.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
@@ -380,6 +380,25 @@ describe("xlsb defined names", () => {
     expect(archive.inflatedBytes() - before).toBeLessThanOrEqual(64 * 1024)
     const { wb } = await readOk({ sheets: [{ name: "S" }], externalLinks: [link], globals })
     expect(wb.definedNames.slice(0, 2).map((n) => n.formula)).toEqual(["[1]Rates!$A$1", "[2]Rates!$A$1"])
+  })
+
+  it("supporting books and XTIs past 65 536 aren't kept; self and add-in books share one object", async () => {
+    const floods = B.concat([
+      ...Array.from({ length: MAX_BOOKS + 10 }, (_, k) => (k % 2 === 0 ? B.supSelf() : B.supAddin())),
+      B.externSheet(Array.from({ length: 40_000 }, () => [0, 0, 0] as const)),
+      B.externSheet(Array.from({ length: 40_000 }, () => [0, 0, 0] as const))
+    ])
+    const bytes = await B.xlsb({ sheets: [{ name: "S" }], globals: [floods, B.name("N", B.ref3d(65_535, 0, 0))], method: "store" })
+    const limits = SpreadsheetLimits.defaults
+    const archive = open(bytes, limits)
+    if ("_tag" in archive) throw new Error(archive._tag)
+    const workbook = await Effect.runPromise(readWorkbookBin(archive, archive.find("xl/workbook.bin")!, limits))
+    expect(workbook.books).toHaveLength(MAX_BOOKS)
+    expect(workbook.books[0]).toBe(workbook.books[2])
+    expect(workbook.books[1]).toBe(workbook.books[3])
+    expect(workbook.xtis).toHaveLength(3 * MAX_XTIS)
+    // the last XTI kept still resolves
+    expect(definedNames(workbook, new Map())).toEqual([{ name: "N", formula: "S!$A$1", hidden: false }])
   })
 
   it("an external link's sheet list over maxSheets fails", async () => {
