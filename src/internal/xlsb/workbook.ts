@@ -21,6 +21,7 @@ import { type Biff12Record, readRecords } from "../biff12/records.ts"
 import { areaText, BIFF12_GRID, cellText, sheetPrefix } from "../refText.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
+import { sliced } from "./slices.ts"
 
 export const malformed = (reason: string, part?: string, offset?: number) =>
   new MalformedFile({
@@ -199,7 +200,7 @@ export const readWorkbookBin = (
           return undefined
       }
     }
-    return readRecords(archive.read(entry), handle, limits, part).pipe(
+    return readRecords(sliced(archive.read(entry)), handle, limits, part).pipe(
       Effect.filterOrFail(() => records > 0, () => malformed("empty workbook part", part)),
       Effect.map((): WorkbookBin => ({ sheets, date1904, books, xtis: Int32Array.from(xtis), names }))
     )
@@ -231,7 +232,7 @@ export const readExternalSheets = (
       }
       return undefined
     }
-    return Effect.as(readRecords(archive.read(entry), handle, limits, entry.name), names)
+    return Effect.as(readRecords(sliced(archive.read(entry)), handle, limits, entry.name), names)
   })
 
 /**

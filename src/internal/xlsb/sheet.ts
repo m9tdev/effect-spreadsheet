@@ -2,11 +2,11 @@
  * A worksheet part of an XLSB package -> rows, streamed; and its layout
  * (`sheetDetails`).
  *
- * The part is inflated and split into records piece by piece (an inflated
- * piece is at most 64 KiB, so at most 32 768 records), and the rows a
- * piece completes are emitted with it; the stream yields to the event
- * loop before each piece. So the work and the rows between event-loop
- * turns are bounded.
+ * The part is inflated and split into records slice by slice (at most
+ * `SLICE_BYTES`, 64 KiB, so at most 32 768 records, see `slices.ts`), and
+ * the rows a slice completes are emitted with it; the stream yields to
+ * the event loop before each slice. So the work and the rows between
+ * event-loop turns are bounded, however the input is cut.
  *
  * - Rows: each BrtRowHdr starts a row (index, hidden flag `fDyZero`); its
  *   cell records follow it. A row is emitted when the next row starts or
@@ -41,6 +41,7 @@ import { mergeSpans } from "../xlsx/details.ts"
 import { serialToDate } from "../xlsx/numFmt.ts"
 import type { Styles } from "../xlsx/parts.ts"
 import { compact } from "../xlsx/sheet.ts"
+import { sliced } from "./slices.ts"
 import { malformed } from "./workbook.ts"
 
 export interface SheetContext {
@@ -305,7 +306,7 @@ export const sheetRows = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,
   context: SheetContext
 ): Stream.Stream<Row, SpreadsheetError> =>
-  Stream.transformPull(bytes, (upstream) =>
+  Stream.transformPull(sliced(bytes), (upstream) =>
     Effect.sync(() => {
       const rows = new SheetRows(context)
       const splitter = new RecordSplitter(context.part, context.limits.maxRecordBytes)
@@ -406,7 +407,7 @@ export const sheetDetails = (
           return undefined
       }
     }
-    return Effect.map(readRecords(bytes, handle, limits, part), (): SheetDetails => ({
+    return Effect.map(readRecords(sliced(bytes), handle, limits, part), (): SheetDetails => ({
       hiddenColumns: mergeSpans(hidden),
       merges,
       ...(dimension === undefined ? {} : { dimension })

@@ -13,6 +13,7 @@ import { formatFor } from "../xlsx/numFmt.ts"
 import type { Styles } from "../xlsx/parts.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
+import { sliced } from "./slices.ts"
 import { malformed } from "./workbook.ts"
 
 const BRT_SST_ITEM = 0x0013
@@ -45,7 +46,7 @@ export const readSharedStrings = (
       strings.push(text.value)
       return undefined
     }
-    return Effect.as(readRecords(archive.read(entry), handle, limits, entry.name), strings)
+    return Effect.as(readRecords(sliced(archive.read(entry)), handle, limits, entry.name), strings)
   })
 
 /**
@@ -100,7 +101,7 @@ export const readStyles = (
           return undefined
       }
     }
-    return Effect.map(readRecords(archive.read(entry), handle, limits, entry.name), (): Styles => ({
+    return Effect.map(readRecords(sliced(archive.read(entry)), handle, limits, entry.name), (): Styles => ({
       formats: xfIds.map((id) => formatFor(id, custom))
     }))
   })
