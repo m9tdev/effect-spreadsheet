@@ -4,12 +4,16 @@ import { Effect, Exit, Stream } from "effect"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { readString, type Text, textDecoder } from "../src/internal/xls/fields.ts"
+import { BATCH_BYTES, batches, readGlobals } from "../src/internal/xls/globals.ts"
+import { BATCH_RECORDS } from "../src/internal/xls/sheet.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
+import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xls from "../src/xls/index.ts"
 import { writeCfb } from "./helpers/cfb.ts"
 import { failureOf } from "./helpers/run.ts"
+import { countYields } from "./helpers/yields.ts"
 import * as X from "./helpers/xls.ts"
 
 const run = (bytes: Uint8Array, limits?: LimitOverrides) => Effect.runPromise(Effect.exit(Xls.read(bytes, { limits })))
@@ -405,5 +409,96 @@ describe("xls globals: limits and string bounds", () => {
     // past the data, and over the limit
     expect(readString(bytes(pad), 4, biff8, 2)).toBeUndefined()
     expect(readString(bytes(X.string5([0x61, 0x62], 1)), 0, { ...biff5, maxLength: 1 }, 1)).toBeNull()
+  })
+})
+
+describe("xls globals: long work yields", () => {
+  const SST = 0x00FC
+  const sstHead = (count: number) => X.record(SST, [...X.u32(count), ...X.u32(count)])
+  /**
+   * Opens a bare workbook stream (globals, then one empty sheet) and counts
+   * event-loop turns and globals batches; `maxPerTurn` is the most batches
+   * run between two turns (1 when every batch yields).
+   */
+  const turns = async (globals: ReadonlyArray<Uint8Array>) => {
+    const bytes = X.workbookStream({ globals, sheets: [{ name: "S", records: [] }] })
+    const before = batches.count
+    const result = await countYields(() => Effect.runPromise(Xls.read(bytes)), () => batches.count)
+    return { ...result, batches: batches.count - before }
+  }
+
+  it("a flood of small records (XF) is read in batches of BATCH_RECORDS, yielding between them", async () => {
+    const records = 8 * BATCH_RECORDS
+    const run = await turns(Array.from({ length: records }, () => X.xf(14)))
+    expect(run.value.sheets).toHaveLength(1)
+    expect(run.batches).toBeGreaterThanOrEqual(records / BATCH_RECORDS)
+    expect(run.yields).toBeGreaterThanOrEqual(records / BATCH_RECORDS / 2)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+
+  it("an SST of many short strings in a few CONTINUEs yields within it (strings count towards a batch)", async () => {
+    // "s" + 4 digits: 8 bytes each, 1 000 per CONTINUE: 24 records, 3 * BATCH_RECORDS strings and more
+    const strings = Array.from({ length: 24_000 }, (_, k) => `s${String(k).padStart(4, "0")}`)
+    const continues = Array.from({ length: 24 }, (_, c) => X.record(CONTINUE, strings.slice(1000 * c, 1000 * c + 1000).flatMap(X.xlString)))
+    const run = await turns([sstHead(strings.length), ...continues])
+    expect(run.batches).toBeGreaterThanOrEqual(strings.length / BATCH_RECORDS)
+    expect(run.yields).toBeGreaterThanOrEqual(strings.length / BATCH_RECORDS / 2)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+
+  it("a run of empty CONTINUEs after an SST yields within it", async () => {
+    const records = 8 * BATCH_RECORDS
+    const run = await turns([sstHead(0), ...Array.from({ length: records }, () => X.record(CONTINUE, []))])
+    expect(run.batches).toBeGreaterThanOrEqual(records / BATCH_RECORDS)
+    expect(run.yields).toBeGreaterThanOrEqual(records / BATCH_RECORDS / 2)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+
+  it("large records count by their bytes: a batch holds about BATCH_BYTES of them", async () => {
+    // FORMAT records with 8 000-character codes: 4 * BATCH_BYTES bytes in a few hundred records
+    const records = Math.ceil((4 * BATCH_BYTES) / 8000)
+    const run = await turns(Array.from({ length: records }, (_, k) => X.format(164 + k, "0".repeat(8000))))
+    expect(records).toBeLessThan(BATCH_RECORDS)
+    expect(run.batches).toBeGreaterThanOrEqual(4)
+    expect(run.yields).toBeGreaterThanOrEqual(2)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+
+  it("many defined names are read and resolved with yields", async () => {
+    const records = 8 * BATCH_RECORDS
+    const run = await turns([X.externSheet([0]), ...Array.from({ length: records }, (_, k) => X.name(`N${k}`, X.ref3d(0, k % 65536, 0)))])
+    expect(run.value.definedNames).toHaveLength(records)
+    expect(run.value.definedNames[5]).toEqual({ name: "N5", formula: "S!$A$6", hidden: false })
+    expect(run.yields).toBeGreaterThanOrEqual(records / BATCH_RECORDS)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+})
+
+describe("xls globals: VB module BOUNDSHEETs", () => {
+  const module = (k: number) => ({ name: `Module${k}`, dt: 6, kind: 0x0006, records: [] })
+  const sheet = (k: number) => ({ name: `Sheet${k}`, records: [] })
+
+  it("count against their own maxSheets bound (each may start a substream to check), apart from the sheets", async () => {
+    const wb = await read({ sheets: [sheet(1), module(1), sheet(2), module(2)] }, { maxSheets: 2 })
+    expect(wb.sheets.map((s) => s.name)).toEqual(["Sheet1", "Sheet2"])
+    expect(await errorOf({ sheets: [sheet(1), module(1), module(2), module(3)] }, { maxSheets: 2 })).toMatchObject({
+      _tag: "LimitExceeded",
+      limit: "maxSheets",
+      max: 2,
+      actual: 3
+    })
+  })
+})
+
+describe("xls globals: number formats of cell styles", () => {
+  it("are worked out once per format id, not once per XF (a long code isn't rescanned for each of many XFs)", async () => {
+    const stream = X.workbookStream({
+      globals: [X.format(164, `${"0".repeat(4000)};yyyy-mm-dd`), ...Array.from({ length: 1000 }, (_, k) => X.xf(k % 2 === 0 ? 164 : 14))],
+      sheets: [{ name: "S", records: [] }]
+    })
+    const globals = await Effect.runPromise(readGlobals(stream, SpreadsheetLimits.defaults))
+    expect(globals.formats).toHaveLength(1000)
+    expect(globals.formats[0]).toMatchObject({ date: true })
+    expect(new Set(globals.formats).size).toBe(2)
   })
 })

@@ -98,16 +98,9 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     }
     const stream = workbookStream(bytes, limits)
     if ("_tag" in stream) return yield* Effect.fail(stream)
-    const globals = readGlobals(stream, limits)
-    if ("_tag" in globals) return yield* Effect.fail(globals)
+    const globals = yield* readGlobals(stream, limits)
 
     const sheets: Array<Workbook.SheetInfo> = globals.sheets.map((s, index) => ({ name: s.name, index, visibility: s.visibility }))
-    const definedNames: Array<Workbook.DefinedName> = globals.definedNames.map((d) => ({
-      name: d.name,
-      formula: d.formula,
-      hidden: d.hidden,
-      ...(d.scope === undefined ? {} : { scope: d.scope })
-    }))
     const context = (sheet: Workbook.SheetInfo, effective: SpreadsheetLimits.Limits) => {
       const entry = globals.sheets[sheet.index]!
       return entry.kind !== "worksheet"
@@ -117,7 +110,7 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     return Workbook.make({
       format: "xls",
       sheets,
-      definedNames,
+      definedNames: globals.definedNames,
       limits,
       // chart, macro and other sheets hold no cells
       rows: (sheet, effective) => {
