@@ -48,9 +48,13 @@ export interface CfbEntry {
 }
 
 export interface Cfb {
-  /** Streams and storages under the root, in directory-tree order. */
+  /** Streams and storages under the root, by directory id. */
   readonly entries: ReadonlyArray<CfbEntry>
-  /** The entry at `path` (names compared case-insensitively, as CFB does). */
+  /**
+   * The entry at `path` (names compared case-insensitively, as CFB does).
+   * Names can't contain `/` (opening rejects them); if two entries have the
+   * same path, the one with the lower directory id wins.
+   */
   readonly find: (path: string) => CfbEntry | undefined
   /** A stream's bytes (copied out of its sectors). */
   readonly read: (entry: CfbEntry) => Uint8Array | MalformedFile | LimitExceeded
@@ -292,6 +296,8 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
     if (entry instanceof MalformedFile) return entry
     const type: CfbEntryType | undefined = entry.type === 1 ? "storage" : entry.type === 2 ? "stream" : undefined
     if (type === undefined) return malformed(`directory entry ${id} has type ${entry.type}`)
+    // MS-CFB forbids "/" (and \ : !) in names; "/" would break paths
+    if (entry.name.includes("/")) return malformed(`directory entry ${id} has "/" in its name`)
     const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`
     entries.push({ id, name: entry.name, path, type, size: type === "stream" ? entry.size : 0, start: entry.start })
     if (entry.right !== NOSTREAM) stack.push([entry.right, prefix, depth])
@@ -325,11 +331,17 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
     if (!Array.isArray(rootChain)) return (mini = rootChain)
     const data = gather(rootChain, root.size, sectorSize, sectorAt)
     if (data instanceof MalformedFile) return (mini = data)
-    const miniSectors = Math.floor(data.length / MINI_SECTOR)
+    // a last, partial mini sector counts (its stream reads only what it has)
+    const miniSectors = Math.ceil(data.length / MINI_SECTOR)
     return (mini = { data, chains: new Chains(table, miniSectors, maxChain, "miniFAT") })
   }
 
-  const byPath = new Map(entries.map((e) => [e.path.toLowerCase(), e]))
+  const byPath = new Map<string, CfbEntry>()
+  // progress: one entry per iteration; entries are sorted by id, so the first wins
+  for (const entry of entries) {
+    const key = entry.path.toLowerCase()
+    if (!byPath.has(key)) byPath.set(key, entry)
+  }
   return {
     entries,
     find: (path) => byPath.get(path.toLowerCase()),

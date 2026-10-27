@@ -222,7 +222,8 @@ describe("cfb: hostile and broken files", () => {
       ["directory points at entry 5000 of 12", (b) => patch32(b, dir + 1 * 128 + 72, 5000)],
       ["directory entry 1 has a bad name length", (b) => void (b[dir + 1 * 128 + 64] = 99)],
       ["directory entry 1 has type 9", (b) => void (b[dir + 1 * 128 + 66] = 9)],
-      ["the first directory entry is not the root", (b) => void (b[dir + 66] = 1)]
+      ["the first directory entry is not the root", (b) => void (b[dir + 66] = 1)],
+      ['directory entry 1 has "/" in its name', (b) => void (b[dir + 1 * 128 + 2] = 0x2F)]
     ]
     for (const [reason, mutate] of cases) {
       const bytes = layout.bytes.slice()
@@ -298,6 +299,18 @@ describe("cfb: hostile and broken files", () => {
       const c = openOk(intoOwn)
       expect(reasonOf(c.read(c.find("Second")!)), String(sector)).toMatch(/belongs to two streams/)
     }
+  })
+
+  it("duplicate paths: the lower directory id wins; mini streams ending mid sector read", () => {
+    const { bytes } = writeCfb([{ name: "Same", data: new Uint8Array([1]) }, { name: "SAME", data: new Uint8Array([2]) }, { name: "Odd", data: pseudoRandom(100, 3) }])
+    const cfb = openOk(bytes)
+    expect(cfb.find("same")!.id).toBe(1)
+    expect(readOk(cfb, "Same")).toEqual(new Uint8Array([1]))
+    // the mini stream ends inside its last mini sector: its size cut to end there
+    const layout = writeCfb([{ name: "Odd", data: pseudoRandom(100, 3) }])
+    const trimmed = layout.bytes.slice()
+    patch32(trimmed, sectorOffset(layout.directorySectors[0]!) + 120, 100) // root (mini stream) size 100, not 128
+    expect(readOk(openOk(trimmed), "Odd")).toEqual(pseudoRandom(100, 3))
   })
 
   it("deeply nested storages stop at maxStorageDepth (paths would cost depth²)", () => {
