@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs"
 import { Effect, Exit, Stream } from "effect"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
-import { textDecoder } from "../src/internal/xls/fields.ts"
+import { readString, type Text, textDecoder } from "../src/internal/xls/fields.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
@@ -99,6 +99,23 @@ describe("xls defined names: which workbook a reference points at", () => {
       sheets: sheets("Jan", "Feb", "Mar 2")
     })
     expect(formulas(wb)).toEqual({ Span: "'Jan:Mar 2'!$A$1:$A$1", SpanQuoted: "'Feb:Mar 2'!$A$1", Reversed: "#REF!$A$1" })
+  })
+
+  it("external sheet names continued in a CONTINUE record are read", async () => {
+    const all = Array.from(externalBook("\u0001x.xls", ["First", "Second"]))
+    const data = all.slice(4)
+    const cut = 2 + X.xlString("\u0001x.xls").length + X.xlString("First").length
+    const wb = await read({
+      globals: [
+        selfBook(1),
+        X.record(SUPBOOK, data.slice(0, cut)),
+        X.record(CONTINUE, data.slice(cut)),
+        xtis([[1, 1, 1]]),
+        X.name("Far", ref3d(0x3A, 0, 0, 0))
+      ],
+      sheets: sheets("S")
+    })
+    expect(formulas(wb)).toEqual({ Far: "[1]Second!$A$1" })
   })
 
   it("with no SUPBOOK at all, SUPBOOK 0 is this workbook; a missing XTI gives an empty formula", async () => {
@@ -218,6 +235,33 @@ describe("xls globals: BOF version, sheets, SST", () => {
       expect(failureOf(await run(later))).toMatchObject({ _tag: "UnsupportedFormat", format: "xls", reason: `BIFF version 0x${version.toString(16)} in a BIFF5/8 BOF` })
     }
   })
+
+  it("visibility comes from the low 2 bits of hsState only", async () => {
+    const wb = await read({
+      sheets: [0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0xFC, 0xFD, 0xFE].map((state, k) => ({ name: `S${k}`, records: [], state }))
+    })
+    expect(wb.sheets.map((s) => s.visibility)).toEqual(["visible", "hidden", "veryHidden", "visible", "hidden", "veryHidden", "visible", "hidden", "veryHidden"])
+  })
+
+  it("an SST in a BIFF5 workbook is skipped, whatever it holds", async () => {
+    const bogus = X.record(0x00FC, [...X.u32(1e9), ...X.u32(1e9), 0xFF])
+    const wb = await read({ biff: 5, globals: [bogus], sheets: [{ name: "x", records: [X.label5(0, 0, 0, [0x6F, 0x6B])] }] }, { maxSharedStrings: 10 })
+    expect(await texts(wb)).toEqual(["ok"])
+  })
+
+  it("a short SST is MalformedFile; an SST with fewer strings than declared keeps those present", async () => {
+    expect(await errorOf({ globals: [X.record(0x00FC, X.u32(1))], sheets: sheets("S") })).toMatchObject({ _tag: "MalformedFile", reason: "truncated SST" })
+    const partial = X.record(0x00FC, [...X.u32(5), ...X.u32(5), ...X.xlString("one"), ...X.xlString("two"), 0x09])
+    const wb = await read({ globals: [partial], sheets: [{ name: "S", records: [X.labelSst(0, 0, 0, 0), X.labelSst(0, 1, 0, 1)] }] })
+    expect(await texts(wb)).toEqual(["one", "two"])
+  })
+
+  it("compressed (8-bit) BIFF8 characters 0x80-0x9F are Latin-1 code points, not windows-1252", async () => {
+    const text = "A\u0080\u008A\u009F\u00E9" // all below 0x100: stored compressed, one byte each
+    const wb = await read({ globals: [X.codepage(1252), X.sst([text])], sheets: [{ name: text, records: [X.labelSst(0, 0, 0, 0)] }] })
+    expect(wb.sheets[0]!.name).toBe(text)
+    expect(await texts(wb)).toEqual([text])
+  })
 })
 
 describe("xls globals: text decoders and containers", () => {
@@ -260,6 +304,24 @@ describe("xls globals: text decoders and containers", () => {
 })
 
 describe("xls globals: limits and string bounds", () => {
+  it("Xls.read checks maxInputBytes before anything else", async () => {
+    const bytes = X.xls({ sheets: sheets("S") })
+    expect(failureOf(await run(bytes, { maxInputBytes: bytes.length - 1 }))).toMatchObject({ _tag: "LimitExceeded", limit: "maxInputBytes", max: bytes.length - 1, actual: bytes.length })
+    expect(Exit.isSuccess(await run(bytes, { maxInputBytes: bytes.length }))).toBe(true)
+  })
+
+  it("an SST joined from CONTINUEs past maxDecompressedBytes is LimitExceeded", async () => {
+    const strings = Array.from({ length: 60 }, (_, k) => `string ${k}`)
+    const data = [...X.u32(60), ...X.u32(60), ...strings.flatMap(X.xlString)]
+    const cut = 8 + strings.slice(0, 10).flatMap(X.xlString).length // at a string boundary
+    const globals = [X.record(0x00FC, data.slice(0, cut)), X.record(CONTINUE, data.slice(cut))]
+    const stream = X.workbookStream({ globals, sheets: [{ name: "S", records: [X.labelSst(0, 0, 0, 59)] }] })
+    const total = data.length + 8
+    expect(failureOf(await run(stream, { maxDecompressedBytes: total - 1 }))).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: total - 1 })
+    const exit = await run(stream, { maxDecompressedBytes: total })
+    expect(Exit.isSuccess(exit) && await texts(exit.value)).toEqual(["string 59"])
+  })
+
   it("FORMAT codes and NAME names longer than maxStringLength are LimitExceeded", async () => {
     const limits = { maxStringLength: 20 }
     expect(await errorOf({ globals: [X.format(164, "0".repeat(21))], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
@@ -267,5 +329,30 @@ describe("xls globals: limits and string bounds", () => {
     expect(await errorOf({ globals: [X.name("N".repeat(21), ref3d(0x3A, 0, 0, 0))], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 20, actual: 21 })
     const wb = await read({ globals: [X.format(164, "0".repeat(20)), X.xf(164), X.name("N".repeat(20), ref3d(0x3A, 0, 0, 0))], sheets: sheets("S") }, limits)
     expect(wb.definedNames.map((d) => d.name)).toEqual(["N".repeat(20)])
+  })
+
+  it("readString: strings end where their characters end, and running past the data is undefined", () => {
+    const biff8: Text = { biff8: true, decoder: new TextDecoder("windows-1252"), maxLength: 100 }
+    const biff5: Text = { ...biff8, biff8: false }
+    const bytes = (...parts: ReadonlyArray<ReadonlyArray<number>>) => new Uint8Array(parts.flat())
+    const pad = [9, 9, 9]
+    // BIFF8 XLUnicodeString: u16 count, flags, characters
+    expect(readString(bytes(pad, X.xlString("abc"), [7, 7]), 3, biff8, 2)).toEqual({ value: "abc", end: 9 })
+    expect(readString(bytes(pad, X.xlString("añ\u0101")), 3, biff8, 2)).toEqual({ value: "añ\u0101", end: 12 })
+    expect(readString(bytes(pad, X.xlString("abc").slice(0, 5)), 3, biff8, 2)).toBeUndefined()
+    // BIFF8 ShortXLUnicodeString: u8 count, flags, characters
+    expect(readString(bytes(pad, X.shortString("abc"), [7]), 3, biff8, 1)).toEqual({ value: "abc", end: 8 })
+    expect(readString(bytes(pad, X.shortString("abc").slice(0, 4)), 3, biff8, 1)).toBeUndefined()
+    expect(readString(bytes(pad, X.shortString("\u0101b").slice(0, 5)), 3, biff8, 1)).toBeUndefined()
+    expect(readString(bytes(pad, [3]), 3, biff8, 1)).toBeUndefined()
+    // BIFF5: u8 or u16 count, code-page bytes
+    expect(readString(bytes(pad, X.string5([0x61, 0x80], 1), [7]), 3, biff5, 1)).toEqual({ value: "a\u20AC", end: 6 })
+    expect(readString(bytes(pad, X.string5([0x61, 0x80], 2), [7]), 3, biff5, 2)).toEqual({ value: "a\u20AC", end: 7 })
+    expect(readString(bytes(pad, X.string5([0x61, 0x80], 1).slice(0, 2)), 3, biff5, 1)).toBeUndefined()
+    expect(readString(bytes(pad, X.string5([0x61, 0x80], 2).slice(0, 3)), 3, biff5, 2)).toBeUndefined()
+    expect(readString(bytes(pad, [1]), 3, biff5, 2)).toBeUndefined()
+    // past the data, and over the limit
+    expect(readString(bytes(pad), 4, biff8, 2)).toBeUndefined()
+    expect(readString(bytes(X.string5([0x61, 0x62], 1)), 0, { ...biff5, maxLength: 1 }, 1)).toBeNull()
   })
 })
