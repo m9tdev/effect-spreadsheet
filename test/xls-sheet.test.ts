@@ -316,6 +316,59 @@ describe("xls sheet: emitting rows", () => {
     expect(rows.complete(Infinity)).toBeUndefined()
     expect(rows.take().map((r) => r.index)).toEqual([0])
   })
+
+  it("ROW-only rows count towards a batch: complete() and end() stop at the budget and go on in the next batch", () => {
+    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
+    // rows 0-999 declared by ROW records only, row 1000 with a cell (its last at offset 5), row 2000 declared after it
+    rows.start(new Map([[1000, 5]]))
+    // progress: r up to 1000
+    for (let r = 0; r < 1000; r++) rows.row(r, r % 3 === 0)
+    rows.row(2000, false)
+    expect(rows.cell(1000, Cell.number(0, 1))).toBeUndefined()
+    const out: Array<number> = []
+    const drain = () => {
+      // progress: each take() takes at least one row
+      while (rows.queued()) out.push(...rows.take().map((r) => r.index))
+    }
+    // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
+    for (let batch = 0; rows.behind(5); batch++) {
+      if (batch > 1002) throw new Error("complete() doesn't go on")
+      rows.budget = rows.effort + 100
+      expect(rows.complete(5)).toBeUndefined()
+      const before = out.length
+      drain()
+      // a budget of 100: at most 100 rows, one more for the row it ends with
+      expect(out.length - before).toBeLessThanOrEqual(101)
+    }
+    expect(out).toEqual(Array.from({ length: 1001 }, (_, r) => r))
+    // after the EOF: rows the scan didn't place and the declared rest, through end()
+    expect(rows.cell(1500, Cell.number(0, 2))).toBeUndefined()
+    // progress: r up to 1000
+    for (let r = 0; r < 1000; r++) rows.row(3000 + r, false)
+    let ended: unknown = false
+    // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
+    for (let batch = 0; ended !== true; batch++) {
+      if (batch > 1002) throw new Error("end() doesn't go on")
+      rows.budget = rows.effort + 100
+      ended = rows.end()
+      expect(typeof ended).toBe("boolean")
+      const before = out.length
+      drain()
+      expect(out.length - before).toBeLessThanOrEqual(101)
+    }
+    expect(out.slice(1001)).toEqual([1500, 2000, ...Array.from({ length: 1000 }, (_, r) => 3000 + r)])
+  })
+
+  it("a repeated ROW record isn't queued again: a flood of one row costs one step to emit", () => {
+    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
+    rows.start(new Map())
+    // progress: k up to 10 000
+    for (let k = 0; k < 10_000; k++) rows.row(k % 2, k === 7)
+    const before = work.steps
+    expect(rows.end()).toBe(true)
+    expect(work.steps - before).toBeLessThanOrEqual(2)
+    expect(rows.take().map((r) => [r.index, r.hidden])).toEqual([[0, false], [1, true]])
+  })
 })
 
 describe("xls sheet: repeated columns", () => {
@@ -330,7 +383,7 @@ describe("xls sheet: repeated columns", () => {
       most = Math.max(most, (rows as unknown as { open: Map<number, { cells: Array<unknown> }> }).open.get(0)!.cells.length)
     }
     expect(most).toBeLessThanOrEqual(2 * 8 + 1)
-    expect(rows.end()).toBeUndefined()
+    expect(rows.end()).toBe(true)
     const [row] = rows.take()
     expect(row.cells.map((c) => [c.column, Cell.value(c)])).toEqual(Array.from({ length: 8 }, (_, c) => [c, 8000 - 8 + 7 - c]))
     // read end to end: the same rule over many MULBLANK and NUMBER records on the same columns

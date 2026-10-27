@@ -134,6 +134,42 @@ describe("xls: 65 536 rows", () => {
     }
   }, 300_000)
 
+  it("ROW records without cells count towards a batch: bounded steps per turn, each row queued once", async () => {
+    // a flood of ROW records only (rows 0-65 535, 16 times over), one blob of 20-byte records
+    const size = X.row(0).length
+    const flood = new Uint8Array(16 * ROWS * size)
+    // progress: r up to 16 x ROWS
+    for (let r = 0; r < 16 * ROWS; r++) flood.set(X.row(r % ROWS, r % 10 === 9), r * size)
+    // every row declared by a ROW record, then the cells of the last two
+    // rows (16 384 each): the 65 534 ROW-only rows before them come out
+    // when the first is complete, after a batch of its cells
+    const xfs = new Array<number>(4096).fill(0)
+    const waiting = [
+      ...Array.from({ length: ROWS }, (_, r) => X.row(r)),
+      ...[ROWS - 2, ROWS - 1].flatMap((r) => [0, 1, 2, 3].map((k) => X.mulBlank(r, 4096 * k, xfs)))
+    ]
+    const wb = await Effect.runPromise(Xls.read(X.xls({ sheets: [{ name: "Flood", records: [flood] }, { name: "Waiting", records: waiting }] })))
+    for (const sheet of [0, 1]) {
+      let rows = 0
+      let inOrder = 0
+      const before = work.steps
+      const steps = await countYields(
+        () =>
+          Effect.runPromise(Stream.runForEach(Workbook.rows(wb, sheet), (row) =>
+            Effect.sync(() => {
+              if (row.index === rows++) inOrder++
+            }))),
+        () => work.steps
+      )
+      expect([rows, inOrder], `sheet ${sheet}`).toEqual([ROWS, ROWS])
+      // a batch: BATCH_CELLS of cells read and rows emitted, then at most
+      // one more record (4 109 cells), plus a few steps per record and row
+      expect(steps.maxPerTurn, `sheet ${sheet}`).toBeLessThanOrEqual(BATCH_CELLS + 4109 + 4 * BATCH_RECORDS)
+      // the flood: a step to scan and one to read each record, about two per row out
+      if (sheet === 0) expect(work.steps - before).toBeLessThan(2 * 16 * ROWS + 3 * ROWS)
+    }
+  }, 300_000)
+
   it("read in linear work: 16x the rows take 16x the reader's steps", async () => {
     const steps = async (rows: number) => {
       const wb = await Effect.runPromise(Xls.read(mixedXls(rows)))

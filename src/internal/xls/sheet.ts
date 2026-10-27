@@ -223,9 +223,14 @@ export class Rows {
   private nextAt = Infinity
   /** Hidden flags from ROW records. */
   private readonly hidden = new Set<number>()
-  /** Rows declared by ROW records, not emitted yet, in record order. */
+  /** Rows declared by ROW records, not emitted yet, in record order (each once). */
   private declared: Array<number> = []
   private declaredAt = 0
+  /** Rows ever declared: a repeated ROW record isn't queued again (it would only be passed over). */
+  private readonly declaredOnce = new Set<number>()
+  /** Rows the scan didn't place, in row order (set by `end`); `left[leftAt]` is the next one. */
+  private left: Uint32Array | undefined
+  private leftAt = 0
   /** Rows emitted so far (a ROW-only row is emitted once). */
   private readonly emitted = new Set<number>()
   private rowCount = 0
@@ -234,9 +239,10 @@ export class Rows {
   /** Cells in `open` rows: exactly those held, not emitted yet (see `caps`). */
   held = 0
   /**
-   * Cells read plus cells sorted (compacting a row): the work that a batch
-   * spends, up to `budget`. Emitting rows stops at the budget and goes on
-   * in the next batch.
+   * Cells read, cells sorted (compacting a row) and rows emitted (or a
+   * declared row passed over, already out): the work that a batch spends,
+   * up to `budget`. Emitting rows stops at the budget and goes on in the
+   * next batch.
    */
   effort = 0
   budget = Infinity
@@ -268,11 +274,12 @@ export class Rows {
     return undefined
   }
 
-  /** Emits declared ROW-only rows up to (not including) `before`. */
+  /** Emits declared ROW-only rows up to (not including) `before`, until `effort` reaches `budget` (see `declaredBefore`). */
   private flushDeclared(before: number): SpreadsheetError | undefined {
     // progress: declaredAt increases up to declared.length
-    while (this.declaredAt < this.declared.length && this.declared[this.declaredAt]! < before) {
+    while (this.declaredBefore(before) && this.effort < this.budget) {
       work.steps++
+      this.effort++
       const index = this.declared[this.declaredAt++]!
       if (this.emitted.has(index)) continue
       const error = this.push(index, this.hidden.has(index), [])
@@ -285,6 +292,11 @@ export class Rows {
     return undefined
   }
 
+  /** Whether declared rows before `before` are left for `flushDeclared` (it stopped at the budget). */
+  private declaredBefore(before: number): boolean {
+    return this.declaredAt < this.declared.length && this.declared[this.declaredAt]! < before
+  }
+
   /** Emits row `index` with its cells (if it got any). */
   private finishRow(index: number): SpreadsheetError | undefined {
     const entry = this.open.get(index)
@@ -295,7 +307,7 @@ export class Rows {
       this.hotRow = -1
       this.hotEntry = undefined
     }
-    if (!entry.sorted) this.effort += entry.cells.length
+    this.effort += entry.sorted ? 1 : 1 + entry.cells.length
     return this.push(index, this.hidden.has(index), entry.sorted ? entry.cells : compact(entry.cells))
   }
 
@@ -332,9 +344,13 @@ export class Rows {
       work.steps++
       const index = this.order[this.nextRow]!
       if (this.pendingString?.row === index) return undefined
+      // the ROW-only rows before it first: at the budget, `index` waits (still `behind`)
+      const flushed = this.flushDeclared(index)
+      if (flushed !== undefined) return flushed
+      if (this.declaredBefore(index)) return undefined
       this.nextRow++
       this.nextAt = this.nextRow < this.order.length ? this.lastAt.get(this.order[this.nextRow]!)! : Infinity
-      const error = this.flushDeclared(index) ?? this.finishRow(index)
+      const error = this.finishRow(index)
       if (error !== undefined) return error
     }
     return undefined
@@ -347,6 +363,8 @@ export class Rows {
 
   row(index: number, hidden: boolean): void {
     if (hidden) this.hidden.add(index)
+    if (this.declaredOnce.has(index)) return
+    this.declaredOnce.add(index)
     this.declared.push(index)
   }
 
@@ -384,17 +402,27 @@ export class Rows {
     return undefined
   }
 
-  /** After the EOF, once `complete(Infinity)` isn't `behind`: the rest. */
-  end(): SpreadsheetError | undefined {
+  /**
+   * After the EOF, once `complete(Infinity)` isn't `behind`: emits the
+   * rest, until `effort` reaches `budget`; `true` once all is out (else
+   * call it again in the next batch).
+   */
+  end(): SpreadsheetError | boolean {
     // rows the scan didn't place (none when both passes agree), in row order
-    const left = Uint32Array.from(this.open.keys()).sort()
-    // progress: one row per iteration
-    for (const index of left) {
+    const left = this.left ??= Uint32Array.from(this.open.keys()).sort()
+    // progress: leftAt increases up to left.length (or flushDeclared's declaredAt does, until the budget)
+    while (this.leftAt < left.length) {
+      if (this.effort >= this.budget) return false
       work.steps++
-      const failed = this.flushDeclared(index) ?? this.finishRow(index)
+      const index = left[this.leftAt]!
+      const flushed = this.flushDeclared(index)
+      if (flushed !== undefined) return flushed
+      if (this.declaredBefore(index)) return false
+      this.leftAt++
+      const failed = this.finishRow(index)
       if (failed !== undefined) return failed
     }
-    return this.flushDeclared(Infinity)
+    return this.flushDeclared(Infinity) ?? !this.declaredBefore(Infinity)
   }
 }
 
@@ -591,9 +619,9 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
         if (caught !== undefined) return yield* Effect.fail(caught)
         if (ended) {
           if (!rows.behind(Infinity)) {
-            done = true
-            const error = rows.end()
-            if (error !== undefined) return yield* Effect.fail(error)
+            const result = rows.end()
+            if (result === true) done = true
+            else if (result !== false) return yield* Effect.fail(result)
           }
           if (rows.queued()) return rows.take()
           continue
