@@ -149,6 +149,8 @@ export interface TestSheet {
 export interface TestBook {
   readonly sheets: ReadonlyArray<TestSheet>
   readonly strings?: ReadonlyArray<string>
+  /** A whole shared-strings part instead of the one made from `strings`. */
+  readonly stringsPart?: Uint8Array
   /** numFmtId per cell XF, and custom codes. */
   readonly xfs?: ReadonlyArray<number>
   readonly formats?: Readonly<Record<number, string>>
@@ -184,9 +186,10 @@ export const xlsb = async (book: TestBook): Promise<Uint8Array> => {
     { name: "xl/workbook.bin", data: workbook }
   ]
   book.sheets.forEach((s, i) => entries.push({ name: `xl/worksheets/sheet${i + 1}.bin`, data: s.part ?? sheetBin([]) }))
-  if (book.strings !== undefined) {
+  if (book.strings !== undefined || book.stringsPart !== undefined) {
+    const strings = book.strings ?? []
     rels.push(`<Relationship Id="rIdS" Type="${REL}/sharedStrings" Target="sharedStrings.bin"/>`)
-    entries.push({ name: "xl/sharedStrings.bin", data: concat([beginSst(book.strings.length), ...book.strings.map(sstItem), record(0xA0)]) })
+    entries.push({ name: "xl/sharedStrings.bin", data: book.stringsPart ?? concat([beginSst(strings.length), ...strings.map(sstItem), record(0xA0)]) })
   }
   if (book.xfs !== undefined) {
     rels.push(`<Relationship Id="rIdY" Type="${REL}/styles" Target="styles.bin"/>`)

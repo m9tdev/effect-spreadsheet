@@ -257,4 +257,71 @@ describe("fuzz: never a defect, never a hang", () => {
       { numRuns: 500 }
     )
   }, 180_000)
+
+  it("xlsb: truncations and bit flips of the committed .xlsb files, through the reader", async () => {
+    const samples = ["test/corpus/generated/names_formulas.xlsb", "test/corpus/generated/features.xlsb", "test/corpus/hidden-rows/hidden-row.xlsb", "test/corpus/generated/sparse_far.xlsb"]
+      .map((p) => new Uint8Array(readFileSync(p)))
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...samples).chain((sample) =>
+          fc.tuple(fc.constant(sample), fc.integer({ min: 0, max: sample.length }), fc.array(fc.tuple(fc.nat(), fc.integer({ min: 0, max: 7 })), { maxLength: 8 }))
+        ),
+        async ([sample, length, flips]) => {
+          const bytes = sample.slice(0, length)
+          for (const [at, bit] of flips) if (bytes.length > 0) bytes[at % bytes.length]! ^= 1 << bit
+          await terminates({ op: "read", bytes })
+        }
+      ),
+      { numRuns: 300 }
+    )
+  }, 180_000)
+
+  it("xlsb: mutated workbook, sheet, shared-string and external link parts inside a valid package, through the reader", async () => {
+    const B = await import("./helpers/xlsb.ts")
+    const sheet = B.sheetBin([
+      B.rowHdr(0, true), B.isst(0, 1), B.rk(1, B.rkInt(5), 1), B.real(2, 45000, 1), B.cellSt(3, "x"), B.rstring(4, "r"), B.fmlaString(5, "f"),
+      B.rowHdr(1), B.shortBlank(), B.shortIsst(0), B.shortSt("s"), B.cellBool(9, true), B.cellError(10, 7), B.fmlaNum(11, 1)
+    ], { before: [B.wsDim(0, 1, 0, 11), B.colInfo(0, 3, true)], after: [B.mergeCell(0, 1, 0, 1)] })
+    const workbook = B.concat([
+      B.beginBook(), B.wbProp(false), B.bundleSh("S", "rId1"), B.bundleSh("T", "rId2", 1),
+      B.supSelf(), B.supBookSrc("rIdX1"), B.externSheet([[0, 0, 0], [1, 0, 0], [0, 0, 1]]),
+      B.name("A", B.ref3d(0, 0, 0)), B.name("B", B.area3d(2, 0, 1, 0, 0x3FFF), { itab: 0, builtin: true }), B.name("C", B.ref3d(1, 0, 0)), B.endBook()
+    ])
+    const strings = B.concat([B.beginSst(2), B.sstItem("a"), B.sstItem("b")])
+    const external = B.concat([B.supTabs(["E"])])
+    const arbMutation = (part: Uint8Array) =>
+      fc.tuple(
+        fc.integer({ min: 0, max: part.length }),
+        fc.array(fc.tuple(fc.nat(), fc.integer({ min: 0, max: 7 })), { maxLength: 6 }),
+        fc.option(fc.tuple(fc.nat(), fc.integer({ min: 0, max: 0x3FFF }), fc.uint8Array({ maxLength: 40 })))
+      ).map(([length, flips, insert]) => {
+        let bytes: Uint8Array = part.slice(0, length)
+        for (const [at, bit] of flips) if (bytes.length > 0) bytes[at % bytes.length]! ^= 1 << bit
+        if (insert !== null) {
+          const at = insert[0] % (bytes.length + 1)
+          bytes = B.concat([bytes.subarray(0, at), B.record(insert[1], insert[2]), bytes.subarray(at)])
+        }
+        return bytes
+      })
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom("sheet", "workbook", "strings", "external").chain((which) =>
+          fc.tuple(fc.constant(which), arbMutation(which === "sheet" ? sheet : which === "workbook" ? workbook : which === "strings" ? strings : external))
+        ),
+        async ([which, mutated]) => {
+          const bytes = await B.xlsb({
+            sheets: [{ name: "S", part: which === "sheet" ? mutated : sheet }, { name: "T", part: sheet }],
+            workbookPart: which === "workbook" ? mutated : workbook,
+            externalLinks: [which === "external" ? mutated : external],
+            xfs: [0, 14],
+            stringsPart: which === "strings" ? mutated : strings,
+            method: "store"
+          })
+          await terminates({ op: "read", bytes })
+          await terminates({ op: "read", bytes, limits: { maxRows: 1, maxColumns: 4, maxCellsPerSheet: 5, maxStringLength: 2, maxSharedStrings: 1, maxRecordBytes: 32, maxDefinedNames: 1 } })
+        }
+      ),
+      { numRuns: 400 }
+    )
+  }, 180_000)
 })
