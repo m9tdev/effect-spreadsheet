@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
-import { describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it } from "vitest"
+import { FuzzHost } from "./fuzz/host.ts"
 import { RecordReader, readBof, EOF } from "../src/internal/biff/records.ts"
 import { type Cfb, type CfbEntry, open } from "../src/internal/cfb/cfb.ts"
 import { MalformedFile } from "../src/SpreadsheetError.ts"
@@ -205,28 +206,30 @@ describe("cfb: hostile and broken files", () => {
     expect(b.read(b.find("Workbook")!)).toMatchObject({ _tag: "LimitExceeded", limit: "maxSectorChain", max: 5 })
   })
 
-  it("directory loops and bad entries are MalformedFile", () => {
+  // Run in the fuzz worker with a time budget: if a loop check were
+  // removed, the walk would never end; the worker is then killed and the
+  // test fails naming the hang instead of freezing the run.
+  const host = new FuzzHost(5000)
+  afterAll(() => host.stop())
+
+  it("directory loops and bad entries are MalformedFile (run in a worker with a budget)", async () => {
     const layout = fresh()
     const dir = sectorOffset(layout.directorySectors[0]!)
-    const selfSibling = layout.bytes.slice()
-    patch32(selfSibling, dir + 1 * 128 + 72, 1) // entry 1's right sibling is itself
-    expect(reasonOf(open(selfSibling, limits))).toBe("directory entry 1 is reached twice")
-    const toRoot = layout.bytes.slice()
-    patch32(toRoot, dir + 2 * 128 + 72, 0) // a sibling pointing at the root
-    expect(reasonOf(open(toRoot, limits))).toBe("directory entry 0 is reached twice")
-    const outside = layout.bytes.slice()
-    patch32(outside, dir + 1 * 128 + 72, 5000)
-    expect(reasonOf(open(outside, limits))).toMatch(/directory points at entry 5000/)
-    const badName = layout.bytes.slice()
-    badName[dir + 1 * 128 + 64] = 99
-    expect(reasonOf(open(badName, limits))).toBe("directory entry 1 has a bad name length")
-    const badType = layout.bytes.slice()
-    badType[dir + 1 * 128 + 66] = 9
-    expect(reasonOf(open(badType, limits))).toBe("directory entry 1 has type 9")
-    const noRoot = layout.bytes.slice()
-    noRoot[dir + 66] = 1
-    expect(reasonOf(open(noRoot, limits))).toBe("the first directory entry is not the root")
-  })
+    const cases: Array<[string, (b: Uint8Array) => void]> = [
+      ["directory entry 1 is reached twice", (b) => patch32(b, dir + 1 * 128 + 72, 1)], // its own right sibling
+      ["directory entry 0 is reached twice", (b) => patch32(b, dir + 2 * 128 + 72, 0)], // a sibling pointing at the root
+      ["directory entry 6 is reached twice", (b) => patch32(b, dir + 7 * 128 + 76, 6)], // a storage whose child is its parent
+      ["directory points at entry 5000 of 12", (b) => patch32(b, dir + 1 * 128 + 72, 5000)],
+      ["directory entry 1 has a bad name length", (b) => void (b[dir + 1 * 128 + 64] = 99)],
+      ["directory entry 1 has type 9", (b) => void (b[dir + 1 * 128 + 66] = 9)],
+      ["the first directory entry is not the root", (b) => void (b[dir + 66] = 1)]
+    ]
+    for (const [reason, mutate] of cases) {
+      const bytes = layout.bytes.slice()
+      mutate(bytes)
+      expect(await host.run({ op: "cfb", bytes }), reason).toEqual({ kind: "typed", tag: "MalformedFile", reason })
+    }
+  }, 120_000)
 
   it("a directory chain cycle, a miniFAT cycle and a bad mini stream are MalformedFile", () => {
     const layout = fresh()

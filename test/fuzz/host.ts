@@ -3,7 +3,9 @@ import { Worker } from "node:worker_threads"
 import type { FuzzTask } from "./tasks.ts"
 
 export type FuzzResult =
-  | { readonly kind: "value" | "typed" }
+  | { readonly kind: "value" }
+  /** A SpreadsheetError: its tag and reason (when it has one). */
+  | { readonly kind: "typed"; readonly tag?: string; readonly reason?: string }
   | { readonly kind: "defect"; readonly detail: string }
   | { readonly kind: "hang"; readonly detail: string }
 
@@ -45,11 +47,15 @@ export class FuzzHost {
         this.worker = undefined
         done({ kind: "hang", detail: `no result within ${budgetMs} ms for ${describe(task)}` })
       }, budgetMs)
-      const onMessage = (reply: { id: number; kind: FuzzResult["kind"]; detail?: string }) => {
+      const onMessage = (reply: { id: number; kind: FuzzResult["kind"]; detail?: string; tag?: string; reason?: string }) => {
         if (reply.id !== id) return
-        done(reply.kind === "value" || reply.kind === "typed"
-          ? { kind: reply.kind }
-          : { kind: "defect", detail: reply.detail ?? "" })
+        done(
+          reply.kind === "value"
+            ? { kind: "value" }
+            : reply.kind === "typed"
+            ? { kind: "typed", ...(reply.tag === undefined ? {} : { tag: reply.tag }), ...(reply.reason === undefined ? {} : { reason: reply.reason }) }
+            : { kind: "defect", detail: reply.detail ?? "" }
+        )
       }
       const onError = (error: unknown) => {
         this.worker = undefined
