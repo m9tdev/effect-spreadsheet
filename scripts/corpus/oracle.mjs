@@ -162,6 +162,17 @@ function parse(XLSX, job) {
     date1904: !!wb.Workbook?.WBProps?.date1904,
     sheets: wb.SheetNames.map((name, i) => ({ name, visibility: VIS[wbSheets[i]?.Hidden ?? 0] ?? String(wbSheets[i]?.Hidden) })),
   }
+  // Defined names, only when there are some (so files without any keep their bytes and the
+  // schema stays 2; results cached before this need --force to gain them).
+  const names = wb.Workbook?.Names ?? []
+  if (names.length) {
+    workbook.names = names.map((n) => {
+      const o = { name: n.Name, ref: n.Ref }
+      if (n.Sheet !== undefined) o.sheet = n.Sheet
+      if (n.Hidden !== undefined) o.hidden = n.Hidden
+      return o
+    })
+  }
   const options = { read: READ_OPTIONS, json: JSON_OPTIONS, rowsMaxArea: ROWS_MAX_AREA, maxCells: MAX_CELLS, maxBytes: MAX_BYTES }
   const counts = wb.SheetNames.map((name) => sheetCounts(wb.Sheets[name], name))
   const total = counts.reduce((a, c) => a + c.cellCount, 0)

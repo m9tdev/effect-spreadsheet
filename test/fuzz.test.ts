@@ -212,4 +212,33 @@ describe("fuzz: never a defect, never a hang", () => {
       { numRuns: 300 }
     )
   })
+
+  it("xls: truncations and bit flips of the corpus and synthetic workbooks, through the reader", async () => {
+    const samples: Array<Uint8Array> = ["test/corpus/generated/features.xls", "test/corpus/generated/features.biff5.xls", "test/corpus/hidden-rows/hidden-row.xls", "test/corpus/generated/hidden_rows.xls"]
+      .map((p) => new Uint8Array(readFileSync(p)))
+    const X = await import("./helpers/xls.ts")
+    const synthetic = X.workbookStream({
+      globals: [X.xf(0), X.xf(14), X.sst(["a", "b"]), X.externSheet([0]), X.name(6, X.area3d(0, 0, 1, 0, 1))],
+      sheets: [{ name: "S", records: [X.row(0, true), X.labelSst(0, 0, 0, 1), X.rk(0, 1, 1, X.rkInt(5)), X.mulrk(1, 0, [[0, 2], [1, 6]]), X.formula(1, 2, 0, { kind: 0 }), X.string("s"), X.colInfo(0, 1, true), X.mergeCells([[0, 1, 0, 0]])] }]
+    })
+    samples.push(X.xls({ sheets: [] }), writeCfb([{ name: "Workbook", data: synthetic }]).bytes, synthetic)
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...samples).chain((sample) =>
+          fc.tuple(
+            fc.constant(sample),
+            fc.integer({ min: 0, max: sample.length }),
+            fc.array(fc.tuple(fc.nat(), fc.integer({ min: 0, max: 7 })), { maxLength: 12 })
+          )
+        ),
+        async ([sample, length, flips]) => {
+          const bytes = sample.slice(0, length)
+          for (const [at, bit] of flips) if (bytes.length > 0) bytes[at % bytes.length]! ^= 1 << bit
+          await terminates({ op: "read", bytes })
+          await terminates({ op: "read", bytes, limits: { maxRows: 3, maxCellsPerSheet: 5, maxStringLength: 4, maxSharedStrings: 1 } })
+        }
+      ),
+      { numRuns: 500 }
+    )
+  }, 180_000)
 })

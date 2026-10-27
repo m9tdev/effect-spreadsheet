@@ -107,8 +107,13 @@ describe("biff records", () => {
     const result = new RecordReader(stream, "Workbook").nextWithContinues(1024 * 1024 * 1024, "maxDecompressedBytes")
     if (result === undefined || "_tag" in result) throw new Error("expected a record")
     expect(result.segments.count).toBe(n + 1)
+    // the used bounds: 8 bytes per segment; the array behind them at most twice that
+    expect(result.segments.count * 8).toBe(8 * (n + 1))
     expect(result.segments.bounds.byteLength).toBe(8 * (n + 1))
-    expect(result.segments.bounds.byteLength).toBeLessThan(2 * stream.length)
+    expect(result.segments.bounds.buffer.byteLength).toBeLessThanOrEqual(2 * 8 * (n + 1))
+    // a view of the growable array (here it grew past the used part), not a copy of it
+    expect(result.segments.bounds.buffer.byteLength).toBeGreaterThan(result.segments.bounds.byteLength)
+    expect(result.segments.bounds.buffer.byteLength).toBeLessThan(4 * stream.length)
     const r = new SegmentReader(result.segments)
     expect(r.remaining()).toBe(n + 1)
     r.skip(1)

@@ -7,6 +7,9 @@
  * walk over n bytes ends after at most n / 4 records. Fewer than 4 bytes
  * left at the end (padding) end the walk.
  *
+ * A reader may be given an end before the stream's (a sheet's substream
+ * ends where the next one starts): it reads nothing at or past it.
+ *
  * `CONTINUE` records (0x003C) carry the rest of a record that didn't fit
  * in 8 224 bytes; `nextWithContinues` gathers them with their record, as
  * separate segments (string data restarts at each segment boundary).
@@ -45,29 +48,35 @@ export class RecordReader {
   private readonly bytes: Uint8Array
   private readonly view: DataView
   private readonly part: string
+  /** Where reading stops: no record may run past it. */
+  readonly end: number
 
-  constructor(bytes: Uint8Array, part: string, offset = 0) {
+  constructor(bytes: Uint8Array, part: string, offset = 0, end = bytes.length) {
     this.bytes = bytes
     this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     this.part = part
     this.offset = offset
+    this.end = Math.min(end, bytes.length)
+  }
+
+  private pastEnd(at: number, type: number): MalformedFile {
+    const where = this.end === this.bytes.length ? "the stream" : "its substream"
+    return new MalformedFile({ format: "xls", part: this.part, offset: at, reason: `record 0x${type.toString(16)} runs past the end of ${where}` })
   }
 
   /** The type of the next record, without reading it; undefined at the end. */
   peekType(): number | undefined {
-    return this.offset + 4 <= this.bytes.length ? this.view.getUint16(this.offset, true) : undefined
+    return this.offset + 4 <= this.end ? this.view.getUint16(this.offset, true) : undefined
   }
 
   /** The next record; undefined at the end of the stream. */
   next(): BiffRecord | undefined | MalformedFile {
     const at = this.offset
-    if (at + 4 > this.bytes.length) return undefined
+    if (at + 4 > this.end) return undefined
     const type = this.view.getUint16(at, true)
     const length = this.view.getUint16(at + 2, true)
     const end = at + 4 + length
-    if (end > this.bytes.length) {
-      return new MalformedFile({ format: "xls", part: this.part, offset: at, reason: `record 0x${type.toString(16)} runs past the end of the stream` })
-    }
+    if (end > this.end) return this.pastEnd(at, type)
     // progress: offset grows by 4 + length >= 4
     this.offset = end
     this.records++
@@ -92,13 +101,11 @@ export class RecordReader {
     let total = 4 + first.data.length
     const bytes = this.bytes
     // progress: each iteration consumes one CONTINUE record (offset grows by 4 + length)
-    while (this.offset + 4 <= bytes.length && this.view.getUint16(this.offset, true) === CONTINUE) {
+    while (this.offset + 4 <= this.end && this.view.getUint16(this.offset, true) === CONTINUE) {
       const at = this.offset
       const length = this.view.getUint16(at + 2, true)
       const end = at + 4 + length
-      if (end > bytes.length) {
-        return new MalformedFile({ format: "xls", part: this.part, offset: at, reason: "record 0x3c runs past the end of the stream" })
-      }
+      if (end > this.end) return this.pastEnd(at, CONTINUE)
       this.offset = end
       this.records++
       total += 4 + length
@@ -113,7 +120,8 @@ export class RecordReader {
       bounds[2 * count + 1] = end
       count++
     }
-    return { ...first, segments: { bytes, bounds: bounds.slice(0, 2 * count), count } }
+    // a view of the used part, no copy (at most 2x the used size is kept)
+    return { ...first, segments: { bytes, bounds: bounds.subarray(0, 2 * count), count } }
   }
 }
 

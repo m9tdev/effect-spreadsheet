@@ -384,6 +384,84 @@ out("sylk_row_format_no_m.slk", Buffer.from('ID;PWXL;N;E\r\nP;PGeneral\r\nF;SDM6
   out("csv_bom_only.csv", Buffer.from([0xef, 0xbb, 0xbf]), "UTF-8 BOM and nothing else")
 }
 
+// ---- 10. xls formulas and defined names, BIFF8 hand-built
+// SheetJS's writers don't write NAME, SUPBOOK or SHRFMLA records, so the workbook stream is
+// built record by record with the record builders of test/helpers/xls.ts and its compound
+// file with test/helpers/cfb.ts (Node 24 loads those .ts files directly: types are stripped).
+{
+  const H = await import("../../test/helpers/xls.ts")
+  const { writeCfb } = await import("../../test/helpers/cfb.ts")
+  const { record, bof, eof, u16, u32, f64, xlString, shortString, name, area3d, ref3d, sst, number, labelSst, dimensions, string } = H
+  const concat = (parts) => Buffer.concat(parts.map((p) => Buffer.from(p.buffer, p.byteOffset, p.length)))
+  const chars = (s) => Array.from(s, (c) => c.charCodeAt(0))
+  /** FORMULA: a number result, or { kind } (0 string, then STRING; 1 bool; 2 error), with its grbit and tokens. */
+  const formula = (r, c, value, { grbit = 0, rgce = [0x1E, 1, 0], type = 0x0006 } = {}) => {
+    const v = typeof value === "number" ? f64(value) : [value.kind, 0, value.value ?? 0, 0, 0, 0, 0xFF, 0xFF]
+    return record(type, [...u16(r), ...u16(c), ...u16(0), ...v, ...u16(grbit), ...u32(0), ...u16(rgce.length), ...rgce])
+  }
+  const SHARED = 0x0008 // FORMULA fShrFmla
+  const ptgExp = (r, c) => [0x01, ...u16(r), ...u16(c)]
+  const shrfmla = (r1, r2, c1, c2, rgce) => record(0x04BC, [...u16(r1), ...u16(r2), c1, c2, 0, 2, ...u16(rgce.length), ...rgce])
+  const supbookSelf = (sheets) => record(0x01AE, [...u16(sheets), 0x01, 0x04])
+  const supbookExternal = (file, sheets) => record(0x01AE, [...u16(sheets.length), ...xlString(file), ...sheets.flatMap(xlString)])
+  const externSheet = (xtis) => record(0x0017, [...u16(xtis.length), ...xtis.flatMap(([book, first, last]) => [...u16(book), ...u16(first), ...u16(last)])])
+  const refErr3d = (ixti) => [0x3C, ...u16(ixti), 0, 0, 0, 0]
+
+  const sheetNames = ["Data", "Jan", "Feb", "Mar", "Q1 Notes", "Données"]
+  const strings = ["label", "january", "february", "march", "a note", "données"]
+  const sheets = [
+    [dimensions(0, 5, 0, 4),
+      labelSst(0, 0, 0, 0), number(0, 1, 0, 10),
+      formula(1, 0, 3.5), formula(1, 1, { kind: 0 }), string("text result"), formula(1, 2, { kind: 1, value: 1 }), formula(1, 3, { kind: 2, value: 0x07 }),
+      // a shared formula: its SHRFMLA sits between the first FORMULA and that one's STRING
+      formula(2, 0, { kind: 0 }, { grbit: SHARED, rgce: ptgExp(2, 0) }), shrfmla(2, 2, 0, 1, [0x1E, 2, 0]), string("shared"),
+      formula(2, 1, 7, { grbit: SHARED, rgce: ptgExp(2, 0) }),
+      formula(3, 0, { kind: 2, value: 0x2A }), formula(3, 1, { kind: 1, value: 0 }), formula(3, 2, -0.25),
+      // a STRING continued by a CONTINUE (its own flags byte, then the rest), and a FORMULA with the BIFF4 type 0x0406
+      formula(4, 0, { kind: 0 }), record(0x0207, [...u16(11), 0, ...chars("split")]), record(0x003C, [0, ...chars(" value")]),
+      formula(4, 1, 12.5, { type: 0x0406 })],
+    [dimensions(0, 1, 0, 2), labelSst(0, 0, 0, 1), number(0, 1, 0, 1)],
+    [dimensions(0, 1, 0, 2), labelSst(0, 0, 0, 2), number(0, 1, 0, 2)],
+    [dimensions(0, 1, 0, 2), labelSst(0, 0, 0, 3), number(0, 1, 0, 3)],
+    [dimensions(0, 1, 0, 1), labelSst(0, 0, 0, 4)],
+    [dimensions(0, 1, 0, 1), labelSst(0, 0, 0, 5)],
+  ]
+  // EXTERNSHEET entries: [SUPBOOK, first sheet, last sheet]; SUPBOOK 0 is this workbook, 1 an external one
+  const xti = { data: 0, janToMar: 1, notes: 2, donnees: 3, external: 4, deleted: 5, outOfRange: 6, jan: 7, marToNotes: 8 }
+  const xtis = [[0, 0, 0], [0, 1, 3], [0, 4, 4], [0, 5, 5], [1, 0, 0], [0, 0xFFFF, 0xFFFF], [0, 9, 9], [0, 1, 1], [0, 3, 4]]
+  const names = [
+    name("Total", ref3d(xti.data, 0, 1)),
+    name("Block", area3d(xti.data, 1, 4, 0, 2)),
+    name("Span", area3d(xti.janToMar, 0, 9, 0, 0)),
+    name("Notes", ref3d(xti.notes, 0, 0)),
+    name("Accents", ref3d(xti.donnees, 0, 0)),
+    name("Rate", ref3d(xti.external, 0, 0)),
+    name("Gone", ref3d(xti.deleted, 0, 0)),
+    name("Missing", ref3d(xti.outOfRange, 0, 0)),
+    name("Lost", refErr3d(xti.data)),
+    name("Columns", area3d(xti.data, 0, 0xFFFF, 0, 2)),
+    name("Secret", ref3d(xti.data, 4, 4), { hidden: true }),
+    name("Local", ref3d(xti.jan, 2, 2), { itab: 2 }),
+    name("Quoted", area3d(xti.marToNotes, 0, 0, 0, 1)),
+    name("Relative", ref3d(xti.data, 1, 0xC001)),
+    name("Calc", [0x1E, 42, 0]),
+    name(0x07, area3d(xti.data, 0, 1, 0, 0xFF), { itab: 1 }), // Print_Titles: rows 1-2 of Data
+    name(0x0D, area3d(xti.data, 0, 4, 0, 2), { itab: 1, hidden: true }), // _FilterDatabase
+  ]
+  // Globals in Excel's order: BOUNDSHEETs (offsets filled in below), SUPBOOKs, EXTERNSHEET, NAMEs, SST.
+  const head = [bof(0x0005), record(0x0042, u16(1200))]
+  const tail = [supbookSelf(sheetNames.length), supbookExternal("\u0001rates.xls", ["Rates"]), externSheet(xtis), ...names, sst(strings), eof()]
+  const boundsheet = (n, offset) => record(0x0085, [...u32(offset), 0, 0, ...shortString(n)])
+  const sheetBytes = sheets.map((recs) => concat([bof(0x0010), ...recs, eof()]))
+  let offset = concat([...head, ...sheetNames.map((n) => boundsheet(n, 0)), ...tail]).length
+  const bounds = sheetNames.map((n, k) => { const r = boundsheet(n, offset); offset += sheetBytes[k].length; return r })
+  const stream = concat([...head, ...bounds, ...tail, ...sheetBytes])
+  out("names_formulas.xls", writeCfb([{ name: "Workbook", data: new Uint8Array(stream) }]).bytes,
+    "BIFF8 hand-built: FORMULA cached results (number, STRING, bool, error; a SHRFMLA before a STRING; a STRING with CONTINUE; type 0x0406), "
+    + "a self and an external SUPBOOK, EXTERNSHEET, and NAMEs: 3-D refs and areas, sheet spans, quoted and non-ASCII sheet names, an external ref, "
+    + "a deleted and an out-of-range sheet, PtgRefErr3d, whole columns, print titles (whole rows), a scoped and hidden names, a non-reference formula")
+}
+
 // ---- index
 const index = { generator: "scripts/corpus/generate.mjs", sheetjs: XLSX.version, files: written.map((w) => {
   const buf = fs.readFileSync(path.join(OUT, w.name))

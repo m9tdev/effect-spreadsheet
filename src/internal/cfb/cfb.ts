@@ -170,17 +170,29 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
     return at + 4 <= bytes.length ? view.getUint32(at, true) : FREESECT
   }
 
-  // FAT sector numbers: 109 in the header, the rest in the DIFAT chain
-  const numFat = u32(44)
-  if (numFat > fileSectors) return malformed(`header lists ${numFat} FAT sectors, the file has ${fileSectors}`, 44)
+  // FAT sector numbers: 109 in the header, the rest in the DIFAT chain.
+  // Some writers (pyExcelerator) declare more FAT sectors than the file has
+  // (109 in an 8-sector file) and list only the real ones, the rest free:
+  // when the count can't be true, the FAT is the in-use entries listed.
+  const declaredFat = u32(44)
+  const countLies = declaredFat > fileSectors
+  const numFatWanted = Math.min(declaredFat, fileSectors)
   const fatSectors: Array<number> = []
+  let headerEnded = false
   // progress: k up to 109
-  for (let k = 0; k < HEADER_DIFAT && fatSectors.length < numFat; k++) fatSectors.push(u32(76 + 4 * k))
+  for (let k = 0; k < HEADER_DIFAT && fatSectors.length < numFatWanted; k++) {
+    const sector = u32(76 + 4 * k)
+    if (sector === FREESECT) {
+      headerEnded = true
+      break
+    }
+    fatSectors.push(sector)
+  }
   let difat = u32(68)
   const numDifat = u32(72)
   const difatSeen = new Set<number>()
   // progress: each DIFAT sector is visited once (difatSeen), at most numDifat and fileSectors of them
-  while (fatSectors.length < numFat && difat !== ENDOFCHAIN && difat !== FREESECT) {
+  while (!headerEnded && fatSectors.length < numFatWanted && difat !== ENDOFCHAIN && difat !== FREESECT) {
     if (difat > MAXREGSECT || difat >= fileSectors) return malformed(`DIFAT chain points at sector ${difat}`)
     if (difatSeen.has(difat)) return malformed(`DIFAT chain has a cycle at sector ${difat}`)
     if (difatSeen.size >= numDifat) return malformed("DIFAT chain is longer than the header says")
@@ -188,12 +200,28 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
     difatSeen.add(difat)
     visited++
     // progress: k up to perSector - 1
-    for (let k = 0; k < perSector - 1 && fatSectors.length < numFat; k++) fatSectors.push(sectorU32(difat, k))
+    for (let k = 0; k < perSector - 1 && fatSectors.length < numFatWanted; k++) {
+      const sector = sectorU32(difat, k)
+      if (sector === FREESECT) {
+        headerEnded = true // the listed FAT sectors end here
+        break
+      }
+      fatSectors.push(sector)
+    }
+    if (headerEnded) break
     difat = sectorU32(difat, perSector - 1)
   }
-  if (fatSectors.length < numFat) return malformed(`found ${fatSectors.length} of ${numFat} FAT sectors`)
-
-  // the FAT itself
+  if (fatSectors.length === 0) return malformed("no FAT sectors")
+  if (fatSectors.length < declaredFat && !countLies) {
+    return malformed(`found ${fatSectors.length} of ${declaredFat} FAT sectors`)
+  }
+  // the FAT itself. FAT sector k describes sectors k * perSector onwards, so
+  // only the first ceil(fileSectors / perSector) can describe sectors the
+  // file has; walks reject sectors past the file before using the FAT, so the
+  // rest are never consulted and are not read. (pyExcelerator lists FAT
+  // sectors past the end of a small file; those must not fail it, while a
+  // FAT sector a chain could need and the file lacks still does.)
+  const numFat = Math.min(fatSectors.length, Math.ceil(fileSectors / perSector))
   const fat = new Uint32Array(numFat * perSector)
   // progress: one FAT sector per iteration
   for (let k = 0; k < numFat; k++) {

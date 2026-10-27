@@ -278,7 +278,9 @@ use `XLSX.stream.to_json` for expected output, because that is where the hang is
   "options": { "read": {…}, "json": {…}, "rowsMaxArea": 2000000 },
   "workbook": {
     "bookType": "xlsx", "date1904": false,
-    "sheets": [ { "name": "Sheet1", "visibility": "visible" } ]   // "visible" | "hidden" | "veryHidden"
+    "sheets": [ { "name": "Sheet1", "visibility": "visible" } ],  // "visible" | "hidden" | "veryHidden"
+    "names": [ { "name": "Total", "ref": "Data!$B$1", "sheet": 0, "hidden": true } ]
+                                       // wb.Workbook.Names (Name, Ref, Sheet, Hidden), only when there are some
   },
   "sheets": [ {
     "name": "Sheet1",
@@ -452,6 +454,13 @@ by hand. Each file is described in `generated/README.json`.
   unicode, an empty string and phonetic runs; inline strings; `t=str/b/e/d`; rows and cells without `r`.
 - **Formulas** `formulas.xlsx`: plain, shared (`si`) and array formulas; string, error and bool
   cached results; one formula with no cached value.
+- **XLS formulas and defined names** `names_formulas.xls`, a hand-built BIFF8 workbook (SheetJS's
+  writers don't write these records): FORMULA cached results (number, STRING, bool, error), a
+  SHRFMLA between a FORMULA and its STRING, a STRING with a CONTINUE, a 0x0406 FORMULA; a self
+  and an external SUPBOOK, EXTERNSHEET, and NAMEs (3-D refs and areas, sheet spans, quoted and
+  non-ASCII sheet names, external, deleted and out-of-range sheets, PtgRefErr3d, whole rows and
+  columns, scoped and hidden names, a non-reference formula). Built with the record builders of
+  `test/helpers/xls.ts` and `test/helpers/cfb.ts`.
 - **Dates** `dates.xlsx` / `dates_1904.xlsx`: built-in formats 14/15/17/20/22/45–47 and custom
   formats (locale prefix, quoted text, `[h]`, a non-date `0.00`) on serials 46024.52, 0, 60
   (the 1900 leap bug), 61, 1.75 and -1.

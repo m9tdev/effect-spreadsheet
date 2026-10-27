@@ -1,6 +1,6 @@
 # effect-spreadsheet
 
-Effect v4 library for reading spreadsheet files (CSV, XLSX, XLS, XLSB, ...) with its own pure-TypeScript parsers. Work in progress; see PLAN.md. Today CSV/delimited text and XLSX/XLSM read; the other formats are detected and fail with `UnsupportedFormat`.
+Effect v4 library for reading spreadsheet files (CSV, XLSX, XLS, XLSB, ...) with its own pure-TypeScript parsers. Work in progress; see PLAN.md. Today CSV/delimited text, XLSX/XLSM and XLS (BIFF8 and BIFF5) read; the other formats are detected and fail with `UnsupportedFormat`.
 
 It runs in Node, workers and browsers (web-standard APIs only). Every loop has a progress measure, every resource has a limit, and bad input fails with a typed `SpreadsheetError`.
 
@@ -65,10 +65,18 @@ not from the workbook the rows were read from.
 - `numFmt` is the number-format code for numbers and dates (built-in ids as ECMA-376 lists them); `formula` is the formula text as stored (a shared formula only on its first cell). Formulas are not evaluated.
 - Zip bombs: all entries of an archive share one inflate budget, `max(inflateFloorBytes, maxInflateRatio × archive size)` (64 MiB and 200 by default), never more than `maxDecompressedBytes` (1 GiB).
 
+## XLS behaviour
+
+- `effect-spreadsheet/xls` (`Xls.read(bytes)`), or `Spreadsheet.read`, which detects an `.xls` from its compound file's workbook stream. BIFF8 (Excel 97-2003) and BIFF5 (Excel 5/95) workbooks read, also as a bare workbook stream. BIFF2, BIFF3 and BIFF4 files (Excel 2.x-4.x) fail with `UnsupportedFormat` naming the version (`biff2`, `biff3`, `biff4`).
+- The same `Workbook` API as XLSX: `workbook.sheets` (names, visibility), `workbook.definedNames` (BIFF8; a single 3-D reference or area is written as Excel writes it in XLSX: `Sheet!$A$1`, `'My Sheet'!$A$1:$B$2`, `Jan:Mar!$A$1`, whole rows `$1:$2` and columns `$A:$C`, `[1]Sheet!$A$1` for an external workbook, `#REF!` forms for deleted sheets or cells; other formulas `""`), `Workbook.rows` (hidden rows flagged, never skipped; chart and macro sheets have no rows), `Workbook.sheetDetails` (hidden columns, merges, the declared DIMENSIONS).
+- Values: shared strings and labels are `Text` (BIFF5 strings in the workbook's code page via `TextDecoder`; unknown code pages as windows-1252); numbers (NUMBER, RK, MULRK), booleans and error codes keep their type (NaN and infinities are `#NUM!` errors, unknown error codes `#N/A`); formula cells give their cached result (formula text isn't decompiled). Dates and `numFmt` work as in XLSX. Styled blanks are `Empty`.
+- A password-protected workbook, or an encrypted OOXML package in a compound file, fails with `Encrypted`.
+
 ### Comparison with other readers
 
 The test suite compares CSV results with a widely used JavaScript spreadsheet library as a
 test-only oracle. The intended differences are listed in
 [docs/csv-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/csv-oracle-differences.md) (CSV reading) and
 [docs/records-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/records-oracle-differences.md) (`toRecords`) and
-[docs/xlsx-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/xlsx-oracle-differences.md) (XLSX).
+[docs/xlsx-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/xlsx-oracle-differences.md) (XLSX) and
+[docs/xls-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/xls-oracle-differences.md) (XLS).

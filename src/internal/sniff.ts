@@ -8,6 +8,7 @@ import { LimitExceeded, MalformedFile } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
 import type { Format } from "../Workbook.ts"
 import { detectEncoding } from "./csv/decode.ts"
+import { open as openCfb } from "./cfb/cfb.ts"
 import { readDirectory, storedData } from "./zip/directory.ts"
 
 const TEXT_PREFIX_BYTES = 8 * 1024
@@ -64,7 +65,7 @@ const BOF_DATA_TYPES = new Set([0x0005, 0x0006, 0x0010, 0x0020, 0x0040, 0x0100])
 /**
  * A raw BIFF BOF record with the length its version uses and a known data
  * type: BIFF2 (0x0009, length 4), BIFF3/4 (0x0209/0x0409, length 6), BIFF5/8
- * (0x0809, length 8 or 16, version word 0x0500/0x0600). The strict check
+ * (0x0809, length 8 or 16, version word 0x05xx/0x0600). The strict check
  * keeps UTF-16LE text starting with tabs (`09 00 09 00`) out.
  */
 const isBiffBof = (bytes: Uint8Array): boolean => {
@@ -81,7 +82,7 @@ const isBiffBof = (bytes: Uint8Array): boolean => {
       return length === 6 && BOF_DATA_TYPES.has(dataType)
     case 0x0809: {
       const version = word(4)
-      return (length === 8 || length === 16) && (version === 0x0500 || version === 0x0600) && BOF_DATA_TYPES.has(dataType)
+      return (length === 8 || length === 16) && ((version & 0xFF00) === 0x0500 || version === 0x0600) && BOF_DATA_TYPES.has(dataType)
     }
     default:
       return false
@@ -113,7 +114,13 @@ const isSylk = (text: string): boolean =>
 
 export const detect = (bytes: Uint8Array, limits: Limits): Format | MalformedFile | LimitExceeded => {
   if (bytes.length === 0) return "csv"
-  if (startsWith(bytes, CFB_MAGIC)) return "cfb"
+  if (startsWith(bytes, CFB_MAGIC)) {
+    // a compound file: an .xls if it has a workbook stream (BIFF8 or BIFF5)
+    const cfb = openCfb(bytes, limits)
+    if ("_tag" in cfb) return cfb
+    const entry = cfb.find("Workbook") ?? cfb.find("Book")
+    return entry !== undefined && entry.type === "stream" ? "xls" : "cfb"
+  }
   if (ZIP_MAGICS.some((magic) => startsWith(bytes, magic))) {
     return detectZip(bytes, limits)
   }

@@ -2,6 +2,8 @@ import { assert, describe, it } from "@effect/vitest"
 import { Effect } from "effect"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
 import { enc } from "./helpers/run.ts"
+import { writeCfb } from "./helpers/cfb.ts"
+import { xls } from "./helpers/xls.ts"
 import { makeZip } from "./helpers/zip.ts"
 
 const detect = (bytes: Uint8Array) => Effect.runPromise(Effect.exit(Spreadsheet.detectFormat(bytes)))
@@ -10,7 +12,8 @@ const formatOf = async (bytes: Uint8Array) => {
   return exit._tag === "Success" ? exit.value : `error:${exit.cause}`
 }
 
-const CFB = new Uint8Array([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, ...new Uint8Array(504)])
+// a compound file that isn't a workbook (no Workbook/Book stream)
+const CFB = writeCfb([{ name: "WordDocument", data: new Uint8Array(100) }]).bytes
 const XLSX = makeZip([{ name: "[Content_Types].xml" }, { name: "xl/workbook.xml" }, { name: "xl/worksheets/sheet1.xml" }])
 const XLSB = makeZip([{ name: "[Content_Types].xml" }, { name: "xl/workbook.bin" }])
 
@@ -87,6 +90,10 @@ describe("format detection", () => {
 
   it("CFB, raw BIFF, SpreadsheetML, SYLK, HTML, XML", async () => {
     assert.strictEqual(await formatOf(CFB), "cfb")
+    assert.strictEqual(await formatOf(xls({ sheets: [{ name: "S", records: [] }] })), "xls")
+    assert.strictEqual(await formatOf(xls({ biff: 5, sheets: [{ name: "S", records: [] }] })), "xls")
+    // a broken compound file is a typed error, not "cfb"
+    assert.strictEqual(String(await formatOf(new Uint8Array([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, ...new Uint8Array(504)]))).includes("MalformedFile"), true)
     assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x00, 0x04, 0x00, 0x02, 0x00, 0x10, 0x00])), "xls")
     assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x10, 0x00])), "xls")
     const xml = `<?xml version="1.0"?>\n<?mso-application progid="Excel.Sheet"?>\n<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"></Workbook>`
@@ -164,6 +171,9 @@ describe("Spreadsheet.read dispatch", () => {
         assert.strictEqual(error._tag, "UnsupportedFormat")
         if (error._tag === "UnsupportedFormat") assert.notStrictEqual(error.format, "csv")
       }
+      // an .xls named report.csv is read as XLS
+      const book = yield* Spreadsheet.read(xls({ sheets: [{ name: "S", records: [] }] }), options)
+      assert.strictEqual(book.format, "xls")
       // the XLSX stub has empty parts: the XLSX reader rejects it, not the CSV one
       const xlsx = yield* Effect.flip(Spreadsheet.read(XLSX, options))
       assert.strictEqual(xlsx._tag, "MalformedFile")
