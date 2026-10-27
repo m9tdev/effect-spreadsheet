@@ -77,6 +77,12 @@ const unsupported: Partial<Record<Format, string>> = {
  * Formats without a reader fail with `UnsupportedFormat` naming what was
  * found.
  *
+ * The workbook keeps using `bytes` after this returns: XLSX zip entries
+ * and XLS workbook streams (bare, or in consecutive sectors of a compound
+ * file) are views of them, not copies, read when a sheet's rows are. Don't
+ * change them while the workbook is in use; pass a copy if the buffer is
+ * reused.
+ *
  * @since 0.1.0
  * @category readers
  */

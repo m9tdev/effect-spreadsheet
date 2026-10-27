@@ -87,6 +87,12 @@ const workbookStream = (bytes: Uint8Array, limits: SpreadsheetLimits.Limits): Ui
 /**
  * Opens an XLS workbook from its bytes.
  *
+ * The workbook keeps using `bytes` after this returns: a bare BIFF stream,
+ * or a workbook stream in consecutive sectors of its compound file, is a
+ * view of them, not a copy, and sheets are read from it when their rows
+ * are. Don't change them while the workbook is in use; pass a copy if the
+ * buffer is reused.
+ *
  * @since 0.1.0
  * @category readers
  */
