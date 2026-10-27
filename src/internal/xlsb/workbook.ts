@@ -31,8 +31,8 @@ export const malformed = (reason: string, part?: string, offset?: number) =>
     ...(offset === undefined ? {} : { offset })
   })
 
-const tooLong = (limits: Limits) =>
-  new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: limits.maxStringLength + 1 })
+/** A string of `actual` code units, over maxStringLength. */
+export const tooLong = (limits: Limits, actual: number) => new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual })
 
 const BRT_NAME = 0x0027
 const BRT_BEGIN_BOOK = 0x0083
@@ -154,9 +154,10 @@ export const readWorkbookBin = (
           }
           const state = f.u32(0)
           const rel = readNullableWideString(record.data, 8, max)
-          const name = rel === undefined || rel === null ? rel : readWideString(record.data, rel.end, max)
+          const name = rel === undefined || typeof rel === "number" ? rel : readWideString(record.data, rel.end, max)
           if (state === undefined || name === undefined || rel === undefined) return malformed("truncated sheet record", part, record.offset)
-          if (name === null || rel === null) return tooLong(limits)
+          if (typeof rel === "number") return tooLong(limits, rel)
+          if (typeof name === "number") return tooLong(limits, name)
           sheets.push({
             name: name.value,
             visibility: state === 1 ? "hidden" : state === 2 ? "veryHidden" : "visible",
@@ -179,7 +180,7 @@ export const readWorkbookBin = (
           const link = ++externals
           if (books.length >= MAX_BOOKS) return undefined
           const rel = readWideString(record.data, 0, max)
-          if (rel === null) return tooLong(limits)
+          if (typeof rel === "number") return tooLong(limits, rel)
           books.push({ kind: "external", link, relationshipId: rel?.value ?? "" })
           return undefined
         }
@@ -200,7 +201,7 @@ export const readWorkbookBin = (
           const itab = f.u32(5)
           const name = readWideString(record.data, 9, max)
           if (flags === undefined || itab === undefined || name === undefined) return malformed("truncated defined name", part, record.offset)
-          if (name === null) return tooLong(limits)
+          if (typeof name === "number") return tooLong(limits, name)
           const cce = f.u32(name.end)
           if (cce === undefined || name.end + 4 + cce > record.data.length) return malformed("defined name formula past its record", part, record.offset)
           const builtin = (flags & 0x20) !== 0
@@ -246,7 +247,7 @@ export const readExternalSheets = (
       for (let k = 0; k < count; k++) {
         const name = readWideString(record.data, at, limits.maxStringLength)
         if (name === undefined) return malformed("truncated external sheet list", entry.name, record.offset)
-        if (name === null) return tooLong(limits)
+        if (typeof name === "number") return tooLong(limits, name)
         names.push(name.value)
         at = name.end
       }

@@ -43,7 +43,7 @@ import { serialToDate } from "../xlsx/numFmt.ts"
 import { compact } from "../xlsx/sheet.ts"
 import type { CellStyles } from "./parts.ts"
 import { sliced } from "./slices.ts"
-import { malformed } from "./workbook.ts"
+import { malformed, tooLong } from "./workbook.ts"
 
 export interface SheetContext {
   readonly part: string
@@ -253,7 +253,7 @@ export class SheetRows {
         const rich = type === BRT_CELL_RSTRING
         const text = rich ? readRichStr(data, at, limits.maxStringLength) : readWideString(data, at, limits.maxStringLength)
         if (text === undefined) return truncated()
-        if (text === null) return new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: limits.maxStringLength + 1 })
+        if (typeof text === "number") return tooLong(limits, text)
         cell = Cell.text(column, text.value)
         break
       }

@@ -13,7 +13,7 @@ import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
 import { sliced } from "./slices.ts"
-import { malformed } from "./workbook.ts"
+import { malformed, tooLong } from "./workbook.ts"
 
 const BRT_SST_ITEM = 0x0013
 const BRT_FMT = 0x002C
@@ -41,7 +41,7 @@ export const readSharedStrings = (
       }
       const text = readRichStr(record.data, 0, limits.maxStringLength)
       if (text === undefined) return malformed("truncated shared string", entry.name, record.offset)
-      if (text === null) return new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: limits.maxStringLength + 1 })
+      if (typeof text === "number") return tooLong(limits, text)
       strings.push(text.value)
       return undefined
     }
@@ -120,7 +120,7 @@ export const readStyles = (
           const id = new Fields(record.data).u16(0)
           const code = readWideString(record.data, 2, limits.maxStringLength)
           if (id === undefined || code === undefined) return malformed("truncated number format", entry.name, record.offset)
-          if (code === null) return new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: limits.maxStringLength + 1 })
+          if (typeof code === "number") return tooLong(limits, code)
           custom.set(id, code.value)
           return undefined
         }

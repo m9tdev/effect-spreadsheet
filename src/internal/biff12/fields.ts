@@ -21,15 +21,15 @@ const NULL_COUNT = 0xFFFFFFFF
 /**
  * An XLWideString at `at`: a u32 count of UTF-16 code units, then the
  * units. `undefined` if it runs past the data (a broken record, whatever
- * the limit), else `null` if the count is over `maxLength`; both are
+ * the limit), else the count itself (a number) if it is over `maxLength`; both are
  * checked before anything is decoded.
  */
-export const readWideString = (data: Uint8Array, at: number, maxLength: number): Read<string> | undefined | null => {
+export const readWideString = (data: Uint8Array, at: number, maxLength: number): Read<string> | undefined | number => {
   if (at < 0 || at + 4 > data.length) return undefined
   const count = (data[at]! | (data[at + 1]! << 8) | (data[at + 2]! << 16) | (data[at + 3]! << 24)) >>> 0
   const end = at + 4 + 2 * count
   if (end > data.length) return undefined
-  if (count > maxLength) return null
+  if (count > maxLength) return count
   return { value: count === 0 ? "" : utf16.decode(data.subarray(at + 4, end)), end }
 }
 
@@ -41,7 +41,7 @@ export const readNullableWideString = (
   data: Uint8Array,
   at: number,
   maxLength: number
-): Read<string | undefined> | undefined | null => {
+): Read<string | undefined> | undefined | number => {
   if (at >= 0 && at + 4 <= data.length) {
     const count = (data[at]! | (data[at + 1]! << 8) | (data[at + 2]! << 16) | (data[at + 3]! << 24)) >>> 0
     if (count === NULL_COUNT) return { value: undefined, end: at + 4 }
@@ -54,5 +54,5 @@ export const readNullableWideString = (
  * flags byte (formatting runs, phonetic data), then an XLWideString. The
  * runs and phonetic data after the text don't change it and aren't read.
  */
-export const readRichStr = (data: Uint8Array, at: number, maxLength: number): Read<string> | undefined | null =>
+export const readRichStr = (data: Uint8Array, at: number, maxLength: number): Read<string> | undefined | number =>
   at < 0 || at + 1 > data.length ? undefined : readWideString(data, at + 1, maxLength)

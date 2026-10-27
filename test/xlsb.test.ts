@@ -436,8 +436,21 @@ describe("xlsb limits and malformed input", () => {
     expect(await errorOf(one([B.rowHdr(0), B.rowHdr(0), B.rowHdr(0)]), { maxRows: 2 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows", actual: 3 })
     expect(await errorOf(one([B.rowHdr(0), B.rk(8, 0)]), { maxColumns: 8 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxColumns", actual: 9 })
     expect(await errorOf(one([B.rowHdr(0), B.blank(0), B.blank(1), B.blank(2)]), { maxCellsPerSheet: 2 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxCellsPerSheet", actual: 3 })
-    expect(await errorOf(one([B.rowHdr(0), B.cellSt(0, "abcde")]), { maxStringLength: 4 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
-    expect(await errorOf(one([], { strings: ["abcde"] }), { maxStringLength: 4 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    // a string's real length is reported (the limit is over the package's XML attribute lengths)
+    const L = 200
+    const x = "x".repeat(L + 7)
+    const long = { _tag: "LimitExceeded", limit: "maxStringLength", max: L, actual: L + 7 }
+    const at = { maxStringLength: L }
+    expect(await errorOf(one([B.rowHdr(0), B.cellSt(0, x)]), at)).toMatchObject(long)
+    expect(await errorOf(one([B.rowHdr(0), B.rstring(0, x)]), at)).toMatchObject(long)
+    expect(await errorOf(one([B.rowHdr(0), B.fmlaString(0, x)]), at)).toMatchObject(long)
+    expect(await errorOf(one([], { strings: [x] }), at)).toMatchObject(long)
+    expect(await errorOf(one([], { xfs: [0], formats: { 164: x } }), at)).toMatchObject(long)
+    expect(await errorOf({ sheets: [{ name: "S" }, { name: x }] }, at)).toMatchObject(long)
+    expect(await errorOf({ sheets: [{ name: "S" }], globals: [B.name(x, [])] }, at)).toMatchObject(long)
+    expect(await errorOf({ sheets: [{ name: "S" }], globals: [B.supBookSrc(x)] }, at)).toMatchObject(long)
+    const link = B.concat([B.supTabs([x])])
+    expect(await errorOf({ sheets: [{ name: "S" }], externalLinks: [link], globals: [B.supSelf(), B.supBookSrc("rIdX1"), B.externSheet([[1, 0, 0]]), B.name("N", B.ref3d(0, 0, 0))] }, at)).toMatchObject(long)
     expect(await errorOf(one([], { strings: ["a", "b", "c"] }), { maxSharedStrings: 2 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxSharedStrings", actual: 3 })
     expect(await errorOf({ sheets: [{ name: "a" }, { name: "b" }, { name: "c" }] }, { maxSheets: 2 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxSheets", actual: 3 })
     expect(await errorOf(one([B.rowHdr(0), B.cellSt(0, "x".repeat(100))]), { maxRecordBytes: 64 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxRecordBytes" })
