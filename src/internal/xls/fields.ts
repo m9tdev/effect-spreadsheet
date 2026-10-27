@@ -4,7 +4,7 @@
  *
  * @internal
  */
-import { compressed, readRichString, SegmentReader, segmentsOf } from "../biff/segments.ts"
+import { compressed, readRichString, SegmentReader, segmentsOf, utf16 } from "../biff/segments.ts"
 
 /** Reads at absolute offsets of one record's data; out of bounds gives `undefined`. */
 export class Fields {
@@ -113,7 +113,7 @@ export const readString = (
     const bytes = count * (wide ? 2 : 1)
     if (2 + bytes > rest.length) return undefined
     const chars = rest.subarray(2, 2 + bytes)
-    return { value: wide ? new TextDecoder("utf-16le").decode(chars) : compressed(chars), end: at + 2 + bytes }
+    return { value: wide ? utf16.decode(chars) : compressed(chars), end: at + 2 + bytes }
   }
   if (rest.length < countBytes) return undefined
   const count = countBytes === 1 ? rest[0]! : rest[0]! | (rest[1]! << 8)

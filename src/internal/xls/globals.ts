@@ -13,7 +13,7 @@
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import { type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
-import { readRichString, SegmentReader } from "../biff/segments.ts"
+import { readRichString, SegmentReader, utf16 } from "../biff/segments.ts"
 import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
 import { codepageLabel, Fields, readString, type Text, textDecoder } from "./fields.ts"
 
@@ -308,7 +308,8 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
       case FORMAT: {
         const id = f.u16(0)
         const code = readString(record.data, 2, text, biff8 ? 2 : 1)
-        if (id !== undefined && code !== undefined && code !== null) custom.set(id, code.value)
+        if (code === null) return tooLong(limits)
+        if (id !== undefined && code !== undefined) custom.set(id, code.value)
         continue
       }
       case XF:
@@ -332,11 +333,12 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
         const itab = f.u16(8)
         const flags = f.u8(14)
         if (grbit === undefined || cch === undefined || cce === undefined || itab === undefined || flags === undefined) continue
+        if (cch > limits.maxStringLength) return tooLong(limits, cch)
         const wide = (flags & 0x01) !== 0
         const nameEnd = 15 + cch * (wide ? 2 : 1)
         if (nameEnd + cce > record.data.length) continue
         const raw = record.data.subarray(15, nameEnd)
-        const chars = wide ? new TextDecoder("utf-16le").decode(raw) : String.fromCharCode(...raw)
+        const chars = wide ? utf16.decode(raw) : String.fromCharCode(...raw)
         const builtin = (grbit & 0x20) !== 0
         const name = builtin ? `_xlnm.${BUILTIN_NAMES[chars.charCodeAt(0)] ?? chars}` : chars
         names.push({ name, hidden: (grbit & 0x01) !== 0, scope: itab > 0 ? itab - 1 : undefined, rgce: record.data.subarray(nameEnd, nameEnd + cce) })

@@ -13,7 +13,8 @@
  * @internal
  */
 
-const utf16 = new TextDecoder("utf-16le")
+/** One UTF-16LE decoder for all 16-bit strings (decoding keeps no state between calls). */
+export const utf16 = new TextDecoder("utf-16le")
 
 /**
  * "Compressed" (8-bit) characters are the low bytes of UTF-16 code units:

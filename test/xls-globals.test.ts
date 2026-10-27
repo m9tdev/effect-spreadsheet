@@ -258,3 +258,14 @@ describe("xls globals: text decoders and containers", () => {
     }
   })
 })
+
+describe("xls globals: limits and string bounds", () => {
+  it("FORMAT codes and NAME names longer than maxStringLength are LimitExceeded", async () => {
+    const limits = { maxStringLength: 20 }
+    expect(await errorOf({ globals: [X.format(164, "0".repeat(21))], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    expect(await errorOf({ biff: 5, globals: [X.format(164, "0".repeat(21), 5)], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    expect(await errorOf({ globals: [X.name("N".repeat(21), ref3d(0x3A, 0, 0, 0))], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 20, actual: 21 })
+    const wb = await read({ globals: [X.format(164, "0".repeat(20)), X.xf(164), X.name("N".repeat(20), ref3d(0x3A, 0, 0, 0))], sheets: sheets("S") }, limits)
+    expect(wb.definedNames.map((d) => d.name)).toEqual(["N".repeat(20)])
+  })
+})
