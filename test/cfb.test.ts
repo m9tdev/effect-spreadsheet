@@ -95,6 +95,24 @@ describe("cfb: reading", () => {
     expect(readOk(openOk(garbage), "Workbook")).toEqual(pseudoRandom(10_000, 1))
   })
 
+  it("a FAT count larger than the file (as pyExcelerator writes: 109 in a small file) reads", () => {
+    const layout = writeCfb(SAMPLE)
+    expect(layout.fatSectors.length).toBe(1)
+    const lying = layout.bytes.slice()
+    patch32(lying, 44, 109)
+    expect(109).toBeGreaterThan(lying.length / 512 - 1)
+    const cfb = openOk(lying)
+    expect(readOk(cfb, "Workbook")).toEqual(pseudoRandom(10_000, 1))
+    expect(readOk(cfb, "Edge")).toEqual(pseudoRandom(4095, 3))
+    // a count within the file that the listed sectors don't reach is still MalformedFile
+    const short = layout.bytes.slice()
+    patch32(short, 44, 3)
+    expect(reasonOf(open(short, limits))).toBe("found 1 of 3 FAT sectors")
+    const none = layout.bytes.slice()
+    patch32(none, 76, 0xFFFFFFFF)
+    expect(reasonOf(open(none, limits))).toBe("no FAT sectors")
+  })
+
   it("a partial last sector is read as far as it goes (pinned: the file opens and reads)", () => {
     const layout = writeCfb(SAMPLE)
     // the last sector is the FAT; its last 25 entries (unused) are cut off
@@ -258,21 +276,24 @@ describe("cfb: hostile and broken files", () => {
     const cycle = layout.bytes.slice()
     patch32(cycle, 72, 5) // allow more DIFAT sectors
     patch32(cycle, 44, 109 + 5 * 127) // and ask for more FAT sectors than exist in one
+    // a full DIFAT sector (its free entries filled in), whose next pointer is itself
+    for (let k = 2; k < 127; k++) patch32(cycle, sectorOffset(difat) + 4 * k, layout.fatSectors[0]!)
     patch32(cycle, sectorOffset(difat) + 508, difat)
     const result = open(cycle, limits)
     expect(reasonOf(result)).toBe(`DIFAT chain has a cycle at sector ${difat}`)
     const tooLong = layout.bytes.slice()
     patch32(tooLong, 44, 109 + 2 * 127)
+    for (let k = 2; k < 127; k++) patch32(tooLong, sectorOffset(difat) + 4 * k, layout.fatSectors[0]!)
     patch32(tooLong, sectorOffset(difat) + 508, layout.fatSectors[0]!)
     expect(reasonOf(open(tooLong, limits))).toBe("DIFAT chain is longer than the header says")
     // a FAT sector number outside the file
     const outside = layout.bytes.slice()
     patch32(outside, 76, 99_999)
     expect(reasonOf(open(outside, limits))).toBe("FAT sector 99999 is outside the file")
-    // a FAT count beyond what the file can hold
+    // a FAT count beyond what the file can hold: the listed in-use FAT sectors are the FAT
     const tooMany = layout.bytes.slice()
     patch32(tooMany, 44, 1_000_000)
-    expect(reasonOf(open(tooMany, limits))).toMatch(/header lists 1000000 FAT sectors/)
+    expect(Buffer.compare(readOk(openOk(tooMany), "Workbook"), new Uint8Array(110 * 128 * 512))).toBe(0)
   })
 
   it("streams that share sectors are MalformedFile; reading one stream twice is fine", () => {
