@@ -101,6 +101,28 @@ describe("xls defined names: which workbook a reference points at", () => {
     expect(formulas(wb)).toEqual({ Span: "'Jan:Mar 2'!$A$1:$A$1", SpanQuoted: "'Feb:Mar 2'!$A$1", Reversed: "#REF!$A$1" })
   })
 
+  it("an external path whose length reads like the self or add-in marker (0x0401, 0x3A01) stays external", async () => {
+    // 1025 characters: one record
+    const near = externalBook(`\u0001${"p".repeat(1024)}`, ["Far"])
+    // 0x3A01 = 14 849 characters: more than one record holds, the rest in a CONTINUE (its own option byte first)
+    const path = [...X.u16(0x3A01), 0x00, ...new Array(0x3A01).fill(0x71)]
+    const addinLike = [...X.u16(1), ...path, ...X.xlString("Away")]
+    const cut = 2 + 3 + 8000
+    const wb = await read({
+      globals: [
+        selfBook(1),
+        near,
+        X.record(SUPBOOK, addinLike.slice(0, cut)),
+        X.record(CONTINUE, [0x00, ...addinLike.slice(cut)]),
+        xtis([[1, 0, 0], [2, 0, 0]]),
+        X.name("Near", ref3d(0x3A, 0, 0, 0)),
+        X.name("AddinLike", ref3d(0x3A, 1, 0, 0))
+      ],
+      sheets: sheets("S")
+    })
+    expect(formulas(wb)).toEqual({ Near: "[1]Far!$A$1", AddinLike: "[2]Away!$A$1" })
+  })
+
   it("external sheet names continued in a CONTINUE record are read", async () => {
     const all = Array.from(externalBook("\u0001x.xls", ["First", "Second"]))
     const data = all.slice(4)

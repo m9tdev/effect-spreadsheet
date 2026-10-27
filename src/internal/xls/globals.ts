@@ -96,7 +96,9 @@ interface Xti {
 
 /** Reads a SUPBOOK (with its CONTINUEs): `ctab`, then a marker, or a path and `ctab` sheet names. */
 const readSupbook = (record: ContinuedRecord, link: number, maxLength: number): Book | null => {
-  const marker = new Fields(record.data).u16(2)
+  // this workbook and add-ins are exactly ctab + marker (4 bytes); an
+  // external book's path can have a character count equal to a marker
+  const marker = record.data.length === 4 ? new Fields(record.data).u16(2) : undefined
   if (marker === 0x0401) return SELF
   if (marker === 0x3A01) return { kind: "addin" }
   const segments = new SegmentReader(record.segments)
