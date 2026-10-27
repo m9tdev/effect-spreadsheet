@@ -365,6 +365,13 @@
       "size": 3,
       "sha256": "f1945cd6c19e56b3c1c78943ef5ec18116907a4ca1efc40a57d48ab1db7adfc5",
       "desc": "UTF-8 BOM and nothing else"
+    },
+    {
+      "name": "names_formulas.xls",
+      "format": "xls",
+      "size": 4096,
+      "sha256": "8bdeef7e76d5cc93e835dcc070a02fe00f886f66d91da0d78c04d9c8cf76150a",
+      "desc": "BIFF8 hand-built: FORMULA cached results (number, STRING, bool, error; a SHRFMLA before a STRING; a STRING with CONTINUE; type 0x0406), a self and an external SUPBOOK, EXTERNSHEET, and NAMEs: 3-D refs and areas, sheet spans, quoted and non-ASCII sheet names, an external ref, a deleted and an out-of-range sheet, PtgRefErr3d, whole columns, print titles (whole rows), a scoped and hidden names, a non-reference formula"
     }
   ]
 }
