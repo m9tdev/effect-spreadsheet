@@ -364,6 +364,30 @@ describe("xls sheet: emitting rows", () => {
     expect(out.slice(1001)).toEqual([1500, 2000, ...Array.from({ length: 1000 }, (_, r) => 3000 + r)])
   })
 
+  it("end() emits rows the scan didn't place within the budget, over several batches", () => {
+    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
+    rows.start(new Map())
+    // 1 000 rows with a cell each, none placed by the scan: all left for end()
+    // progress: r up to 1000
+    for (let r = 0; r < 1000; r++) expect(rows.cell(999 - r, Cell.number(0, r))).toBeUndefined()
+    const out: Array<number> = []
+    let ended: unknown = false
+    let batches = 0
+    // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
+    for (; ended !== true; batches++) {
+      if (batches > 1002) throw new Error("end() doesn't go on")
+      rows.budget = rows.effort + 100
+      ended = rows.end()
+      expect(typeof ended).toBe("boolean")
+      const before = out.length
+      // progress: each take() takes at least one row
+      while (rows.queued()) out.push(...rows.take().map((r) => r.index))
+      expect(out.length - before).toBeLessThanOrEqual(101)
+    }
+    expect(batches).toBeGreaterThanOrEqual(10)
+    expect(out).toEqual(Array.from({ length: 1000 }, (_, r) => r))
+  })
+
   it("a repeated ROW record isn't queued again: a flood of one row costs one step to emit", () => {
     const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
     rows.start(new Map())
