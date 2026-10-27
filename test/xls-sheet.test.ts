@@ -369,6 +369,20 @@ describe("xls sheet: emitting rows", () => {
     expect(work.steps - before).toBeLessThanOrEqual(2)
     expect(rows.take().map((r) => [r.index, r.hidden])).toEqual([[0, false], [1, true]])
   })
+
+  it("a row waiting for its formula's STRING doesn't stop the reader: the read ends at once (pending STRING isn't behind)", async () => {
+    // if behind() took a row waiting for its STRING as due, the reader
+    // would stop reading and loop (yielding) forever: the timeout catches
+    // it in a second instead of the test's own
+    const book = one([X.number(0, 0, 0, 1), X.formula(0, 1, 0, { kind: 0 }), companion(SHRFMLA), X.string("s"), X.number(1, 0, 0, 2)])
+    const wb = await Effect.runPromise(Xls.read(X.xls(book)))
+    const exit = await Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, 0)).pipe(Effect.timeout("1 second"))))
+    if (Exit.isFailure(exit)) throw new Error(`read failed: ${JSON.stringify(failureOf(exit))}`)
+    expect(values(Array.from(exit.value))).toEqual([
+      [0, false, [[0, "Number", 1], [1, "Text", "s"]]],
+      [1, false, [[0, "Number", 2]]]
+    ])
+  })
 })
 
 describe("xls sheet: repeated columns", () => {
