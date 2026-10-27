@@ -135,6 +135,28 @@ describe("cfb: reading", () => {
     expect(reasonOf(open(missing, limits))).toBe(`FAT sector ${big.bytes.length / 512 + 5} is outside the file`)
   })
 
+  it("a lying FAT count stops collecting FAT sectors at the file's sector count (no DIFAT walk past it)", () => {
+    // a huge declared count, all 109 header entries listed (the real FAT
+    // sector, then past the end of the file) and a DIFAT start that repeats
+    // the FAT sector (no DIFAT sectors declared) or points past the file:
+    // only the file's sectors' worth of FAT sectors are wanted, so the
+    // header list is enough and the bogus DIFAT is never followed
+    const layout = writeCfb(SAMPLE)
+    const fat = layout.fatSectors[0]!
+    const fileSectors = layout.bytes.length / 512 - 1
+    expect(fileSectors).toBeLessThan(109)
+    for (const difatStart of [fat, fileSectors + 50]) {
+      const lying = layout.bytes.slice()
+      patch32(lying, 44, 1_000_000)
+      for (let k = 1; k < 109; k++) patch32(lying, 76 + 4 * k, fat + k)
+      patch32(lying, 68, difatStart)
+      patch32(lying, 72, 0)
+      const cfb = openOk(lying)
+      expect(readOk(cfb, "Workbook")).toEqual(pseudoRandom(10_000, 1))
+      expect(readOk(cfb, "Edge")).toEqual(pseudoRandom(4095, 3))
+    }
+  })
+
   it("a partial last sector is read as far as it goes (pinned: the file opens and reads)", () => {
     const layout = writeCfb(SAMPLE)
     // the last sector is the FAT; its last 25 entries (unused) are cut off
