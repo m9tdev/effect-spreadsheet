@@ -3,7 +3,7 @@
  * TypeScript parsers.
  *
  * Per-format readers live in subpaths: `effect-spreadsheet/csv`,
- * `effect-spreadsheet/xlsx`.
+ * `effect-spreadsheet/xlsx`, `effect-spreadsheet/xls`.
  *
  * @since 0.1.0
  */

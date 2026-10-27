@@ -7,6 +7,7 @@
 import { Effect, Stream } from "effect"
 import type * as Cell from "./Cell.ts"
 import * as Csv from "./csv/index.ts"
+import * as Xls from "./xls/index.ts"
 import * as Xlsx from "./xlsx/index.ts"
 import { type RecordsOptions, recordsStream } from "./internal/records.ts"
 import { detect } from "./internal/sniff.ts"
@@ -54,8 +55,7 @@ export const detectFormat = (
 
 const unsupported: Partial<Record<Format, string>> = {
   xlsb: "XLSB reading is not implemented yet",
-  xls: "XLS (BIFF) reading is not implemented yet",
-  cfb: "OLE compound file (legacy .xls, or an encrypted/password-protected OOXML workbook); not readable yet",
+  cfb: "OLE compound file without a workbook stream",
   ods: "ODS reading is not implemented",
   spreadsheetml: "SpreadsheetML 2003 reading is not implemented yet",
   sylk: "SYLK reading is not implemented",
@@ -84,6 +84,9 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
         return Csv.read(bytes, { ...options?.csv, limits: options?.limits })
       case "xlsx":
         return Xlsx.read(bytes, { limits: options?.limits })
+      case "xls":
+      case "cfb": // an encrypted OOXML package (Encrypted), or no workbook stream
+        return Xls.read(bytes, { limits: options?.limits })
       default:
         return Effect.fail(new UnsupportedFormat({ format, reason: unsupported[format] ?? "not supported" }))
     }

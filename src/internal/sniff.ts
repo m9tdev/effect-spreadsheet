@@ -8,6 +8,7 @@ import { LimitExceeded, MalformedFile } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
 import type { Format } from "../Workbook.ts"
 import { detectEncoding } from "./csv/decode.ts"
+import { open as openCfb } from "./cfb/cfb.ts"
 import { readDirectory, storedData } from "./zip/directory.ts"
 
 const TEXT_PREFIX_BYTES = 8 * 1024
@@ -113,7 +114,13 @@ const isSylk = (text: string): boolean =>
 
 export const detect = (bytes: Uint8Array, limits: Limits): Format | MalformedFile | LimitExceeded => {
   if (bytes.length === 0) return "csv"
-  if (startsWith(bytes, CFB_MAGIC)) return "cfb"
+  if (startsWith(bytes, CFB_MAGIC)) {
+    // a compound file: an .xls if it has a workbook stream (BIFF8 or BIFF5)
+    const cfb = openCfb(bytes, limits)
+    if ("_tag" in cfb) return cfb
+    const entry = cfb.find("Workbook") ?? cfb.find("Book")
+    return entry !== undefined && entry.type === "stream" ? "xls" : "cfb"
+  }
   if (ZIP_MAGICS.some((magic) => startsWith(bytes, magic))) {
     return detectZip(bytes, limits)
   }

@@ -20,7 +20,7 @@ const utf16 = new TextDecoder("utf-16le")
  * byte 0x80 is U+0080, not the windows-1252 euro sign (a TextDecoder with
  * "latin1" or "iso-8859-1" would be windows-1252, per the Encoding spec).
  */
-const compressed = (bytes: Uint8Array): string => {
+export const compressed = (bytes: Uint8Array): string => {
   let out = ""
   // progress: k increases by up to 8192 per step up to bytes.length
   for (let k = 0; k < bytes.length; k += 8192) {

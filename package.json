@@ -27,6 +27,10 @@
     "./xlsx": {
       "types": "./dist/xlsx/index.d.ts",
       "default": "./dist/xlsx/index.js"
+    },
+    "./xls": {
+      "types": "./dist/xls/index.d.ts",
+      "default": "./dist/xls/index.js"
     }
   },
   "scripts": {
