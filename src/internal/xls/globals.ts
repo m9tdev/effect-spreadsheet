@@ -167,7 +167,7 @@ const nameFormula = (
   rgce: Uint8Array,
   xtis: ReadonlyArray<Xti>,
   books: ReadonlyArray<Book>,
-  sheets: ReadonlyArray<SheetEntry>
+  sheetNames: ReadonlyArray<string>
 ): string => {
   const f = new Fields(rgce)
   const ptg = f.u8(0)
@@ -176,7 +176,7 @@ const nameFormula = (
     if (xti === undefined) return undefined
     const book = books.length === 0 && xti.book === 0 ? SELF : books[xti.book]
     if (book === undefined || book.kind === "addin") return "#REF!"
-    const names = book.kind === "self" ? sheets.map((s) => s.name) : book.sheets
+    const names = book.kind === "self" ? sheetNames : book.sheets
     const first = names[xti.first]
     const last = names[xti.last]
     if (first === undefined || last === undefined || xti.last < xti.first) return "#REF!"
@@ -551,6 +551,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
       formats.push(format)
     }
     const definedNames: Array<DefinedNameEntry> = []
+    const sheetNames = ended.map((s) => s.name) // once, not per name
     // progress: k up to names.length (at most maxDefinedNames), yielding every BATCH_RECORDS
     for (let k = 0; k < walk.names.length; k++) {
       if (k % BATCH_RECORDS === 0) {
@@ -558,7 +559,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
         batches.count++
       }
       const n = walk.names[k]!
-      const formula = nameFormula(n.rgce, xtis, books, ended)
+      const formula = nameFormula(n.rgce, xtis, books, sheetNames)
       definedNames.push(
         n.scope !== undefined && n.scope < sheets.length
           ? { name: n.name, formula, hidden: n.hidden, scope: n.scope }
