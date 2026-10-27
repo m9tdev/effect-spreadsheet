@@ -13,26 +13,42 @@
  * @internal
  */
 
-const latin1 = new TextDecoder("windows-1252")
 const utf16 = new TextDecoder("utf-16le")
+
+/**
+ * "Compressed" (8-bit) characters are the low bytes of UTF-16 code units:
+ * byte 0x80 is U+0080, not the windows-1252 euro sign (a TextDecoder with
+ * "latin1" or "iso-8859-1" would be windows-1252, per the Encoding spec).
+ */
+const compressed = (bytes: Uint8Array): string => {
+  let out = ""
+  // progress: k increases by up to 8192 per step up to bytes.length
+  for (let k = 0; k < bytes.length; k += 8192) {
+    out += String.fromCharCode(...bytes.subarray(k, Math.min(bytes.length, k + 8192)))
+  }
+  return out
+}
 
 export class SegmentReader {
   private readonly segments: ReadonlyArray<Uint8Array>
   private segment = 0
   private at = 0
+  /** Bytes not yet read, over all segments. */
+  private left: number
   /** Set when a read ran past the end; every later read fails too. */
   failed = false
 
   constructor(segments: ReadonlyArray<Uint8Array>) {
     this.segments = segments
+    let n = 0
+    // progress: one segment per iteration
+    for (const segment of segments) n += segment.length
+    this.left = n
   }
 
-  /** Bytes left in all segments. */
+  /** Bytes left in all segments (O(1): kept up to date by every read). */
   remaining(): number {
-    let n = 0
-    // progress: k up to segments.length
-    for (let k = this.segment; k < this.segments.length; k++) n += this.segments[k]!.length - (k === this.segment ? this.at : 0)
-    return n
+    return this.left
   }
 
   /** Moves to the next non-empty segment when the current one is used up; false at the end. */
@@ -55,6 +71,7 @@ export class SegmentReader {
       this.failed = true
       return undefined
     }
+    this.left--
     return this.segments[this.segment]![this.at++]
   }
 
@@ -81,6 +98,7 @@ export class SegmentReader {
       }
       const step = Math.min(left, this.segments[this.segment]!.length - this.at)
       this.at += step
+      this.left -= step
       left -= step
     }
     return true
@@ -121,8 +139,9 @@ export class SegmentReader {
       }
       const take = Math.min(left, fit)
       const slice = data.subarray(this.at, this.at + take * width)
-      parts.push(wide ? utf16.decode(slice) : latin1.decode(slice))
+      parts.push(wide ? utf16.decode(slice) : compressed(slice))
       this.at += take * width
+      this.left -= take * width
       left -= take
     }
     return parts.join("")
@@ -133,8 +152,11 @@ export class SegmentReader {
  * Reads an XLUnicodeRichExtendedString (an SST entry): character count,
  * option flags, optional rich-text run count and phonetic block size, the
  * characters, then the run and phonetic data (skipped). `undefined` if the
- * segments end early; `maxLength` caps the character count (`null` result
- * when it is exceeded).
+ * segments end early; `null` when the character count is over `maxLength`.
+ *
+ * After `null` the reader sits before that string's characters, so the
+ * caller must stop reading the SST there (fail with `LimitExceeded`): the
+ * next read would start in the middle of a string.
  */
 export const readRichString = (reader: SegmentReader, maxLength: number): string | undefined | null => {
   const count = reader.u16()

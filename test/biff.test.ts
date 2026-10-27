@@ -123,7 +123,9 @@ describe("biff segments", () => {
     expect(r.u16()).toBe(0x0201)
     expect(r.u16()).toBe(0x0403)
     expect(r.remaining()).toBe(1)
-    expect(r.u16()).toBeUndefined()
+    expect(r.skip(1)).toBe(true)
+    expect(r.remaining()).toBe(0)
+    expect(r.u8()).toBeUndefined()
     expect(r.failed).toBe(true)
     expect(r.u8()).toBeUndefined()
     const s = new SegmentReader([new Uint8Array(3)])
@@ -142,6 +144,35 @@ describe("biff segments", () => {
     expect(readRichString(new SegmentReader(cjk), 100)).toBe("日本語!")
   })
 
+  it("8-bit characters are code units: 0x80-0x9F are C1 controls, not windows-1252", () => {
+    const r = new SegmentReader([new Uint8Array([3, 0, 0, 0x80, 0x93, 0x9F])])
+    expect(readRichString(r, 100)).toBe("\u0080\u0093\u009F")
+  })
+
+  it("remaining() is O(1): it doesn't walk the segments", () => {
+    const parts = Array.from({ length: 1000 }, () => new Uint8Array([7]))
+    let reads = 0
+    const counted = new Proxy(parts, {
+      get: (target, key, receiver) => {
+        if (typeof key === "string" && /^\d+$/.test(key)) reads++
+        return Reflect.get(target, key, receiver)
+      }
+    })
+    const r = new SegmentReader(counted)
+    const before = reads
+    for (let k = 0; k < 1000; k++) r.remaining()
+    expect(reads - before).toBe(0)
+  })
+
+  it("remaining() follows every kind of read", () => {
+    const segments = splitString("abcdef", false, [2, 4], { runs: 1, ext: 2 })
+    const total = segments.reduce((n, s) => n + s.length, 0)
+    const r = new SegmentReader(segments)
+    expect(r.remaining()).toBe(total)
+    expect(readRichString(r, 100)).toBe("abcdef")
+    expect(r.remaining()).toBe(0)
+  })
+
   it("rich-text runs and phonetic data are skipped, across boundaries", () => {
     const segments = splitString("rich", false, [2], { runs: 2, ext: 5 })
     const reader = new SegmentReader([...segments, new Uint8Array([3, 0, 0, 0x78, 0x79, 0x7A])])
@@ -153,7 +184,7 @@ describe("biff segments", () => {
   it("random strings split anywhere decode back", () => {
     fc.assert(
       fc.property(
-        fc.string({ minLength: 1, maxLength: 60, unit: fc.constantFrom("a", "Z", "é", "ü", "ÿ", " ") }),
+        fc.string({ minLength: 1, maxLength: 60, unit: fc.constantFrom("a", "Z", "é", "ü", "ÿ", " ", "\u0080", "\u0085", "\u009F", "\u0000") }),
         fc.boolean(),
         fc.array(fc.nat(60), { maxLength: 6 }),
         (text, wide, cuts) => {
