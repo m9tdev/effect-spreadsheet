@@ -43,17 +43,30 @@ export const writeCfb = (items: ReadonlyArray<CfbItem>): CfbLayout => {
   // flatten the tree: entry 0 is the root
   const flat: Array<Flat> = [{ name: "Root Entry", data: undefined, children: [], start: ENDOFCHAIN, right: NOSTREAM, child: NOSTREAM }]
   const paths = new Map<number, string>()
-  const add = (list: ReadonlyArray<CfbItem>, parent: number, prefix: string) => {
-    for (const item of list) {
-      const id = flat.length
-      flat.push({ name: item.name, data: "data" in item ? item.data : undefined, children: [], start: ENDOFCHAIN, right: NOSTREAM, child: NOSTREAM })
-      flat[parent]!.children.push(id)
-      const path = prefix === "" ? item.name : `${prefix}/${item.name}`
-      paths.set(id, path)
-      if ("children" in item) add(item.children, id, path)
-    }
+  // depth-first, iteratively (trees may be thousands deep)
+  // (paths only for streams, from parent links: a deep chain of storages
+  // would make every storage path long)
+  const parents = new Map<number, number>()
+  const pathOf = (id: number): string => {
+    const names: Array<string> = []
+    for (let k = id; k !== 0; k = parents.get(k)!) names.push(flat[k]!.name)
+    return names.reverse().join("/")
   }
-  add(items, 0, "")
+  const work: Array<{ list: ReadonlyArray<CfbItem>; at: number; parent: number }> = [{ list: items, at: 0, parent: 0 }]
+  while (work.length > 0) {
+    const top = work[work.length - 1]!
+    if (top.at >= top.list.length) {
+      work.pop()
+      continue
+    }
+    const item = top.list[top.at++]!
+    const id = flat.length
+    flat.push({ name: item.name, data: "data" in item ? item.data : undefined, children: [], start: ENDOFCHAIN, right: NOSTREAM, child: NOSTREAM })
+    flat[top.parent]!.children.push(id)
+    parents.set(id, top.parent)
+    if ("children" in item) work.push({ list: item.children, at: 0, parent: id })
+    else paths.set(id, pathOf(id))
+  }
   for (const entry of flat) {
     if (entry.children.length > 0) entry.child = entry.children[0]!
     entry.children.forEach((id, k) => {

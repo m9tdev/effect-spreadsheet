@@ -219,6 +219,18 @@ describe("cfb: hostile and broken files", () => {
     expect(reasonOf(open(tooMany, limits))).toMatch(/header lists 1000000 FAT sectors/)
   })
 
+  it("deeply nested storages stop at maxStorageDepth (paths would cost depth²)", () => {
+    let item: CfbItem = { name: "leaf", data: new Uint8Array([1]) }
+    for (let k = 0; k < 10_000; k++) item = { name: `s${k % 10}`, children: [item] }
+    const { bytes } = writeCfb([item])
+    expect(open(bytes, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStorageDepth", max: 32, actual: 33 })
+    // within the limit it reads
+    let shallow: CfbItem = { name: "leaf", data: new Uint8Array([7]) }
+    for (let k = 0; k < 31; k++) shallow = { name: "s", children: [shallow] }
+    const cfb = openOk(writeCfb([shallow]).bytes)
+    expect(readOk(cfb, `${"s/".repeat(31)}leaf`)).toEqual(new Uint8Array([7]))
+  })
+
   it("truncated files fail with a typed error, never a throw", () => {
     const { bytes } = writeCfb([...SAMPLE, { name: "Big", data: pseudoRandom(50_000, 9) }])
     for (let cut = 0; cut < bytes.length; cut += 97) {

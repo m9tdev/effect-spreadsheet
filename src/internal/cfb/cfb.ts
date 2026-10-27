@@ -252,11 +252,13 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
   const entries: Array<CfbEntry> = []
   const seen = new Uint8Array(count)
   seen[0] = 1
-  const stack: Array<readonly [number, string]> = root.child === NOSTREAM ? [] : [[root.child, ""]]
+  // [id, parent path, depth]; paths are built per entry, so the depth is
+  // bounded (maxStorageDepth) to keep their total length in check
+  const stack: Array<readonly [number, string, number]> = root.child === NOSTREAM ? [] : [[root.child, "", 1]]
   // progress: each entry is pushed at most once more than it is visited,
   // and visited at most once (seen), so at most `count` iterations do work
   while (stack.length > 0) {
-    const [id, prefix] = stack.pop()!
+    const [id, prefix, depth] = stack.pop()!
     if (id >= count) return malformed(`directory points at entry ${id} of ${count}`)
     if (seen[id] === 1) return malformed(`directory entry ${id} is reached twice`)
     seen[id] = 1
@@ -266,9 +268,14 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
     if (type === undefined) return malformed(`directory entry ${id} has type ${entry.type}`)
     const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`
     entries.push({ id, name: entry.name, path, type, size: type === "stream" ? entry.size : 0, start: entry.start })
-    if (entry.right !== NOSTREAM) stack.push([entry.right, prefix])
-    if (entry.left !== NOSTREAM) stack.push([entry.left, prefix])
-    if (type === "storage" && entry.child !== NOSTREAM) stack.push([entry.child, path])
+    if (entry.right !== NOSTREAM) stack.push([entry.right, prefix, depth])
+    if (entry.left !== NOSTREAM) stack.push([entry.left, prefix, depth])
+    if (type === "storage" && entry.child !== NOSTREAM) {
+      if (depth >= limits.maxStorageDepth) {
+        return new LimitExceeded({ limit: "maxStorageDepth", max: limits.maxStorageDepth, actual: depth + 1 })
+      }
+      stack.push([entry.child, path, depth + 1])
+    }
   }
   entries.sort((a, b) => a.id - b.id)
 
