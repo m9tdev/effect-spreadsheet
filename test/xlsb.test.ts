@@ -3,7 +3,7 @@ import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { RecordSplitter } from "../src/internal/biff12/records.ts"
-import { caps, NO_STYLES, readStyles } from "../src/internal/xlsb/parts.ts"
+import { NO_STYLES, readStyles } from "../src/internal/xlsb/parts.ts"
 import { SheetRows } from "../src/internal/xlsb/sheet.ts"
 import { definedNames, MAX_BOOKS, MAX_XTIS, readExternalBooks, readWorkbookBin } from "../src/internal/xlsb/workbook.ts"
 import { readRelationships } from "../src/internal/xlsx/parts.ts"
@@ -108,25 +108,19 @@ describe("xlsb reader", () => {
     expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Date", "2023-03-15T00:00:00.000Z"]]]])
   })
 
-  it("cell styles: one number format per format id, shared; styles past caps.cellXfs aren't kept", async () => {
+  it("cell styles: one number format per format id, shared; styles past maxCellXfs aren't kept", async () => {
     const bytes = await B.xlsb({ sheets: [{ name: "S" }], xfs: [0, 14, 164, 14, 164], formats: { 164: "0.000" }, method: "store" })
     const limits = SpreadsheetLimits.defaults
     const archive = open(bytes, limits)
     if ("_tag" in archive) throw new Error(archive._tag)
-    const read = () => Effect.runPromise(readStyles(archive, archive.find("xl/styles.bin")!, limits))
+    const read = (max?: number) => Effect.runPromise(readStyles(archive, archive.find("xl/styles.bin")!, limits, max))
     const styles = await read()
     expect(styles.count).toBe(5)
     expect(styles.format(1)).toBe(styles.format(3))
     expect(styles.format(2)).toBe(styles.format(4))
     expect([styles.format(1)?.date, styles.format(2)?.code, styles.format(5)]).toEqual([true, "0.000", undefined])
-    const saved = caps.cellXfs
-    caps.cellXfs = 2
-    try {
-      const capped = await read()
-      expect([capped.count, capped.format(1)?.date, capped.format(2)]).toEqual([2, true, undefined])
-    } finally {
-      caps.cellXfs = saved
-    }
+    const capped = await read(2)
+    expect([capped.count, capped.format(1)?.date, capped.format(2)]).toEqual([2, true, undefined])
   })
 
   it("dates in the 1904 system; serials outside Excel's dates stay numbers", async () => {

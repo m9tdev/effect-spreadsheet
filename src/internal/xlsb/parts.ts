@@ -51,7 +51,7 @@ export const readSharedStrings = (
 /**
  * The number formats of the cell styles: a cell's style index (u24) is an
  * index into the BrtXF records of BrtBeginCellXFs. Kept as one u16 format
- * id per style (at most `caps.cellXfs` styles, the u24 range), with one
+ * id per style (at most `MAX_CELL_XFS` styles, the u24 range), with one
  * `NumberFormat` per format id, made when a cell first uses it: a flood
  * of tiny BrtXF records costs 2 bytes each.
  */
@@ -62,8 +62,8 @@ export interface CellStyles {
   readonly count: number
 }
 
-/** Cell styles kept at most: a cell's style index is 24 bits. Tests may lower it. */
-export const caps = { cellXfs: 0x1000000 }
+/** Cell styles kept at most: a cell's style index is 24 bits. */
+export const MAX_CELL_XFS = 0x1000000
 
 const cellStyles = (ids: Uint16Array, count: number, custom: ReadonlyMap<number, string>): CellStyles => {
   const byId = new Map<number, NumberFormat>()
@@ -87,12 +87,14 @@ export const NO_STYLES: CellStyles = cellStyles(new Uint16Array(0), 0, new Map()
 /**
  * Reads the number formats (BrtFmt in BrtBeginFmts) and the cell styles
  * that use them (BrtXF in BrtBeginCellXFs), as for XLSX. BrtXF records
- * elsewhere (cell style XFs, differential formats) don't count.
+ * elsewhere (cell style XFs, differential formats) don't count. Styles
+ * past `maxCellXfs` (tests lower it) aren't kept.
  */
 export const readStyles = (
   archive: Archive,
   entry: ZipEntry,
-  limits: Limits
+  limits: Limits,
+  maxCellXfs = MAX_CELL_XFS
 ): Effect.Effect<CellStyles, SpreadsheetError> =>
   Effect.suspend(() => {
     const custom = new Map<number, string>()
@@ -130,9 +132,9 @@ export const readStyles = (
           const id = new Fields(record.data).u16(2)
           if (id === undefined) return malformed("truncated cell format", entry.name, record.offset)
           // styles past the u24 range can't be used by any cell
-          if (count >= caps.cellXfs) return undefined
+          if (count >= maxCellXfs) return undefined
           if (count === ids.length) {
-            const grown = new Uint16Array(Math.min(2 * ids.length, caps.cellXfs))
+            const grown = new Uint16Array(Math.min(2 * ids.length, maxCellXfs))
             grown.set(ids)
             ids = grown
           }
