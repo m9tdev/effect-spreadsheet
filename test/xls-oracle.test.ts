@@ -1,6 +1,6 @@
 /**
  * XLS vs the committed SheetJS expectations (test/corpus/expected, made by
- * scripts/corpus; no SheetJS needed here). For every xlsx fixture: sheet
+ * scripts/corpus; no SheetJS needed here). For every BIFF8/BIFF5 fixture: sheet
  * names and visibility, every cell's type and value (dates by serial),
  * hidden rows and columns, merges, the dimension and the cell count. Places listed in
  * test/corpus/sheetjs-quirks.json use their `correct` value. Intended
@@ -62,12 +62,6 @@ const toSerial = (date: Date, date1904: boolean): number => {
 const notADate = (serial: number, date1904: boolean): boolean =>
   serial < 0 || serial >= (date1904 ? 2_958_466 - 1462 : 2_958_466) || (!date1904 && serial >= 60 && serial < 61)
 
-/** ISO-dated cells (t="d"): Dates for us, serials without a date format for the oracle. */
-const ISO_DATE_CELLS: Record<string, ReadonlyArray<string>> = {}
-
-/** Cells of a shared formula after its first: the oracle expands the formula, we don't. */
-const SHARED_FORMULA_CHILDREN: Record<string, ReadonlyArray<string>> = {}
-
 const a1 = (r: Workbook.Range): string => {
   const first = `${columnName(r.firstColumn)}${r.firstRow + 1}`
   const last = `${columnName(r.lastColumn)}${r.lastRow + 1}`
@@ -92,7 +86,7 @@ const readAll = (bytes: Uint8Array) =>
   }))
 
 describe("xls vs the committed SheetJS expectations", () => {
-  it("covers every committed xlsx fixture", () => {
+  it("covers every committed xls fixture", () => {
     expect(fixtures.length).toBeGreaterThanOrEqual(7)
   })
 
@@ -119,12 +113,6 @@ describe("xls vs the committed SheetJS expectations", () => {
           const key = `${cell.r}:${cell.c}`
           const mine = ours.get(key)
           const where = `${oracle.name}!${key}`
-          if (cell.t === "z") {
-            // a formula without a value: an Empty cell for us
-            expect(mine?._tag, where).toBe("Empty")
-            if (cell.f !== undefined) expect(mine?.formula, where).toBe(cell.f)
-            continue
-          }
           expect(mine, where).toBeDefined()
           const value = corrections.has(key) ? corrections.get(key) : cell.v
           switch (cell.t) {
@@ -140,9 +128,7 @@ describe("xls vs the committed SheetJS expectations", () => {
             case "n":
               if (mine!._tag === "Date") {
                 // a date for us: the oracle has the serial and a date format
-                // the oracle has the serial and a date format (or the cell is an ISO date)
-                const iso = (ISO_DATE_CELLS[file] ?? []).includes(where)
-                expect(iso || (cell.z !== undefined && isDateCode(cell.z)), `${where} z=${cell.z}`).toBe(true)
+                expect(cell.z !== undefined && isDateCode(cell.z), `${where} z=${cell.z}`).toBe(true)
                 expect(Math.abs(toSerial(mine!.value, date1904) - (value as number)), where).toBeLessThan(1e-8)
               } else {
                 expect([mine!._tag, (mine as Cell.NumberCell).value], where).toEqual(["Number", value])
@@ -152,13 +138,12 @@ describe("xls vs the committed SheetJS expectations", () => {
             default:
               throw new Error(`unexpected oracle type ${cell.t} at ${where}`)
           }
-          if ((SHARED_FORMULA_CHILDREN[file] ?? []).includes(where)) {
-            expect([mine!.formula, typeof cell.f], where).toEqual([undefined, "string"])
-          } else expect(mine!.formula, where).toBe(cell.f)
+          // formulas aren't decompiled: the cached result only (docs/xls-oracle-differences.md)
+          expect(mine!.formula, where).toBeUndefined()
         }
-        // nothing beyond the oracle's cells, except Empty ones
+        // nothing beyond the oracle's cells, except Empty ones (styled blanks)
         const valued = rows.flatMap((r) => r.cells).filter((c) => c._tag !== "Empty")
-        expect(valued.length, oracle.name).toBe(oracle.cells.filter((c) => c.t !== "z").length)
+        expect(valued.length, oracle.name).toBe(oracle.cells.length)
         expect(rows.filter((r) => r.hidden).map((r) => r.index), oracle.name).toEqual(oracle.hiddenRows)
         // layout: hidden columns, merges, and the declared dimension where the file has one
         const layout = details[k]!
