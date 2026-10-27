@@ -67,12 +67,56 @@ describe("cfb: reading", () => {
     expect(cfb.sectorsVisited()).toBeLessThanOrEqual(3 * (bytes.length / 512))
   })
 
+  it("reads version 4 files (4096-byte sectors), with 64-bit sizes", () => {
+    const layout = writeCfb(SAMPLE, { version: 4 })
+    expect(layout.sectorSize).toBe(4096)
+    const cfb = openOk(layout.bytes)
+    expect(readOk(cfb, "Workbook")).toEqual(pseudoRandom(10_000, 1))
+    expect(readOk(cfb, "_VBA_PROJECT_CUR/VBA/dir")).toEqual(pseudoRandom(700, 5))
+    // a size's high word counts in version 4
+    const dir = sectorOffset(layout.directorySectors[0]!, 4096) + layout.streams.get("Workbook")!.id * 128
+    for (const high of [1, 0x200000]) {
+      const big = layout.bytes.slice()
+      patch32(big, dir + 124, high)
+      const c = openOk(big)
+      expect(reasonOf(c.read(c.find("Workbook")!)), String(high)).toMatch(/larger than the file/)
+    }
+    // version 4 needs 4096-byte sectors, version 3 512-byte ones
+    const wrongShift = layout.bytes.slice()
+    wrongShift[30] = 9
+    expect(reasonOf(open(wrongShift, limits))).toBe("unsupported version 4 with sector size 2^9")
+  })
+
+  it("version 3 ignores the high word of a stream size (writers leave garbage there)", () => {
+    const layout = writeCfb(SAMPLE)
+    const garbage = layout.bytes.slice()
+    patch32(garbage, sectorOffset(layout.directorySectors[0]!) + layout.streams.get("Workbook")!.id * 128 + 124, 0xDEADBEEF)
+    expect(readOk(openOk(garbage), "Workbook")).toEqual(pseudoRandom(10_000, 1))
+  })
+
+  it("a partial last sector is read as far as it goes (pinned: the file opens and reads)", () => {
+    const layout = writeCfb(SAMPLE)
+    // the last sector is the FAT; its last 25 entries (unused) are cut off
+    expect(layout.fatSectors.at(-1)).toBe(layout.bytes.length / 512 - 2)
+    const cut = layout.bytes.subarray(0, layout.bytes.length - 100)
+    const cfb = openOk(cut)
+    expect(readOk(cfb, "Workbook")).toEqual(pseudoRandom(10_000, 1))
+    expect(readOk(cfb, "Edge")).toEqual(pseudoRandom(4095, 3))
+  })
+
   it("reads a file whose FAT needs a DIFAT (more than 109 FAT sectors)", () => {
     const big = pseudoRandom(110 * 128 * 512, 7)
     const layout = writeCfb([{ name: "Workbook", data: big }])
     expect(layout.difatSectors.length).toBeGreaterThan(0)
     const cfb = openOk(layout.bytes)
-    expect(readOk(cfb, "Workbook")).toEqual(big)
+    expect(Buffer.compare(readOk(cfb, "Workbook"), big)).toBe(0)
+    // the DIFAT walk is bounded by maxSectorChain too: a 2-sector DIFAT
+    // under a limit of 1 (the directory chain is 1 sector, so only the
+    // DIFAT can hit it)
+    const twoDifat = writeCfb([{ name: "Workbook", data: new Uint8Array(240 * 128 * 512) }])
+    expect(twoDifat.difatSectors.length).toBe(2)
+    expect(twoDifat.directorySectors.length).toBe(1)
+    expect(open(twoDifat.bytes, { ...limits, maxSectorChain: 1 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxSectorChain", max: 1, actual: 2 })
   })
 
   it("opens every committed .xls in a CFB, and its workbook stream is a BIFF record stream from BOF to EOF", () => {
@@ -194,6 +238,10 @@ describe("cfb: hostile and broken files", () => {
     patch32(miniCycle, sectorOffset(layout.miniFatSectors[0]!) + 4 * (s + 1), s)
     const a = openOk(miniCycle)
     expect(reasonOf(a.read(a.find("\u0005SummaryInformation")!))).toMatch(/miniFAT chain has a cycle/)
+    const shortMiniFat = layout.bytes.slice()
+    patch32(shortMiniFat, 64, 5)
+    const d = openOk(shortMiniFat)
+    expect(reasonOf(d.read(d.find("Edge")!))).toBe("miniFAT chain is shorter than the header says")
     const bigRoot = layout.bytes.slice()
     patch32(bigRoot, sectorOffset(layout.directorySectors[0]!) + 120, 0x7FFFFFF0)
     const b = openOk(bigRoot)
@@ -213,6 +261,10 @@ describe("cfb: hostile and broken files", () => {
     patch32(tooLong, 44, 109 + 2 * 127)
     patch32(tooLong, sectorOffset(difat) + 508, layout.fatSectors[0]!)
     expect(reasonOf(open(tooLong, limits))).toBe("DIFAT chain is longer than the header says")
+    // a FAT sector number outside the file
+    const outside = layout.bytes.slice()
+    patch32(outside, 76, 99_999)
+    expect(reasonOf(open(outside, limits))).toBe("FAT sector 99999 is outside the file")
     // a FAT count beyond what the file can hold
     const tooMany = layout.bytes.slice()
     patch32(tooMany, 44, 1_000_000)
