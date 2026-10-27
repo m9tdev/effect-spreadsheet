@@ -9,9 +9,10 @@ import fc from "fast-check"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { FuzzHost } from "./fuzz/host.ts"
 import type { FuzzTask } from "./fuzz/tasks.ts"
-import { enc } from "./helpers/run.ts"
+import { enc, splitAt } from "./helpers/run.ts"
 import { writeCfb } from "./helpers/cfb.ts"
 import { xlsx } from "./helpers/xlsx.ts"
+import { concat, record } from "./helpers/xlsb.ts"
 import { makeZip } from "./helpers/zip.ts"
 
 // Per case, in a worker that is terminated when it overruns. The point is
@@ -197,6 +198,21 @@ describe("fuzz: never a defect, never a hang", () => {
         }
       ),
       { numRuns: 400 }
+    )
+  }, 120_000)
+
+  it("biff12: random bytes and random record streams, in random chunks", async () => {
+    const arbChunks = (bytes: Uint8Array) =>
+      fc.array(fc.nat(bytes.length), { maxLength: 12 }).map((cuts) => splitAt(bytes, cuts))
+    const arbRecords = fc.array(fc.record({ type: fc.integer({ min: 0, max: 0x3FFF }), data: fc.uint8Array({ maxLength: 64 }) }), { maxLength: 30 })
+      .map((rs) => concat(rs.map((r) => record(r.type, r.data))))
+    const arbBytes = fc.oneof(fc.uint8Array({ maxLength: 4096 }), arbRecords, arbRecords.chain((b) => fc.nat(b.length).map((n) => b.subarray(0, n))))
+    await fc.assert(
+      fc.asyncProperty(arbBytes.chain(arbChunks), async (chunks) => {
+        await terminates({ op: "biff12", chunks })
+        await terminates({ op: "biff12", chunks, limits: { maxRecordBytes: 16, maxStringLength: 4 } })
+      }),
+      { numRuns: 300 }
     )
   }, 120_000)
 
