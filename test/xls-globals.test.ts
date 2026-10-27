@@ -311,6 +311,16 @@ describe("xls globals: BOF version, sheets, SST", () => {
     expect(await texts(wb)).toEqual(["one", "two"])
   })
 
+  it("an SST with more strings than its unique count keeps only the first `unique`: a later index doesn't exist", async () => {
+    const extra = X.record(0x00FC, [...X.u32(3), ...X.u32(2), ...X.xlString("one"), ...X.xlString("two"), ...X.xlString("three")])
+    const cells = (index: number) => [{ name: "S", records: [X.labelSst(0, 0, 0, 0), X.labelSst(0, 1, 0, index)] }]
+    expect(await texts(await read({ globals: [extra], sheets: cells(1) }))).toEqual(["one", "two"])
+    const wb = await read({ globals: [extra], sheets: cells(2) })
+    const exit = await Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, 0))))
+    expect(failureOf(exit)).toMatchObject({ _tag: "MalformedFile" })
+    expect(JSON.stringify(failureOf(exit))).toContain("shared string 2 doesn't exist")
+  })
+
   it("compressed (8-bit) BIFF8 characters 0x80-0x9F are Latin-1 code points, not windows-1252", async () => {
     const text = "A\u0080\u008A\u009F\u00E9" // all below 0x100: stored compressed, one byte each
     const wb = await read({ globals: [X.codepage(1252), X.sst([text])], sheets: [{ name: text, records: [X.labelSst(0, 0, 0, 0)] }] })
@@ -420,8 +430,8 @@ describe("xls globals: long work yields", () => {
    * event-loop turns and globals batches; `maxPerTurn` is the most batches
    * run between two turns (1 when every batch yields).
    */
-  const turns = async (globals: ReadonlyArray<Uint8Array>) => {
-    const bytes = X.workbookStream({ globals, sheets: [{ name: "S", records: [] }] })
+  const turns = async (globals: ReadonlyArray<Uint8Array>, records: ReadonlyArray<Uint8Array> = []) => {
+    const bytes = X.workbookStream({ globals, sheets: [{ name: "S", records }] })
     const before = batches.count
     const result = await countYields(() => Effect.runPromise(Xls.read(bytes)), () => batches.count)
     return { ...result, batches: batches.count - before }
@@ -440,10 +450,24 @@ describe("xls globals: long work yields", () => {
     // "s" + 4 digits: 8 bytes each, 1 000 per CONTINUE: 24 records, 3 * BATCH_RECORDS strings and more
     const strings = Array.from({ length: 24_000 }, (_, k) => `s${String(k).padStart(4, "0")}`)
     const continues = Array.from({ length: 24 }, (_, c) => X.record(CONTINUE, strings.slice(1000 * c, 1000 * c + 1000).flatMap(X.xlString)))
-    const run = await turns([sstHead(strings.length), ...continues])
+    const picks = [0, 12_345, strings.length - 1]
+    const run = await turns([sstHead(strings.length), ...continues], picks.map((index, r) => X.labelSst(r, 0, 0, index)))
     expect(run.batches).toBeGreaterThanOrEqual(strings.length / BATCH_RECORDS)
     expect(run.yields).toBeGreaterThanOrEqual(strings.length / BATCH_RECORDS / 2)
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+    expect(await texts(run.value)).toEqual(["s0000", "s12345", "s23999"])
+  })
+
+  it("an SST in more CONTINUEs than a batch holds is gathered across batches, then read whole", async () => {
+    // 2 strings per CONTINUE: the CONTINUEs alone take two batches before any string is read
+    const records = BATCH_RECORDS + 1000
+    const strings = Array.from({ length: 2 * records }, (_, k) => `t${k}`)
+    const continues = Array.from({ length: records }, (_, c) => X.record(CONTINUE, strings.slice(2 * c, 2 * c + 2).flatMap(X.xlString)))
+    const picks = [0, records, strings.length - 1]
+    const run = await turns([sstHead(strings.length), ...continues], picks.map((index, r) => X.labelSst(r, 0, 0, index)))
+    expect(run.batches).toBeGreaterThanOrEqual(records / BATCH_RECORDS + 1)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+    expect(await texts(run.value)).toEqual(picks.map((k) => `t${k}`))
   })
 
   it("a run of empty CONTINUEs after an SST yields within it", async () => {
