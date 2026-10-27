@@ -113,7 +113,8 @@ export class RecordReader {
       bounds[2 * count + 1] = end
       count++
     }
-    return { ...first, segments: { bytes, bounds: bounds.slice(0, 2 * count), count } }
+    // a view of the used part, no copy (at most 2x the used size is kept)
+    return { ...first, segments: { bytes, bounds: bounds.subarray(0, 2 * count), count } }
   }
 }
 
