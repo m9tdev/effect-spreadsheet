@@ -445,6 +445,7 @@ describe("xlsb limits and malformed input", () => {
     expect(await errorOf(one([], { strings: [x] }), at)).toMatchObject(long)
     expect(await errorOf(one([], { xfs: [0], formats: { 164: x } }), at)).toMatchObject(long)
     expect(await errorOf({ sheets: [{ name: "S" }, { name: x }] }, at)).toMatchObject(long)
+    expect(await errorOf({ sheets: [], workbookPart: B.concat([B.beginBook(), B.bundleSh("S", x)]) }, at)).toMatchObject(long)
     expect(await errorOf({ sheets: [{ name: "S" }], globals: [B.name(x, [])] }, at)).toMatchObject(long)
     expect(await errorOf({ sheets: [{ name: "S" }], globals: [B.supBookSrc(x)] }, at)).toMatchObject(long)
     const link = B.concat([B.supTabs([x])])
