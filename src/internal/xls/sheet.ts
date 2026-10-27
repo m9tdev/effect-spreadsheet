@@ -56,6 +56,17 @@ export const BATCH_RECORDS = 4096
  */
 export const BATCH_CELLS = 65_536
 
+/**
+ * Cells held in rows not emitted yet (rows waiting for a later cell of
+ * theirs, or for an earlier row): at most `heldCells`, 16 batches. Rows
+ * stream in row order, so a row whose cells come both early and late in
+ * the sheet holds back every row after it; real files split rows across a
+ * few rows only (the corpus holds at most a few thousand cells). Past it,
+ * the sheet is MalformedFile: MS-XLS puts a row's cells in its row block.
+ * Tests may lower it.
+ */
+export const caps = { heldCells: 16 * BATCH_CELLS }
+
 const ROW = 0x0208
 const LABELSST = 0x00FD
 const LABEL = 0x0204
@@ -220,6 +231,15 @@ export class Rows {
   private rowCount = 0
   /** Cells read so far (repeats included): counted against maxCellsPerSheet. */
   cellCount = 0
+  /** Cells in `open` rows: exactly those held, not emitted yet (see `caps`). */
+  held = 0
+  /**
+   * Cells read plus cells sorted (compacting a row): the work that a batch
+   * spends, up to `budget`. Emitting rows stops at the budget and goes on
+   * in the next batch.
+   */
+  effort = 0
+  budget = Infinity
   /** Depth of substreams nested in this one (embedded charts: BOF ... EOF). */
   nested = 0
   /** A FORMULA whose text result comes in the next STRING record. */
@@ -270,10 +290,12 @@ export class Rows {
     const entry = this.open.get(index)
     if (entry === undefined) return undefined
     this.open.delete(index)
+    this.held -= entry.cells.length
     if (this.hotRow === index) {
       this.hotRow = -1
       this.hotEntry = undefined
     }
+    if (!entry.sorted) this.effort += entry.cells.length
     return this.push(index, this.hidden.has(index), entry.sorted ? entry.cells : compact(entry.cells))
   }
 
@@ -301,11 +323,12 @@ export class Rows {
 
   /**
    * After the record at `offset`: emits, in row order, the rows whose last
-   * cell record is at or before it (not one still waiting for its STRING).
+   * cell record is at or before it (not one still waiting for its STRING),
+   * until `effort` reaches `budget` (see `behind`).
    */
   complete(offset: number): SpreadsheetError | undefined {
     // progress: nextRow increases, bounded by order.length (offset may be Infinity)
-    while (this.nextRow < this.order.length && this.nextAt <= offset) {
+    while (this.nextRow < this.order.length && this.nextAt <= offset && this.effort < this.budget) {
       work.steps++
       const index = this.order[this.nextRow]!
       if (this.pendingString?.row === index) return undefined
@@ -315,6 +338,11 @@ export class Rows {
       if (error !== undefined) return error
     }
     return undefined
+  }
+
+  /** Whether rows complete at `offset` are left for `complete` (it stopped at the budget). */
+  behind(offset: number): boolean {
+    return this.nextRow < this.order.length && this.nextAt <= offset && this.pendingString?.row !== this.order[this.nextRow]
   }
 
   row(index: number, hidden: boolean): void {
@@ -341,19 +369,23 @@ export class Rows {
     if (cell.column <= entry.lastColumn) entry.sorted = false
     entry.lastColumn = cell.column
     entry.cells.push(cell)
+    this.held++
+    this.effort++
     // repeated columns don't pile up: past 2 x maxColumns cells a row is
     // compacted (to at most maxColumns), so the work is amortized
     if (!entry.sorted && entry.cells.length > 2 * limits.maxColumns) {
+      this.effort += entry.cells.length
+      this.held -= entry.cells.length
       compact(entry.cells)
+      this.held += entry.cells.length
       entry.sorted = true
       entry.lastColumn = entry.cells[entry.cells.length - 1]!.column
     }
     return undefined
   }
 
+  /** After the EOF, once `complete(Infinity)` isn't `behind`: the rest. */
   end(): SpreadsheetError | undefined {
-    const error = this.complete(Infinity)
-    if (error !== undefined) return error
     // rows the scan didn't place (none when both passes agree), in row order
     const left = Uint32Array.from(this.open.keys()).sort()
     // progress: one row per iteration
@@ -533,6 +565,10 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
     const rows = new Rows(context)
     const maxStringBytes = stringMaxBytes(context.limits)
     let done = false
+    /** The EOF was handled: only rows are left to emit. */
+    let ended = false
+    /** Offset of the last record handled (rows complete up to it may wait for budget). */
+    let handledAt = -1
     const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
       if (reader === undefined || scan === undefined) return yield* Effect.fail(opened as SpreadsheetError)
       // progress: each iteration takes queued rows, or reads up to
@@ -547,10 +583,23 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
           if (scan.done) rows.start(scan.lastAt)
           continue
         }
-        let ended = false
-        const cellBudget = rows.cellCount + BATCH_CELLS
+        rows.budget = rows.effort + BATCH_CELLS
+        // rows a budget left complete but not emitted come first (after the
+        // EOF, all the rest): each call emits at least one, or none is left
+        const due = ended ? Infinity : handledAt
+        const caught = rows.complete(due)
+        if (caught !== undefined) return yield* Effect.fail(caught)
+        if (ended) {
+          if (!rows.behind(Infinity)) {
+            done = true
+            const error = rows.end()
+            if (error !== undefined) return yield* Effect.fail(error)
+          }
+          if (rows.queued()) return rows.take()
+          continue
+        }
         // progress: k up to BATCH_RECORDS; every next() advances the reader
-        for (let k = 0; k < BATCH_RECORDS && rows.cellCount < cellBudget; k++) {
+        for (let k = 0; k < BATCH_RECORDS && rows.effort < rows.budget && !rows.behind(handledAt); k++) {
           work.steps++
           const record = rows.nested === 0 && context.globals.biff8 && reader.peekType() === STRING
             ? reader.nextWithContinues(maxStringBytes, "maxStringLength")
@@ -567,12 +616,11 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
             break
           }
           if (result !== false) return yield* Effect.fail(result)
+          if (rows.held > caps.heldCells) {
+            return yield* Effect.fail(malformed(context.part, `rows split too far apart: over ${caps.heldCells} cells held for rows not complete`, record.offset))
+          }
+          handledAt = record.offset
           const error = rows.complete(record.offset)
-          if (error !== undefined) return yield* Effect.fail(error)
-        }
-        if (ended) {
-          done = true
-          const error = rows.end()
           if (error !== undefined) return yield* Effect.fail(error)
         }
         if (rows.queued()) return rows.take()

@@ -90,25 +90,48 @@ describe("xls: 65 536 rows", () => {
     // 64 rows of 16 384 empty cells, 4 MULBLANK records each: few records, many cells
     const xfs = new Array<number>(4096).fill(0)
     const records = Array.from({ length: 64 }, (_, r) => [0, 1, 2, 3].map((k) => X.mulBlank(r, 4096 * k, xfs))).flat()
-    // and the same rows all waiting for a last cell of row 0 at the end: they come out together
+    // and 48 of them (under the held-cells cap) all waiting for a last cell
+    // of row 0 at the end: they complete together, and come out in chunks
     const wb = await Effect.runPromise(Xls.read(X.xls({
-      sheets: [{ name: "Wide", records }, { name: "Waiting", records: [...records, X.number(0, 0, 0, 1)] }]
+      sheets: [{ name: "Wide", records }, { name: "Waiting", records: [...records.slice(0, 4 * 48), X.number(0, 0, 0, 1)] }]
     })))
-    for (const sheet of [0, 1]) {
+    for (const [sheet, rows] of [[0, 64], [1, 48]] as const) {
       let cells = 0
       const run = await countYields(
         () => Effect.runPromise(Stream.runForEach(Workbook.rows(wb, sheet), (row) => Effect.sync(() => void (cells += row.cells.length)))),
         () => cells
       )
-      expect(cells).toBe(64 * 16_384)
+      expect(cells).toBe(rows * 16_384)
       // a chunk ends once it passes BATCH_CELLS; a row has at most 16 384 cells
       expect(run.maxPerTurn, `sheet ${sheet}`).toBeLessThanOrEqual(BATCH_CELLS + 16_384)
-      expect(run.yields).toBeGreaterThanOrEqual((64 * 16_384) / (BATCH_CELLS + 16_384))
+      expect(run.yields).toBeGreaterThanOrEqual((rows * 16_384) / (BATCH_CELLS + 16_384))
     }
     // and so does reading: a batch ends once its cells pass BATCH_CELLS (a
     // MULBLANK adds at most 4 109), a step per cell plus a few per record and row
     const steps = await countYields(() => Effect.runPromise(Stream.runDrain(Workbook.rows(wb, 0))), () => work.steps)
     expect(steps.maxPerTurn).toBeLessThanOrEqual(BATCH_CELLS + 4109 + 4 * BATCH_RECORDS)
+  }, 300_000)
+
+  it("sorting unsorted rows counts towards a batch: bounded steps per turn", async () => {
+    // rows of 32 768 cells in two passes over 16 384 columns (unsorted, not
+    // compacted while read), each sorted when it ends: one sheet with each
+    // row closed in turn, one with 30 rows all ending at once (row 0 last);
+    // and one row of 16 passes, compacted while read every 16 384 cells
+    const xfs = new Array<number>(4096).fill(0)
+    const wideRow = (r: number) => [0, 1, 2, 3, 0, 1, 2, 3].map((k) => X.mulBlank(r, 4096 * k, xfs))
+    const oneByOne = Array.from({ length: 40 }, (_, r) => wideRow(r)).flat()
+    const together = [X.blank(0, 0, 0), ...Array.from({ length: 30 }, (_, r) => wideRow(r + 1)).flat(), X.blank(0, 1, 0)]
+    const repeated = Array.from({ length: 8 }, () => wideRow(0)).flat()
+    const wb = await Effect.runPromise(Xls.read(X.xls({
+      sheets: [{ name: "One by one", records: oneByOne }, { name: "Together", records: together }, { name: "Repeated", records: repeated }]
+    })))
+    for (const sheet of [0, 1, 2]) {
+      const steps = await countYields(() => Effect.runPromise(Stream.runDrain(Workbook.rows(wb, sheet))), () => work.steps)
+      // a batch: BATCH_CELLS of reading and sorting, then at most one more
+      // record (4 109 cells) or one more row sorted (32 768), plus a few
+      // steps per record and row
+      expect(steps.maxPerTurn, `sheet ${sheet}`).toBeLessThanOrEqual(BATCH_CELLS + 32_768 + 4109 + 4 * BATCH_RECORDS)
+    }
   }, 300_000)
 
   it("read in linear work: 16x the rows take 16x the reader's steps", async () => {

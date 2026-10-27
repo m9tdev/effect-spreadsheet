@@ -7,7 +7,7 @@
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
-import { BATCH_RECORDS, Rows, type SheetContext, work } from "../src/internal/xls/sheet.ts"
+import { BATCH_RECORDS, caps, Rows, type SheetContext, work } from "../src/internal/xls/sheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
@@ -225,6 +225,53 @@ describe("xls sheet: rows whose cells come in several places", () => {
       [1, 0, "Number", 1],
       [1, 1, "Number", 2]
     ])
+  })
+
+  it("a row whose last cell is a formula with a string result is emitted only after its STRING", async () => {
+    const { sheets } = await readOk(one([X.number(0, 0, 0, 1), X.formula(0, 1, 0, { kind: 0 }), X.string("s"), X.number(1, 0, 0, 2)]))
+    expect(values(sheets[0]!)).toEqual([
+      [0, false, [[0, "Number", 1], [1, "Text", "s"]]],
+      [1, false, [[0, "Number", 2]]]
+    ])
+  })
+
+  it("rows held back by a row split far apart are capped: past the cap the sheet is MalformedFile", async () => {
+    // a BLANK in row 0, rows 1-20 of 100 cells each, then row 0's second BLANK: rows 1-20 wait for row 0
+    const records = [X.blank(0, 0, 0), ...Array.from({ length: 20 }, (_, r) => X.mulrk(r + 1, 0, Array.from({ length: 100 }, (_, c) => [0, X.rkInt(c)] as const))), X.blank(0, 1, 0)]
+    const saved = caps.heldCells
+    try {
+      caps.heldCells = 1000
+      const error = await errorOf(one(records))
+      expect(error).toMatchObject({ _tag: "MalformedFile", reason: "rows split too far apart: over 1000 cells held for rows not complete" })
+      // at 1 000 cells (row 0's first BLANK and rows 1-10), not before: the record that passes it
+      expect((error as { offset: number }).offset).toBeGreaterThan(0)
+      // all 2 002 cells are held when the last BLANK comes: a cap of 2 002 reads, 2 001 doesn't
+      caps.heldCells = 2001
+      expect(await errorOf(one(records))).toMatchObject({ reason: "rows split too far apart: over 2001 cells held for rows not complete" })
+      caps.heldCells = 2002
+      const { sheets } = await readOk(one(records))
+      expect(sheets[0]!.map((r) => [r.index, r.cells.length])).toEqual([[0, 2], ...Array.from({ length: 20 }, (_, r) => [r + 1, 100])])
+    } finally {
+      caps.heldCells = saved
+    }
+  })
+
+  it("held cells are exactly the cells of rows not emitted, through compaction and emitting", async () => {
+    const limits = { ...SpreadsheetLimits.defaults, maxColumns: 8 }
+    const rows = new Rows({ limits } as unknown as SheetContext)
+    rows.start(new Map([[0, 10_000], [1, 20_000]]))
+    const open = rows as unknown as { open: Map<number, { cells: Array<unknown> }> }
+    const heldNow = () => [...open.open.values()].reduce((n, r) => n + r.cells.length, 0)
+    // progress: k up to 100
+    for (let k = 0; k < 100; k++) {
+      expect(rows.cell(k % 2, Cell.number(7 - (k % 8), k))).toBeUndefined()
+      expect(rows.held).toBe(heldNow())
+    }
+    expect(rows.complete(10_000)).toBeUndefined() // row 0 out
+    expect(rows.held).toBe(heldNow())
+    expect(rows.held).toBeGreaterThan(0)
+    expect(rows.complete(20_000)).toBeUndefined()
+    expect(rows.held).toBe(0)
   })
 
   it("a duplicate column in a row keeps the last cell", async () => {
