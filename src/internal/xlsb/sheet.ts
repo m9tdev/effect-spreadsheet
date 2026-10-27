@@ -15,8 +15,9 @@
  *   `hidden: true`, never skipped.
  * - Cells: blank, RK, error, boolean, real, inline string, rich string and
  *   shared string cells, the four formula cells (their cached result; the
- *   formula isn't decompiled), and the short forms Excel 2010 and later
- *   may write (no column field: the previous cell's column + 1). NaN and
+ *   formula isn't decompiled), and the short forms MS-XLSB defines (no
+ *   column field: the previous cell's column + 1 in the row, 0 for the
+ *   row's first cell). NaN and
  *   infinities are `#NUM!`, unknown error codes `#N/A`, as in XLS. A number
  *   whose style has a date format is a `Date`, unless it is outside
  *   Excel's date range; numbers carry their `numFmt`.

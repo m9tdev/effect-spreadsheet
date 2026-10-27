@@ -14,7 +14,8 @@ hidden ones flagged.
 `generated/names_formulas.xlsb` is hand-built (SheetJS's XLSB writer writes
 none of these records): every cell record, including rich strings, the four
 formula results and the short cells (no column field: the previous cell's
-column + 1; SheetJS reads them the same way), date and custom formats,
+column + 1; SheetJS gives the same cells for the ones in this fixture), date
+and custom formats,
 hidden rows and columns, merges, hidden and very hidden sheets, a self and
 an external book with its external link part, and BrtName records. The
 defined-name differences below are listed name by name in the test, each
@@ -24,10 +25,12 @@ The reader was also run over the XLSB files of the SheetJS test corpus
 (not committed: `test/corpus/.cache`, see docs/corpus.md), against the 491
 that SheetJS parses within the oracle's limits. Every cell value, hidden row,
 hidden column and merge agrees with SheetJS, apart from the differences
-below. The 20 files on which SheetJS's streaming reader never finishes
-(hidden rows) read in full, every hidden row flagged (one of them through
-`Xlsb.read`: it isn't detected as XLSB, see the table); one other file fails
-with `MalformedFile` (in the table too).
+below. The 15 corpus files (19 with the committed fixtures) on which
+SheetJS's streaming reader never finishes (hidden rows) read in full, every
+hidden row flagged (one of them through `Xlsb.read`: it isn't detected as
+XLSB, see the table); one other file fails with `MalformedFile` (in the
+table too; it is in the corpus twice, as `2013/apachepoi_Simple.xlsb` and
+`apache_spreadsheet/xlsb/Simple.xlsb`, the same bytes).
 
 These are the intended differences:
 
@@ -40,12 +43,13 @@ These are the intended differences:
 | -0 | `0` | `-0` |
 | an unknown error code | `Error` cell `#N/A` | an error cell with that code |
 | BrtCellBlank / BrtShortBlank (styled blanks) | `Empty` cells | stub cells (`t: "z"`), even with `sheetStubs: false` |
-| short cell records (BrtShortBlank ... BrtShortIsst, 0x000C-0x0012) | read with no column field: the previous cell's column + 1, then a 4-byte style and the value. None occur in the corpus; SheetJS reads the synthetic ones in `names_formulas.xlsb` the same way | same columns and values |
+| short cell records (BrtShortBlank ... BrtShortIsst, 0x000C-0x0012) | read with no column field: the previous cell's column + 1 in the same row, then a 4-byte style and the value; a short cell that starts a row is in column 0. None occur in the corpus; the synthetic ones in `names_formulas.xlsb` (none of them first in its row) give the same cells as SheetJS | the same cells for those; for a short cell that starts a row, it may carry on from the previous row's last column (not checked: no file has one) |
 | record numbers of cells inside future-record blocks (BrtFRTBegin ... BrtFRTEnd), and cell records outside BrtBeginSheetData ... BrtEndSheetData | not cells: ignored (real files reuse 0x0001 inside such blocks). A cell record inside the sheet data before any BrtRowHdr is `MalformedFile` | ignores them too (the corpus files that have them agree cell for cell) |
 | chart, dialog and macro sheets | listed in `sheets`, with no rows | cells made up from a chart's caches |
 | sheet dimension | the declared BrtWsDim only (absent without one), `A1` for an empty sheet that declares it | `!ref` absent for an empty sheet |
 | defined names: a reference to an external workbook | `[1]Rates!$A$1` (`[n]`: the n-th external book, its sheet names from the external link part's BrtSupTabs, as XLSX writes it) | a placeholder (`SH33TJSSRC355!$A$1`) |
 | defined names: a sheet index past the workbook's sheets | `#REF!$A$1` | the whole read fails (`empty sheet name`); so no committed fixture has one |
+| defined names: the whole sheet (rows 1-1048576, columns A-XFD) | `Sheet1!$1:$1048576`, as Excel writes it (e.g. `2013/apachepoi_3dFormulas.xls.xlsb`) | `Sheet1!$A:$XFD` |
 | defined names: a deleted sheet | `#REF!$A$1` | `#REF!$A$1` |
 | defined names: a reference to deleted cells (PtgRefErr3d, PtgAreaErr3d) | `Sheet!#REF!` (`#REF!` when the sheet is gone too) | `#REF!` |
 | defined names: sheet-name quoting | as Excel, and as for XLS: quoted when not name-like or when it reads as a cell reference (`'S2'!`, `'1'!`, `'Top10'!`); letters beyond ASCII need no quotes; a span `Jan:Mar!$A$1`, quoted as a whole when one name needs it | doesn't quote names that read as a cell reference or start with a digit; quotes non-ASCII names and every span |
