@@ -69,6 +69,8 @@ export interface Limits {
   readonly maxSectorChain: number
   /** Nesting depth of storages in a CFB container (a workbook's are 1-3 deep). */
   readonly maxStorageDepth: number
+  /** Bytes in one XLSB (BIFF12) record, checked from its header before its data is held. */
+  readonly maxRecordBytes: number
 }
 
 /**
@@ -102,6 +104,7 @@ export type LimitOverrides = { readonly [K in keyof Limits]?: number | undefined
  * | maxXmlAttributes | 512 | |
  * | maxSectorChain | 1 048 576 | 512 MiB of 512-byte sectors |
  * | maxStorageDepth | 32 | VBA projects nest storages 2-3 deep; paths cost depth² |
+ * | maxRecordBytes | 4 MiB | ~80x the largest XLSB record in about 500 real-world files (50 KB, a long formula string); a full-length Excel string with all its runs is about 200 KB |
  *
  * @since 0.1.0
  * @category defaults
@@ -123,7 +126,8 @@ export const defaults: Limits = {
   maxXmlDepth: 128,
   maxXmlAttributes: 512,
   maxSectorChain: 1_048_576,
-  maxStorageDepth: 32
+  maxStorageDepth: 32,
+  maxRecordBytes: 4 * 1024 * 1024
 }
 
 /**
