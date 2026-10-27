@@ -98,6 +98,18 @@ describe("biff12 records", () => {
     expect(splitAll(record(1, new Uint8Array(101)), "t.bin", 100)).toMatchObject({ _tag: "LimitExceeded", actual: 101 })
   })
 
+  it("a header declaring 2^28 - 1 bytes allocates nothing: buffers grow by under 1 MiB", () => {
+    const header = new Uint8Array([0x13, 0xFF, 0xFF, 0xFF, 0x7F])
+    const before = process.memoryUsage().arrayBuffers
+    const splitter = new RecordSplitter("t.bin", MAX)
+    const error = splitter.feed(header, () => undefined)
+    const grown = process.memoryUsage().arrayBuffers - before
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxRecordBytes" })
+    // a body allocated before the check would be 256 MiB, still held by the splitter here
+    expect(grown).toBeLessThan(1 << 20)
+    expect(splitter.records).toBe(0)
+  })
+
   it("a record cut off by the end of the part is MalformedFile, header or body", () => {
     const bytes = concat([record(1, [1]), record(0x9C, [1, 2, 3, 4, 5])])
     expect(splitAll(bytes.subarray(0, 4), "t.bin", MAX)).toMatchObject({ _tag: "MalformedFile", offset: 3, reason: "record header cut off by the end of the part" })
