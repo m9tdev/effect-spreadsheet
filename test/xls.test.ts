@@ -265,6 +265,8 @@ describe("xls: hostile and broken files", () => {
     expect(await errorOf(one([], [X.sst(["x".repeat(50)])]), { maxStringLength: 10 })).toMatchObject({ limit: "maxStringLength" })
     expect(await errorOf(one([X.label(0, 0, 0, "y".repeat(50))]), { maxStringLength: 10 })).toMatchObject({ limit: "maxStringLength" })
     expect(await errorOf(one([X.colInfo(0, 0, true), X.colInfo(1, 1, true)]), { maxColumns: 1 })).toMatchObject({ limit: "maxColumns" })
+    expect(await errorOf(one([X.mergeCells([[0, 0, 0, 1], [1, 1, 0, 1]])]), { maxCellsPerSheet: 1 })).toMatchObject({ limit: "maxCellsPerSheet", actual: 2 })
+    expect(await errorOf(one([X.label5(0, 0, 0, new Array(50).fill(0x41))], [], 5), { maxStringLength: 10 })).toMatchObject({ limit: "maxStringLength" })
   })
 
   it("an SST split across CONTINUE records reads, the strings' widths switching at the boundary", async () => {
