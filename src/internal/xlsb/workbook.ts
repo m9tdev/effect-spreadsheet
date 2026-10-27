@@ -206,7 +206,13 @@ export const readWorkbookBin = (
     )
   })
 
-/** The sheet names of an external link part (its BrtSupTabs record), at most `maxSheets`. */
+/** Ends a part's read early: it is caught right away, never seen outside. */
+const DONE = new MalformedFile({ format: "xlsb", reason: "read ends here" })
+
+/**
+ * The sheet names of an external link part (its BrtSupTabs record), at
+ * most `maxSheets`. The part is read up to that record only.
+ */
 export const readExternalSheets = (
   archive: Archive,
   entry: ZipEntry,
@@ -214,10 +220,8 @@ export const readExternalSheets = (
 ): Effect.Effect<ReadonlyArray<string>, SpreadsheetError> =>
   Effect.suspend(() => {
     const names: Array<string> = []
-    let seen = false
     const handle = (record: Biff12Record): SpreadsheetError | undefined => {
-      if (record.type !== BRT_SUP_TABS || seen) return undefined
-      seen = true
+      if (record.type !== BRT_SUP_TABS) return undefined
       const count = new Fields(record.data).u32(0)
       if (count === undefined) return malformed("truncated external sheet list", entry.name, record.offset)
       if (count > limits.maxSheets) return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: count })
@@ -230,9 +234,44 @@ export const readExternalSheets = (
         names.push(name.value)
         at = name.end
       }
-      return undefined
+      return DONE
     }
-    return Effect.as(readRecords(sliced(archive.read(entry)), handle, limits, entry.name), names)
+    return readRecords(sliced(archive.read(entry)), handle, limits, entry.name).pipe(
+      Effect.catchIf((error) => error === DONE, () => Effect.void),
+      Effect.as(names)
+    )
+  })
+
+/**
+ * The sheet names of the external books that defined names point into, by
+ * book index. Each external link part is read once, however many books
+ * point at it (the inflate budget counts a part once, so reading it per
+ * book would be free work); a book whose part is missing gets none, so its
+ * references are `#REF!`.
+ */
+export const readExternalBooks = (
+  archive: Archive,
+  workbook: WorkbookBin,
+  partOf: (relationshipId: string) => string | undefined,
+  limits: Limits
+): Effect.Effect<Map<number, ReadonlyArray<string>>, SpreadsheetError> =>
+  Effect.gen(function*() {
+    const byPart = new Map<string, ReadonlyArray<string>>()
+    const out = new Map<number, ReadonlyArray<string>>()
+    // progress: one book per iteration (books are at most MAX_BOOKS)
+    for (const book of referencedBooks(workbook)) {
+      const entry = workbook.books[book]!
+      const part = entry.kind === "external" ? partOf(entry.relationshipId) : undefined
+      const linkEntry = part === undefined ? undefined : archive.find(part)
+      if (linkEntry === undefined) continue
+      let names = byPart.get(linkEntry.name)
+      if (names === undefined) {
+        names = yield* readExternalSheets(archive, linkEntry, limits)
+        byPart.set(linkEntry.name, names)
+      }
+      out.set(book, names)
+    }
+    return out
   })
 
 /**

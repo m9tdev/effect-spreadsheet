@@ -37,7 +37,7 @@
 import { Effect, Stream } from "effect"
 import { sheetDetails, sheetRows } from "../internal/xlsb/sheet.ts"
 import { readSharedStrings, readStyles } from "../internal/xlsb/parts.ts"
-import { definedNames, malformed, readExternalSheets, readWorkbookBin, referencedBooks } from "../internal/xlsb/workbook.ts"
+import { definedNames, malformed, readExternalBooks, readWorkbookBin } from "../internal/xlsb/workbook.ts"
 import { NO_STYLES, readRelationships, relationshipKind, type Styles } from "../internal/xlsx/parts.ts"
 import { open } from "../internal/zip/archive.ts"
 import { LimitExceeded, type SpreadsheetError } from "../SpreadsheetError.ts"
@@ -112,15 +112,8 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     const styles: Styles = stylesEntry === undefined ? NO_STYLES : yield* readStyles(archive, stylesEntry, limits)
 
     // the sheet names of external workbooks that defined names point into
-    // (each external link part read once; a missing one leaves #REF!)
-    const externalSheets = new Map<number, ReadonlyArray<string>>()
-    // progress: one book per iteration (at most one per BrtSupBookSrc record)
-    for (const book of referencedBooks(workbook)) {
-      const entry = workbook.books[book]!
-      const rel = entry.kind === "external" ? byId.get(entry.relationshipId) : undefined
-      const linkEntry = rel?.part === undefined ? undefined : archive.find(rel.part)
-      if (linkEntry !== undefined) externalSheets.set(book, yield* readExternalSheets(archive, linkEntry, limits))
-    }
+    // (each external link part read once, however many books share it; a missing one leaves #REF!)
+    const externalSheets = yield* readExternalBooks(archive, workbook, (id) => byId.get(id)?.part, limits)
 
     const sheets: Array<Workbook.SheetInfo> = workbook.sheets.map((s, index) => ({ name: s.name, index, visibility: s.visibility }))
 

@@ -4,6 +4,9 @@ import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { RecordSplitter } from "../src/internal/biff12/records.ts"
 import { SheetRows } from "../src/internal/xlsb/sheet.ts"
+import { readExternalBooks, readWorkbookBin } from "../src/internal/xlsb/workbook.ts"
+import { readRelationships } from "../src/internal/xlsx/parts.ts"
+import { open } from "../src/internal/zip/archive.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
@@ -350,6 +353,33 @@ describe("xlsb defined names", () => {
     const formulaPast = B.record(0x27, [0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, ...B.wide("N"), ...B.u32(100), 0x3A])
     expect(await errorOf({ sheets, globals: [formulaPast] })).toMatchObject({ _tag: "MalformedFile", reason: "defined name formula past its record" })
     expect(await errorOf({ sheets, globals: [B.record(0x16A, [...B.u32(2), ...B.u32(0), ...B.u32(0), ...B.u32(0)])] })).toMatchObject({ _tag: "MalformedFile", reason: "truncated external sheet record" })
+  })
+
+  it("an external link part shared by many books is read once, and only up to its sheet list", async () => {
+    const books = 200
+    // a sheet list, then 1 MiB of other records the reader has no need of
+    const tail = B.record(0x16B, new Uint8Array(1 << 20))
+    const link = B.concat([B.record(0x168, [...B.u16(0), ...B.wide("rId1"), ...B.u32(0xFFFFFFFF)]), B.supTabs(["Rates"]), tail])
+    const globals = [
+      B.supSelf(),
+      ...Array.from({ length: books }, () => B.supBookSrc("rIdX1")),
+      B.externSheet(Array.from({ length: books }, (_, k) => [k + 1, 0, 0] as const)),
+      ...Array.from({ length: books }, (_, k) => B.name(`N${k}`, B.ref3d(k, 0, 0)))
+    ]
+    const bytes = await B.xlsb({ sheets: [{ name: "S" }], externalLinks: [link], globals, method: "store" })
+    const limits = SpreadsheetLimits.defaults
+    const archive = open(bytes, limits)
+    if ("_tag" in archive) throw new Error(archive._tag)
+    const workbook = await Effect.runPromise(readWorkbookBin(archive, archive.find("xl/workbook.bin")!, limits))
+    const rels = await Effect.runPromise(readRelationships(archive, "xl/workbook.bin", limits))
+    const before = archive.inflatedBytes()
+    const sheets = await Effect.runPromise(readExternalBooks(archive, workbook, (id) => rels.find((r) => r.id === id)?.part, limits))
+    expect(sheets.size).toBe(books)
+    expect([...sheets.values()].every((names) => names[0] === "Rates")).toBe(true)
+    // one read of the part's first slice (64 KiB), not 200 reads of 1 MiB
+    expect(archive.inflatedBytes() - before).toBeLessThanOrEqual(64 * 1024)
+    const { wb } = await readOk({ sheets: [{ name: "S" }], externalLinks: [link], globals })
+    expect(wb.definedNames.slice(0, 2).map((n) => n.formula)).toEqual(["[1]Rates!$A$1", "[2]Rates!$A$1"])
   })
 
   it("an external link's sheet list over maxSheets fails", async () => {
