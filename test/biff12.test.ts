@@ -185,16 +185,16 @@ describe("biff12 strings", () => {
     expect(readWideString(new Uint8Array(wide("é😀")), 0, 100)).toEqual({ value: "é😀", end: 4 + 6 })
   })
 
-  it("past the data is undefined; a count over the limit is null, before decoding", () => {
+  it("past the data is undefined, whatever the limit; else a count over the limit is null, before decoding", () => {
     const data = new Uint8Array(wide("abcdef"))
     expect(readWideString(data.subarray(0, 15), 0, 100)).toBeUndefined()
-    expect(readWideString(data, 2, Infinity)).toBeUndefined()
+    expect(readWideString(data, 2, 100)).toBeUndefined()
     expect(readWideString(data, -1, 100)).toBeUndefined()
     expect(readWideString(data, 0, 5)).toBeNull()
     expect(readWideString(data, 0, 6)).toEqual({ value: "abcdef", end: 16 })
-    // a huge count in a tiny record: null under a small limit, undefined (past the data) under Infinity
+    // a huge count in a tiny record is a broken record (past the data), whatever the limit
     const huge = new Uint8Array(u32(0x7FFFFFFF))
-    expect(readWideString(huge, 0, 1000)).toBeNull()
+    expect(readWideString(huge, 0, 1000)).toBeUndefined()
     expect(readWideString(huge, 0, Infinity)).toBeUndefined()
   })
 

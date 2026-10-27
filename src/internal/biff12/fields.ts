@@ -20,15 +20,16 @@ const NULL_COUNT = 0xFFFFFFFF
 
 /**
  * An XLWideString at `at`: a u32 count of UTF-16 code units, then the
- * units. `undefined` if it runs past the data, `null` if the count is over
- * `maxLength` (checked before anything is decoded).
+ * units. `undefined` if it runs past the data (a broken record, whatever
+ * the limit), else `null` if the count is over `maxLength`; both are
+ * checked before anything is decoded.
  */
 export const readWideString = (data: Uint8Array, at: number, maxLength: number): Read<string> | undefined | null => {
   if (at < 0 || at + 4 > data.length) return undefined
   const count = (data[at]! | (data[at + 1]! << 8) | (data[at + 2]! << 16) | (data[at + 3]! << 24)) >>> 0
-  if (count > maxLength) return null
   const end = at + 4 + 2 * count
   if (end > data.length) return undefined
+  if (count > maxLength) return null
   return { value: count === 0 ? "" : utf16.decode(data.subarray(at + 4, end)), end }
 }
 
