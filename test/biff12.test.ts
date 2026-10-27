@@ -98,6 +98,18 @@ describe("biff12 records", () => {
     expect(splitAll(record(1, new Uint8Array(101)), "t.bin", 100)).toMatchObject({ _tag: "LimitExceeded", actual: 101 })
   })
 
+  it("a header declaring 2^28 - 1 bytes allocates nothing: buffers grow by under 1 MiB", () => {
+    const header = new Uint8Array([0x13, 0xFF, 0xFF, 0xFF, 0x7F])
+    const before = process.memoryUsage().arrayBuffers
+    const splitter = new RecordSplitter("t.bin", MAX)
+    const error = splitter.feed(header, () => undefined)
+    const grown = process.memoryUsage().arrayBuffers - before
+    expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxRecordBytes" })
+    // a body allocated before the check would be 256 MiB, still held by the splitter here
+    expect(grown).toBeLessThan(1 << 20)
+    expect(splitter.records).toBe(0)
+  })
+
   it("a record cut off by the end of the part is MalformedFile, header or body", () => {
     const bytes = concat([record(1, [1]), record(0x9C, [1, 2, 3, 4, 5])])
     expect(splitAll(bytes.subarray(0, 4), "t.bin", MAX)).toMatchObject({ _tag: "MalformedFile", offset: 3, reason: "record header cut off by the end of the part" })
@@ -185,12 +197,12 @@ describe("biff12 strings", () => {
     expect(readWideString(new Uint8Array(wide("é😀")), 0, 100)).toEqual({ value: "é😀", end: 4 + 6 })
   })
 
-  it("past the data is undefined, whatever the limit; else a count over the limit is null, before decoding", () => {
+  it("past the data is undefined, whatever the limit; else a count over the limit is that count, before decoding", () => {
     const data = new Uint8Array(wide("abcdef"))
     expect(readWideString(data.subarray(0, 15), 0, 100)).toBeUndefined()
     expect(readWideString(data, 2, 100)).toBeUndefined()
     expect(readWideString(data, -1, 100)).toBeUndefined()
-    expect(readWideString(data, 0, 5)).toBeNull()
+    expect(readWideString(data, 0, 5)).toBe(6)
     expect(readWideString(data, 0, 6)).toEqual({ value: "abcdef", end: 16 })
     // a huge count in a tiny record is a broken record (past the data), whatever the limit
     const huge = new Uint8Array(u32(0x7FFFFFFF))
@@ -208,6 +220,6 @@ describe("biff12 strings", () => {
     const rich = new Uint8Array([0x03, ...wide("hello"), ...u32(1), 0, 0, 1, 0, 9, 9, 9])
     expect(readRichStr(rich, 0, 100)).toEqual({ value: "hello", end: 15 })
     expect(readRichStr(new Uint8Array(0), 0, 100)).toBeUndefined()
-    expect(readRichStr(rich, 0, 4)).toBeNull()
+    expect(readRichStr(rich, 0, 4)).toBe(5)
   })
 })

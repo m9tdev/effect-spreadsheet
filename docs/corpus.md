@@ -461,6 +461,16 @@ by hand. Each file is described in `generated/README.json`.
   non-ASCII sheet names, external, deleted and out-of-range sheets, PtgRefErr3d, whole rows and
   columns, scoped and hidden names, a non-reference formula). Built with the record builders of
   `test/helpers/xls.ts` and `test/helpers/cfb.ts`.
+- **XLSB cells, formulas and defined names** `names_formulas.xlsb`, a hand-built XLSB package
+  (SheetJS's XLSB writer writes none of these records): every cell record (RK, real, inline,
+  rich and shared strings, booleans, errors, a styled blank, the four formula results, the
+  short cells without a column), date and custom number formats, hidden rows and columns,
+  merges, hidden and very hidden sheets, a self and an external book with its external link
+  part, and BrtNames (3-D refs and areas, sheet spans, quoted and non-ASCII sheet names, an
+  external ref, a deleted sheet, PtgRefErr3d/PtgAreaErr3d, whole rows and columns, built-in,
+  scoped and hidden names, a non-reference formula). No name points past the sheets: SheetJS
+  fails the whole read on one. Its hidden rows make SheetJS's stream reader hang (`hang` in the
+  oracle report). Built with the record builders of `test/helpers/xlsb.ts`.
 - **Dates** `dates.xlsx` / `dates_1904.xlsx`: built-in formats 14/15/17/20/22/45–47 and custom
   formats (locale prefix, quoted text, `[h]`, a non-date `0.00`) on serials 46024.52, 0, 60
   (the 1900 leap bug), 61, 1.75 and -1.

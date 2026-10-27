@@ -20,6 +20,7 @@ import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { DefinedName } from "../../Workbook.ts"
 import { BOF_BIFF5_8, continued, EOF, type Gathering, RecordReader, readBof } from "../biff/records.ts"
 import { readRichString, SegmentReader, utf16 } from "../biff/segments.ts"
+import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
 import { codepageLabel, Fields, readString, type Text, textDecoder } from "./fields.ts"
 import { BATCH_CELLS, BATCH_RECORDS } from "./sheet.ts"
@@ -98,61 +99,6 @@ interface Xti {
 }
 
 /**
- * Whether a sheet name needs quotes in a reference, as Excel writes them:
- * when it isn't name-like (a letter or `_` first, then letters, digits, `_`
- * and `.`; characters beyond ASCII count as letters), or when it reads as
- * a cell reference (`A1`, up to column XFD) or an R1C1 one (`R`, `C2`,
- * `R1C1`).
- */
-const needsQuotes = (name: string): boolean => {
-  if (!/^[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_.\u0080-\uFFFF]*$/.test(name)) return true
-  if (/^(?:R\d*|C\d*|R\d*C\d*)$/i.test(name)) return true
-  const a1 = /^([A-Za-z]{1,3})\d+$/.exec(name)
-  return a1 !== null && columnNumber(a1[1]!) <= 16384
-}
-
-/** A sheet prefix (`Sheet!`, `'My Sheet'!`, `Jan:Mar!`, `[1]Data!`): quoted as a whole when any sheet name needs it. */
-const sheetPrefix = (book: string, names: ReadonlyArray<string>): string => {
-  const text = book + names.join(":")
-  return names.some(needsQuotes) ? `'${text.replace(/'/g, "''")}'!` : `${text}!`
-}
-
-/** The column number of letters (`A` 1, `XFD` 16384). */
-const columnNumber = (letters: string): number => {
-  let n = 0
-  // progress: k up to letters.length
-  for (let k = 0; k < letters.length; k++) n = n * 26 + (letters.toUpperCase().charCodeAt(k) - 64)
-  return n
-}
-
-const column = (c: number): string => {
-  let out = ""
-  let n = c + 1
-  // progress: n shrinks by a factor of 26
-  while (n > 0) {
-    out = String.fromCharCode(65 + ((n - 1) % 26)) + out
-    n = Math.floor((n - 1) / 26)
-  }
-  return out
-}
-
-/** A column or row of a BIFF8 reference: its column word has bit 14 for a relative column, bit 15 for a relative row. */
-const colText = (col: number): string => `${(col & 0x4000) !== 0 ? "" : "$"}${column(col & 0x3FFF)}`
-const rowText = (row: number, col: number): string => `${(col & 0x8000) !== 0 ? "" : "$"}${row + 1}`
-const cellText = (row: number, col: number): string => colText(col) + rowText(row, col)
-
-/** BIFF8 sheets: rows 0-65535, columns 0-255. */
-const LAST_ROW = 0xFFFF
-const LAST_COL = 0xFF
-
-/** An area: whole rows as `$1:$2`, whole columns as `$A:$B`, else `$A$1:$B$2`. */
-const areaText = (r1: number, r2: number, c1: number, c2: number): string => {
-  if ((c1 & 0x3FFF) === 0 && (c2 & 0x3FFF) === LAST_COL) return `${rowText(r1, c1)}:${rowText(r2, c2)}`
-  if (r1 === 0 && r2 === LAST_ROW) return `${colText(c1)}:${colText(c2)}`
-  return `${cellText(r1, c1)}:${cellText(r2, c2)}`
-}
-
-/**
  * The formula of a defined name, for the forms names usually take: a
  * single 3-D reference or area, written as Excel writes it in XLSX
  * (`Sheet!$A$1`, `'My Sheet'!$A$1:$B$2`, `Jan:Mar!$A$1`, `[1]Data!$A:$A`).
@@ -188,7 +134,7 @@ const nameFormula = (
   }
   if ((ptg === 0x3B || ptg === 0x5B || ptg === 0x7B) && rgce.length === 11) {
     const sheet = prefix(f.u16(1)!)
-    return sheet === undefined ? "" : sheet + areaText(f.u16(3)!, f.u16(5)!, f.u16(7)!, f.u16(9)!)
+    return sheet === undefined ? "" : sheet + areaText(f.u16(3)!, f.u16(5)!, f.u16(7)!, f.u16(9)!, BIFF8_GRID)
   }
   // PtgRefErr3d / PtgAreaErr3d: a reference whose cells were deleted
   if (((ptg === 0x3C || ptg === 0x5C || ptg === 0x7C) && rgce.length === 7) || ((ptg === 0x3D || ptg === 0x5D || ptg === 0x7D) && rgce.length === 11)) {

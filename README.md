@@ -1,6 +1,6 @@
 # effect-spreadsheet
 
-Effect v4 library for reading spreadsheet files (CSV, XLSX, XLS, XLSB, ...) with its own pure-TypeScript parsers. Work in progress; see PLAN.md. Today CSV/delimited text, XLSX/XLSM and XLS (BIFF8 and BIFF5) read; the other formats are detected and fail with `UnsupportedFormat`.
+Effect v4 library for reading spreadsheet files (CSV, XLSX, XLS, XLSB, ...) with its own pure-TypeScript parsers. Work in progress; see PLAN.md. Today CSV/delimited text, XLSX/XLSM, XLS (BIFF8 and BIFF5) and XLSB read; the other formats are detected and fail with `UnsupportedFormat`.
 
 It runs in Node, workers and browsers (web-standard APIs only). Every loop has a progress measure, every resource has a limit, and bad input fails with a typed `SpreadsheetError`.
 
@@ -49,7 +49,7 @@ it would otherwise silently switch the check off.
 not from the workbook the rows were read from.
 
 The bytes passed to `read` stay in use after it returns: the workbook keeps views of them, not
-copies (XLSX zip entries, a bare BIFF stream, and an XLS workbook stream laid out in consecutive
+copies (XLSX and XLSB zip entries, a bare BIFF stream, and an XLS workbook stream laid out in consecutive
 sectors of its compound file), and sheets are read from them when their rows are. Don't change
 those bytes while the workbook is in use; pass a copy if the buffer is reused.
 
@@ -77,6 +77,13 @@ those bytes while the workbook is in use; pass a copy if the buffer is reused.
 - Values: shared strings and labels are `Text` (BIFF5 strings in the workbook's code page via `TextDecoder`; unknown code pages as windows-1252); numbers (NUMBER, RK, MULRK), booleans and error codes keep their type (NaN and infinities are `#NUM!` errors, unknown error codes `#N/A`); formula cells give their cached result (formula text isn't decompiled). Dates and `numFmt` work as in XLSX. Styled blanks are `Empty`.
 - A password-protected workbook, or an encrypted OOXML package in a compound file, fails with `Encrypted`.
 
+## XLSB behaviour
+
+- `effect-spreadsheet/xlsb` (`Xlsb.read(bytes)`), or `Spreadsheet.read`, which detects an `.xlsb` from its zip's `xl/workbook.bin`. Macro-enabled workbooks read the same way; macros are ignored. XLSB files with hidden rows read like any other (they are why this project exists: a widely used JavaScript reader never finishes streaming them).
+- The same `Workbook` API as XLSX and XLS: `workbook.sheets` (names, visibility), `workbook.definedNames` (a single 3-D reference or area written as Excel writes it in XLSX, as for XLS, with `[1]Sheet!$A$1` naming the sheet from the external link part; built-in names as `_xlnm.Print_Area`; other formulas `""`), `Workbook.rows` (hidden rows flagged, never skipped; chart, dialog and macro sheets have no rows), `Workbook.sheetDetails` (hidden columns, merges, the declared BrtWsDim).
+- Values: shared, inline and rich strings and a formula's string result are `Text`; numbers (real, RK, formula results), booleans and error codes keep their type (NaN and infinities are `#NUM!`, unknown error codes `#N/A`); the short cell records MS-XLSB defines (no column field) read too. Formula cells give their cached result (formulas are stored as tokens and aren't decompiled). Dates and `numFmt` work as in XLSX. Styled blanks are `Empty`.
+- Each part is read as a stream of BIFF12 records in 64 KiB slices, with a yield to the event loop before each slice; a record over `maxRecordBytes` (4 MiB) fails with `LimitExceeded` from its header alone. The zip limits are XLSX's.
+
 ### Comparison with other readers
 
 The test suite compares CSV results with a widely used JavaScript spreadsheet library as a
@@ -84,4 +91,5 @@ test-only oracle. The intended differences are listed in
 [docs/csv-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/csv-oracle-differences.md) (CSV reading) and
 [docs/records-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/records-oracle-differences.md) (`toRecords`) and
 [docs/xlsx-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/xlsx-oracle-differences.md) (XLSX) and
-[docs/xls-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/xls-oracle-differences.md) (XLS).
+[docs/xls-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/xls-oracle-differences.md) (XLS) and
+[docs/xlsb-oracle-differences.md](https://github.com/m9tdev/effect-spreadsheet/blob/main/docs/xlsb-oracle-differences.md) (XLSB).

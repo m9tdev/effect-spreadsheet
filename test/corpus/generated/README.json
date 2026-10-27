@@ -372,6 +372,13 @@
       "size": 4096,
       "sha256": "8bdeef7e76d5cc93e835dcc070a02fe00f886f66d91da0d78c04d9c8cf76150a",
       "desc": "BIFF8 hand-built: FORMULA cached results (number, STRING, bool, error; a SHRFMLA before a STRING; a STRING with CONTINUE; type 0x0406), a self and an external SUPBOOK, EXTERNSHEET, and NAMEs: 3-D refs and areas, sheet spans, quoted and non-ASCII sheet names, an external ref, a deleted and an out-of-range sheet, PtgRefErr3d, whole columns, print titles (whole rows), a scoped and hidden names, a non-reference formula"
+    },
+    {
+      "name": "names_formulas.xlsb",
+      "format": "xlsb",
+      "size": 3941,
+      "sha256": "538e811c1650f52eae98351644ab624b5821cf3bef6e20a7f23271336df9a760",
+      "desc": "XLSB hand-built: every cell record (RK, real, inline, rich and shared strings, booleans, errors, blanks, the four formula results, the short cells), date styles, hidden rows and columns, merges, hidden and very hidden sheets, a self and an external book with its link part, and BrtNames: 3-D refs and areas, sheet spans, quoted and non-ASCII sheet names, an external ref, a deleted sheet, deleted cells, whole rows and columns, built-in, scoped and hidden names, a non-reference formula"
     }
   ]
 }

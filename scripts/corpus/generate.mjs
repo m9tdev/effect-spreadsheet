@@ -462,6 +462,82 @@ out("sylk_row_format_no_m.slk", Buffer.from('ID;PWXL;N;E\r\nP;PGeneral\r\nF;SDM6
     + "a deleted and an out-of-range sheet, PtgRefErr3d, whole columns, print titles (whole rows), a scoped and hidden names, a non-reference formula")
 }
 
+// ---- 11. xlsb cells, formulas and defined names, hand-built
+// SheetJS's XLSB writer writes no BrtName, externals, formula, rich or short cells, so the
+// parts are built record by record with the record builders of test/helpers/xlsb.ts.
+{
+  const B = await import("../../test/helpers/xlsb.ts")
+  const buf = (parts) => Buffer.concat(parts.map((p) => Buffer.from(p.buffer, p.byteOffset, p.length)))
+  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  const sheetNames = ["Data", "Jan", "Feb", "Mar", "Q1 Notes", "Données", "Hidden", "Very"]
+  const strings = ["label", "january", "february", "march", "a note", "données", "hidden", "shared"]
+  const data = B.sheetBin([
+    B.rowHdr(0), B.isst(0, 0), B.rk(1, B.rkInt(10)), B.rk(2, B.rkInt(1234) | 1), B.rk(3, B.rkDouble(-2.5)), B.real(4, 0.1), B.cellSt(5, "inline"),
+    B.rowHdr(1), B.fmlaNum(0, 3.5), B.fmlaString(1, "text result"), B.fmlaBool(2, true), B.fmlaError(3, 0x07), B.rstring(4, "rich text"),
+    B.rowHdr(2, true), B.cellBool(0, false), B.cellError(1, 0x2A), B.cellError(2, 0x17), B.blank(3, 1), B.real(4, 45000.75, 1), B.rk(5, B.rkInt(45001), 2),
+    B.rowHdr(3, true),
+    B.rowHdr(4), B.isst(0, 7), B.shortRk(B.rkInt(7)), B.shortReal(8.25), B.shortSt("short"), B.shortIsst(1), B.shortBool(true), B.shortError(0x24), B.shortBlank(),
+    B.rowHdr(5), B.real(0, 46000.5, 3), B.fmlaNum(1, 2.25, 3)
+  ], {
+    before: [B.wsDim(0, 5, 0, 8), B.beginColInfos(), B.colInfo(2, 2, true), B.colInfo(6, 7, true), B.endColInfos()],
+    after: [B.beginMergeCells(2), B.mergeCell(0, 0, 4, 5), B.mergeCell(2, 3, 0, 1), B.endMergeCells()]
+  })
+  const small = (k, r = 0) => B.sheetBin([B.rowHdr(r), B.isst(0, k), B.rk(1, B.rkInt(k))], { before: [B.wsDim(0, r, 0, 1)] })
+  const parts = [data, small(1), small(2), small(3), small(4), small(5), small(6, 1), small(6)]
+  // XTIs: [book, first sheet, last sheet]; book 0 is this workbook, 1 an external one
+  const xti = { data: 0, janToMar: 1, notes: 2, donnees: 3, external: 4, deleted: 5, outOfRange: 6, jan: 7, marToNotes: 8 }
+  const xtis = [[0, 0, 0], [0, 1, 3], [0, 4, 4], [0, 5, 5], [1, 0, 0], [0, -1, -1], [0, 20, 20], [0, 1, 1], [0, 3, 4]]
+  const names = [
+    B.name("Total", B.ref3d(xti.data, 0, 1)),
+    B.name("Block", B.area3d(xti.data, 1, 4, 0, 2)),
+    B.name("Span", B.area3d(xti.janToMar, 0, 9, 0, 0)),
+    B.name("Notes", B.ref3d(xti.notes, 0, 0)),
+    B.name("Accents", B.ref3d(xti.donnees, 0, 0)),
+    B.name("Rate", B.ref3d(xti.external, 0, 0)),
+    B.name("Gone", B.ref3d(xti.deleted, 0, 0)),
+    // no name on xti.outOfRange: SheetJS fails the whole read on one ("empty sheet name"); test/xlsb.test.ts covers it
+    B.name("Lost", B.refErr3d(xti.data)),
+    B.name("LostArea", B.areaErr3d(xti.data)),
+    B.name("Columns", B.area3d(xti.data, 0, 0xFFFFF, 0, 2)),
+    B.name("Secret", B.ref3d(xti.data, 4, 4), { hidden: true }),
+    B.name("Local", B.ref3d(xti.jan, 2, 2), { itab: 2 }),
+    B.name("Quoted", B.area3d(xti.marToNotes, 0, 0, 0, 1)),
+    B.name("Relative", B.ref3d(xti.data, 1, 0xC001)),
+    B.name("Calc", [0x1E, 42, 0]),
+    B.name("Print_Titles", B.area3d(xti.data, 0, 1, 0, 0x3FFF), { itab: 0, builtin: true }),
+    B.name("_FilterDatabase", B.area3d(xti.data, 0, 4, 0, 2), { itab: 0, builtin: true, hidden: true })
+  ]
+  const workbook = buf([
+    B.beginBook(), B.wbProp(false), B.record(0x8F),
+    ...sheetNames.map((n, k) => B.bundleSh(n, `rId${k + 1}`, n === "Hidden" ? 1 : n === "Very" ? 2 : 0, k + 1)),
+    B.record(0x90),
+    B.record(0x161), B.supSelf(), B.supBookSrc("rId20"), B.externSheet(xtis), B.record(0x162),
+    ...names, B.endBook()
+  ])
+  const externalLink = buf([B.record(0x168, [...B.u16(0), ...B.wide("rId1"), ...B.u32(0xFFFFFFFF)]), B.supTabs(["Rates"]), B.record(0x169)])
+  const sst = buf([B.beginSst(strings.length), ...strings.map(B.sstItem), B.record(0xA0)])
+  const styles = buf([
+    B.record(0x116), B.record(0x267, B.u32(2)), B.fmt(164, "0.000"), B.fmt(165, "yyyy-mm-dd hh:mm"), B.record(0x268),
+    B.record(0x269, B.u32(4)), B.xf(0), B.xf(14), B.xf(164), B.xf(165), B.record(0x26A), B.record(0x117)
+  ])
+  const ct = (part, type) => `<Override PartName="/${part}" ContentType="application/vnd.ms-excel.${type}"/>`
+  const files = [
+    ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-excel.sheet.binary.macroEnabled.main"/>${parts.map((_, k) => ct(`xl/worksheets/sheet${k + 1}.bin`, "worksheet")).join("")}${ct("xl/sharedStrings.bin", "sharedStrings")}${ct("xl/styles.bin", "styles")}${ct("xl/externalLinks/externalLink1.bin", "externalLink")}</Types>`],
+    ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.bin"/></Relationships>`],
+    ["xl/workbook.bin", workbook],
+    ["xl/_rels/workbook.bin.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${parts.map((_, k) => `<Relationship Id="rId${k + 1}" Type="${REL}/worksheet" Target="worksheets/sheet${k + 1}.bin"/>`).join("")}<Relationship Id="rId10" Type="${REL}/sharedStrings" Target="sharedStrings.bin"/><Relationship Id="rId11" Type="${REL}/styles" Target="styles.bin"/><Relationship Id="rId20" Type="${REL}/externalLink" Target="externalLinks/externalLink1.bin"/></Relationships>`],
+    ...parts.map((p, k) => [`xl/worksheets/sheet${k + 1}.bin`, Buffer.from(p.buffer, p.byteOffset, p.length)]),
+    ["xl/sharedStrings.bin", sst],
+    ["xl/styles.bin", styles],
+    ["xl/externalLinks/externalLink1.bin", externalLink]
+  ]
+  out("names_formulas.xlsb", zip(files),
+    "XLSB hand-built: every cell record (RK, real, inline, rich and shared strings, booleans, errors, blanks, the four formula results, the short cells), "
+    + "date styles, hidden rows and columns, merges, hidden and very hidden sheets, a self and an external book with its link part, and BrtNames: "
+    + "3-D refs and areas, sheet spans, quoted and non-ASCII sheet names, an external ref, a deleted sheet, deleted cells, whole rows "
+    + "and columns, built-in, scoped and hidden names, a non-reference formula")
+}
+
 // ---- index
 const index = { generator: "scripts/corpus/generate.mjs", sheetjs: XLSX.version, files: written.map((w) => {
   const buf = fs.readFileSync(path.join(OUT, w.name))
