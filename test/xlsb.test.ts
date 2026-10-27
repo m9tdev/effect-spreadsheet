@@ -144,6 +144,11 @@ describe("xlsb reader", () => {
     expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Number", 0], [1, "Number", 1], [3, "Number", 33]]]])
   })
 
+  it("the same column twice in a row gives one cell, the last", async () => {
+    const { sheets } = await readOk(one([B.rowHdr(0), B.rk(0, B.rkInt(1)), B.rk(0, B.rkInt(2))]))
+    expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Number", 2]]]])
+  })
+
   it("a row repeating its columns holds at most 2 x maxColumns cells", () => {
     const limits = { ...SpreadsheetLimits.defaults, maxColumns: 8 }
     const rows = new SheetRows({ part: "t.bin", strings: undefined, styles: { formats: [] }, date1904: false, limits })
@@ -320,6 +325,12 @@ describe("xlsb defined names", () => {
       { name: "Scoped", formula: "Data!$A$1", scope: 1, hidden: true },
       { name: "BadScope", formula: "Data!$A$1", hidden: false }
     ])
+  })
+
+  it("a union of two areas (print titles' form) isn't decompiled: \"\"", async () => {
+    const union = [...B.area3d(0, 0, 0xFFFFF, 0, 1), ...B.area3d(0, 0, 1, 0, 0x3FFF), 0x10]
+    const { wb } = await readOk({ sheets, globals: [B.supSelf(), B.externSheet([[0, 0, 0]]), B.name("Print_Titles", union, { itab: 0, builtin: true })] })
+    expect(wb.definedNames).toEqual([{ name: "_xlnm.Print_Titles", formula: "", scope: 0, hidden: false }])
   })
 
   it("without supporting books, XTIs of book 0 mean this workbook", async () => {
