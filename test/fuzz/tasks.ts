@@ -3,6 +3,8 @@ import { Effect, Stream } from "effect"
 import * as Csv from "../../src/csv/index.ts"
 import * as Spreadsheet from "../../src/Spreadsheet.ts"
 import { RecordReader } from "../../src/internal/biff/records.ts"
+import { readRichStr, readWideString } from "../../src/internal/biff12/fields.ts"
+import { readRecords } from "../../src/internal/biff12/records.ts"
 import { readRichString, SegmentReader } from "../../src/internal/biff/segments.ts"
 import { open as openCfb } from "../../src/internal/cfb/cfb.ts"
 import { open } from "../../src/internal/zip/archive.ts"
@@ -20,6 +22,7 @@ export type FuzzTask =
   | { readonly op: "zip"; readonly bytes: Uint8Array; readonly limits?: LimitOverrides | undefined }
   | { readonly op: "xml"; readonly chunks: ReadonlyArray<Uint8Array>; readonly limits?: LimitOverrides | undefined }
   | { readonly op: "cfb"; readonly bytes: Uint8Array; readonly limits?: LimitOverrides | undefined }
+  | { readonly op: "biff12"; readonly chunks: ReadonlyArray<Uint8Array>; readonly limits?: LimitOverrides | undefined }
   | {
     readonly op: "csv"
     readonly chunks: ReadonlyArray<Uint8Array>
@@ -76,6 +79,14 @@ export const effectOf = (task: FuzzTask): Effect.Effect<unknown, unknown> => {
           }
           return Effect.void
         }))
+    case "biff12":
+      // split the chunks into records and decode a wide string and a RichStr at the start of each
+      return Effect.flatMap(SpreadsheetLimits.resolve(task.limits), (limits) =>
+        readRecords(Stream.fromIterable(task.chunks), (record) => {
+          readWideString(record.data, 0, limits.maxStringLength)
+          readRichStr(record.data, 0, limits.maxStringLength)
+          return undefined
+        }, limits, "fuzz.bin"))
     case "xml":
       return Effect.flatMap(SpreadsheetLimits.resolve(task.limits), (limits) =>
         parse(Stream.fromIterable(task.chunks), ignore, limits, "fuzz.xml"))
