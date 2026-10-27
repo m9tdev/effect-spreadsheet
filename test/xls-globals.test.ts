@@ -470,6 +470,17 @@ describe("xls globals: long work yields", () => {
     expect(await texts(run.value)).toEqual(picks.map((k) => `t${k}`))
   })
 
+  it("an SST of long strings is read in batches of about BATCH_BYTES, not BATCH_RECORDS strings", async () => {
+    // 4 * BATCH_BYTES of 8 000-character strings, one per CONTINUE: a few hundred strings, a few batches
+    const count = Math.ceil((4 * BATCH_BYTES) / 8000)
+    const strings = Array.from({ length: count }, (_, k) => String(k).padStart(8000, "x"))
+    const run = await turns([sstHead(count), ...strings.map((s) => X.record(CONTINUE, X.xlString(s)))], [X.labelSst(0, 0, 0, count - 1)])
+    expect(count).toBeLessThan(BATCH_RECORDS)
+    expect(run.batches).toBeGreaterThanOrEqual(4)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+    expect(await texts(run.value)).toEqual([strings.at(-1)])
+  })
+
   it("a run of empty CONTINUEs after an SST yields within it", async () => {
     const records = 8 * BATCH_RECORDS
     const run = await turns([sstHead(0), ...Array.from({ length: records }, () => X.record(CONTINUE, []))])
