@@ -2,7 +2,7 @@
  * XLS vs the committed SheetJS expectations (test/corpus/expected, made by
  * scripts/corpus; no SheetJS needed here). For every xlsx fixture: sheet
  * names and visibility, every cell's type and value (dates by serial),
- * formulas, hidden rows and the cell count. Places listed in
+ * hidden rows and columns, merges, the dimension and the cell count. Places listed in
  * test/corpus/sheetjs-quirks.json use their `correct` value. Intended
  * differences are in docs/xls-oracle-differences.md.
  */
