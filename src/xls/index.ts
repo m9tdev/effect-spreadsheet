@@ -23,8 +23,10 @@
  * a number whose cell style has a date format is a `Date` (1900 or 1904
  * system), as in XLSX. `numFmt` is set from the cell style. Formula text is
  * not decompiled, so cells have no `formula`. Defined names give their
- * formula for single 3-D references and areas (`Sheet!$A$1:$B$2`), `""`
- * otherwise; BIFF5 workbooks give no defined names.
+ * formula for single 3-D references and areas, as Excel writes them in
+ * XLSX (`Sheet!$A$1:$B$2`, `'My Sheet'!$1:$2`, `[1]Data!$A:$A` for an
+ * external workbook, `#REF!$A$1` for a deleted sheet), `""` otherwise;
+ * BIFF5 workbooks give no defined names.
  *
  * BIFF2, BIFF3 and BIFF4 files (Excel 2.x-4.x) fail with
  * `UnsupportedFormat` naming the version; a password-protected workbook

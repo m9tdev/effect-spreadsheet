@@ -2,17 +2,17 @@
  * The workbook globals substream of a BIFF8 or BIFF5 workbook stream: sheet
  * list (BOUNDSHEET), code page, date system, number formats (FORMAT) and
  * cell styles (XF), the shared-string table (SST with CONTINUE), defined
- * names (NAME with EXTERNSHEET) and encryption (FILEPASS).
+ * names (NAME with EXTERNSHEET and SUPBOOK) and encryption (FILEPASS).
  *
  * The walk reads records from the first BOF to its EOF; every record
  * advances the reader. Limits: sheets, shared strings, string lengths, and
- * the SST's total size (maxDecompressedBytes).
+ * the SST's and each SUPBOOK's total size (maxDecompressedBytes).
  *
  * @internal
  */
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import { EOF, RecordReader, readBof } from "../biff/records.ts"
+import { type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
 import { codepageLabel, Fields, readString, type Text } from "./fields.ts"
@@ -26,6 +26,7 @@ const SST = 0x00FC
 const FILEPASS = 0x002F
 const NAME = 0x0018
 const EXTERNSHEET = 0x0017
+const SUPBOOK = 0x01AE
 
 export type SheetKind = "worksheet" | "macrosheet" | "chartsheet" | "other"
 
@@ -55,6 +56,10 @@ export interface Globals {
   readonly definedNames: ReadonlyArray<DefinedNameEntry>
 }
 
+/** A string longer than maxStringLength (`actual` when its length is known). */
+const tooLong = (limits: Limits, actual = limits.maxStringLength + 1) =>
+  new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual })
+
 const malformed = (reason: string, offset?: number) =>
   new MalformedFile({ format: "xls", part: "workbook globals", reason, ...(offset === undefined ? {} : { offset }) })
 
@@ -64,7 +69,72 @@ const BUILTIN_NAMES = [
   "Print_Titles", "Recorder", "Data_Form", "Auto_Activate", "Auto_Deactivate", "Sheet_Title", "_FilterDatabase"
 ]
 
-const quoteSheet = (name: string): string => (/^[A-Za-z_][A-Za-z0-9_.]*$/.test(name) ? name : `'${name.replace(/'/g, "''")}'`)
+/**
+ * A SUPBOOK record: the workbook itself, an add-in's functions, or an
+ * external workbook (or DDE/OLE link). `link` numbers the external ones
+ * from 1, in record order, as XLSX numbers its external links (`[1]`).
+ */
+type Book =
+  | { readonly kind: "self" }
+  | { readonly kind: "addin" }
+  | { readonly kind: "external"; readonly link: number; readonly sheets: ReadonlyArray<string> }
+
+const SELF: Book = { kind: "self" }
+
+/** An EXTERNSHEET entry (XTI): a SUPBOOK and a range of its sheets. */
+interface Xti {
+  readonly book: number
+  readonly first: number
+  readonly last: number
+}
+
+/** Reads a SUPBOOK (with its CONTINUEs): `ctab`, then a marker, or a path and `ctab` sheet names. */
+const readSupbook = (record: ContinuedRecord, link: number, maxLength: number): Book | null => {
+  const marker = new Fields(record.data).u16(2)
+  if (marker === 0x0401) return SELF
+  if (marker === 0x3A01) return { kind: "addin" }
+  const segments = new SegmentReader(record.segments)
+  const ctab = segments.u16() ?? 0
+  const path = readRichString(segments, maxLength) // the path's character count is the marker's place
+  if (path === null) return null
+  const sheets: Array<string> = []
+  // progress: k up to ctab; each name consumes at least 3 bytes, or the loop ends
+  for (let k = 0; path !== undefined && k < ctab; k++) {
+    const name = readRichString(segments, maxLength)
+    if (name === null) return null
+    if (name === undefined) break // fewer names than declared: keep those read
+    sheets.push(name)
+  }
+  return { kind: "external", link, sheets }
+}
+
+/**
+ * Whether a sheet name needs quotes in a reference, as Excel writes them:
+ * when it isn't name-like (a letter or `_` first, then letters, digits, `_`
+ * and `.`; characters beyond ASCII count as letters), or when it reads as
+ * a cell reference (`A1`, up to column XFD) or an R1C1 one (`R`, `C2`,
+ * `R1C1`).
+ */
+const needsQuotes = (name: string): boolean => {
+  if (!/^[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_.\u0080-\uFFFF]*$/.test(name)) return true
+  if (/^(?:R\d*|C\d*|R\d*C\d*)$/i.test(name)) return true
+  const a1 = /^([A-Za-z]{1,3})\d+$/.exec(name)
+  return a1 !== null && columnNumber(a1[1]!) <= 16384
+}
+
+/** A sheet prefix (`Sheet!`, `'My Sheet'!`, `Jan:Mar!`, `[1]Data!`): quoted as a whole when any sheet name needs it. */
+const sheetPrefix = (book: string, names: ReadonlyArray<string>): string => {
+  const text = book + names.join(":")
+  return names.some(needsQuotes) ? `'${text.replace(/'/g, "''")}'!` : `${text}!`
+}
+
+/** The column number of letters (`A` 1, `XFD` 16384). */
+const columnNumber = (letters: string): number => {
+  let n = 0
+  // progress: k up to letters.length
+  for (let k = 0; k < letters.length; k++) n = n * 26 + (letters.toUpperCase().charCodeAt(k) - 64)
+  return n
+}
 
 const column = (c: number): string => {
   let out = ""
@@ -77,39 +147,57 @@ const column = (c: number): string => {
   return out
 }
 
-/** A cell reference from a BIFF8 row and column word (bit 14: column relative, bit 15: row relative). */
-const ref = (row: number, col: number): string =>
-  `${(col & 0x4000) !== 0 ? "" : "$"}${column(col & 0x00FF)}${(col & 0x8000) !== 0 ? "" : "$"}${row + 1}`
+/** A column or row of a BIFF8 reference: its column word has bit 14 for a relative column, bit 15 for a relative row. */
+const colText = (col: number): string => `${(col & 0x4000) !== 0 ? "" : "$"}${column(col & 0x3FFF)}`
+const rowText = (row: number, col: number): string => `${(col & 0x8000) !== 0 ? "" : "$"}${row + 1}`
+const cellText = (row: number, col: number): string => colText(col) + rowText(row, col)
+
+/** BIFF8 sheets: rows 0-65535, columns 0-255. */
+const LAST_ROW = 0xFFFF
+const LAST_COL = 0xFF
+
+/** An area: whole rows as `$1:$2`, whole columns as `$A:$B`, else `$A$1:$B$2`. */
+const areaText = (r1: number, r2: number, c1: number, c2: number): string => {
+  if ((c1 & 0x3FFF) === 0 && (c2 & 0x3FFF) === LAST_COL) return `${rowText(r1, c1)}:${rowText(r2, c2)}`
+  if (r1 === 0 && r2 === LAST_ROW) return `${colText(c1)}:${colText(c2)}`
+  return `${cellText(r1, c1)}:${cellText(r2, c2)}`
+}
 
 /**
  * The formula of a defined name, for the forms names usually take: a
- * single 3-D reference or area (`Sheet!$A$1`, `Sheet!$A$1:$B$2`). Anything
- * else gives `""` (formulas aren't decompiled).
+ * single 3-D reference or area, written as Excel writes it in XLSX
+ * (`Sheet!$A$1`, `'My Sheet'!$A$1:$B$2`, `Jan:Mar!$A$1`, `[1]Data!$A:$A`).
+ * A reference to a deleted or missing sheet gives `#REF!$A$1`; one whose
+ * EXTERNSHEET entry is missing gives `""`, like anything else (formulas
+ * aren't decompiled). With no SUPBOOK at all (writers that leave it out),
+ * the entries of SUPBOOK 0 are taken to point at this workbook.
  */
 const nameFormula = (
   rgce: Uint8Array,
-  externSheets: ReadonlyArray<number>,
+  xtis: ReadonlyArray<Xti>,
+  books: ReadonlyArray<Book>,
   sheets: ReadonlyArray<SheetEntry>
 ): string => {
   const f = new Fields(rgce)
   const ptg = f.u8(0)
-  const sheet = (ixti: number | undefined) => {
-    const itab = ixti === undefined ? undefined : externSheets[ixti]
-    const entry = itab === undefined ? undefined : sheets[itab]
-    return entry === undefined ? undefined : quoteSheet(entry.name)
+  const prefix = (ixti: number): string | undefined => {
+    const xti = xtis[ixti]
+    if (xti === undefined) return undefined
+    const book = books.length === 0 && xti.book === 0 ? SELF : books[xti.book]
+    if (book === undefined || book.kind === "addin") return "#REF!"
+    const names = book.kind === "self" ? sheets.map((s) => s.name) : book.sheets
+    const first = names[xti.first]
+    const last = names[xti.last]
+    if (first === undefined || last === undefined || xti.last < xti.first) return "#REF!"
+    return sheetPrefix(book.kind === "self" ? "" : `[${book.link}]`, xti.first === xti.last ? [first] : [first, last])
   }
   if ((ptg === 0x3A || ptg === 0x5A || ptg === 0x7A) && rgce.length === 7) {
-    const name = sheet(f.u16(1))
-    const row = f.u16(3)
-    const col = f.u16(5)
-    if (name !== undefined && row !== undefined && col !== undefined) return `${name}!${ref(row, col)}`
+    const sheet = prefix(f.u16(1)!)
+    return sheet === undefined ? "" : sheet + cellText(f.u16(3)!, f.u16(5)!)
   }
   if ((ptg === 0x3B || ptg === 0x5B || ptg === 0x7B) && rgce.length === 11) {
-    const name = sheet(f.u16(1))
-    const [r1, r2, c1, c2] = [f.u16(3), f.u16(5), f.u16(7), f.u16(9)]
-    if (name !== undefined && r1 !== undefined && r2 !== undefined && c1 !== undefined && c2 !== undefined) {
-      return `${name}!${ref(r1, c1)}:${ref(r2, c2)}`
-    }
+    const sheet = prefix(f.u16(1)!)
+    return sheet === undefined ? "" : sheet + areaText(f.u16(3)!, f.u16(5)!, f.u16(7)!, f.u16(9)!)
   }
   return ""
 }
@@ -133,7 +221,9 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
   const xfFormats: Array<number> = []
   let strings: Array<string> = []
   const names: Array<{ name: string; hidden: boolean; scope: number | undefined; rgce: Uint8Array }> = []
-  let externSheets: Array<number> = []
+  const books: Array<Book> = []
+  let externalBooks = 0
+  let xtis: Array<Xti> = []
 
   // progress: every iteration reads one record (the reader's offset grows)
   for (;;) {
@@ -159,11 +249,21 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
       for (let k = 0; k < unique; k++) {
         const value = readRichString(segments, limits.maxStringLength)
         if (value === null) {
-          return new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: limits.maxStringLength + 1 })
+          return tooLong(limits)
         }
         if (value === undefined) break // fewer strings than declared: keep those read
         strings.push(value)
       }
+      continue
+    }
+    if (type === SUPBOOK && biff8) {
+      const supbook = reader.nextWithContinues(limits.maxDecompressedBytes, "maxDecompressedBytes")
+      if (supbook === undefined) return malformed("the workbook globals have no EOF")
+      if (supbook instanceof MalformedFile || supbook instanceof LimitExceeded) return supbook
+      const book = readSupbook(supbook, externalBooks + 1, limits.maxStringLength)
+      if (book === null) return tooLong(limits)
+      if (book.kind === "external") externalBooks++
+      books.push(book)
       continue
     }
     const record = reader.next()
@@ -194,7 +294,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
         if (offset === undefined || state === undefined || dt === undefined || name === undefined) {
           return malformed("truncated BOUNDSHEET", record.offset)
         }
-        if (name === null) return new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: limits.maxStringLength + 1 })
+        if (name === null) return tooLong(limits)
         if (dt === 6) continue // a VB module, not a sheet
         sheets.push({
           name: name.value,
@@ -216,9 +316,11 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
       case EXTERNSHEET: {
         if (!biff8) continue
         const count = f.u16(0) ?? 0
-        externSheets = []
+        xtis = []
         // progress: k up to count; each entry is 6 bytes inside the record
-        for (let k = 0; k < count && 2 + 6 * k + 6 <= record.data.length; k++) externSheets.push(f.u16(2 + 6 * k + 2)!)
+        for (let k = 0; k < count && 2 + 6 * k + 6 <= record.data.length; k++) {
+          xtis.push({ book: f.u16(2 + 6 * k)!, first: f.u16(2 + 6 * k + 2)!, last: f.u16(2 + 6 * k + 4)! })
+        }
         continue
       }
       case NAME: {
@@ -254,7 +356,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
     strings,
     definedNames: names.map((n) => ({
       name: n.name,
-      formula: nameFormula(n.rgce, externSheets, sheets),
+      formula: nameFormula(n.rgce, xtis, books, sheets),
       hidden: n.hidden,
       scope: n.scope !== undefined && n.scope < sheets.length ? n.scope : undefined
     }))
