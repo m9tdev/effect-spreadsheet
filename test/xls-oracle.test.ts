@@ -2,7 +2,8 @@
  * XLS vs the committed SheetJS expectations (test/corpus/expected, made by
  * scripts/corpus; no SheetJS needed here). For every BIFF8/BIFF5 fixture: sheet
  * names and visibility, every cell's type and value (dates by serial),
- * hidden rows and columns, merges, the dimension and the cell count. Places listed in
+ * hidden rows and columns, merges, the dimension, the cell count and the
+ * defined names (name, scope, formula text, hidden). Places listed in
  * test/corpus/sheetjs-quirks.json use their `correct` value. Intended
  * differences are in docs/xls-oracle-differences.md.
  */
@@ -25,10 +26,22 @@ interface OracleCell {
   readonly f?: string
 }
 
+interface OracleName {
+  readonly name: string
+  readonly ref: unknown
+  readonly sheet?: number
+  readonly hidden?: boolean
+}
+
 interface Expected {
   readonly status: string
   readonly path: string
-  readonly workbook: { readonly date1904: boolean; readonly sheets: ReadonlyArray<{ name: string; visibility: string }> }
+  readonly workbook: {
+    readonly date1904: boolean
+    readonly sheets: ReadonlyArray<{ name: string; visibility: string }>
+    /** SheetJS's wb.Workbook.Names, only in files that have some. */
+    readonly names?: ReadonlyArray<OracleName>
+  }
   readonly sheets: ReadonlyArray<{
     readonly name: string
     readonly hiddenRows: ReadonlyArray<number>
@@ -48,6 +61,32 @@ interface Quirk {
 }
 
 const quirks = (JSON.parse(readFileSync("test/corpus/sheetjs-quirks.json", "utf8")) as { quirks: ReadonlyArray<Quirk> }).quirks
+
+/**
+ * Defined names where we differ from SheetJS on purpose (docs/xls-oracle-differences.md),
+ * by fixture and name: SheetJS's value, ours, and why. Each entry must match both readers
+ * and name a name SheetJS reports, so the list can't go stale.
+ */
+interface NameDifference {
+  readonly formula?: readonly [sheetjs: unknown, ours: string]
+  readonly hidden?: readonly [sheetjs: boolean | undefined, ours: boolean]
+  readonly why: string
+}
+const nameDifferences: Record<string, Record<string, NameDifference>> = {
+  "generated/names_formulas.xls": {
+    Span: { formula: ["'Jan:Mar'!$A$1:$A$10", "Jan:Mar!$A$1:$A$10"], why: "a sheet span is quoted only when a sheet name needs it, as Excel writes it" },
+    Accents: { formula: ["'Données'!$A$1", "Données!$A$1"], why: "letters beyond ASCII don't need quotes in Excel" },
+    Rate: { formula: ["Rates!$A$1", "[1]Rates!$A$1"], why: "an external workbook keeps its [n] (n-th external SUPBOOK), as in XLSX" },
+    Missing: { formula: ["SH33TJSERR3!$A$1", "#REF!$A$1"], why: "a sheet index past the workbook's sheets is a deleted sheet (SheetJS writes a placeholder name)" },
+    Lost: { formula: ["#REF!", "Data!#REF!"], why: "PtgRefErr3d keeps its sheet, as Excel writes it" },
+    Columns: { formula: ["Data!$A$1:$C$65536", "Data!$A:$C"], why: "whole columns as $A:$C, as Excel writes them" },
+    Calc: { formula: [42, ""], why: "formulas other than a single reference or area aren't decompiled" },
+    Secret: { hidden: [undefined, true], why: "the hidden flag comes from the NAME's fHidden; SheetJS never reports it for xls names" },
+    "_xlnm._FilterDatabase": { hidden: [undefined, true], why: "the hidden flag comes from the NAME's fHidden; SheetJS never reports it for xls names" }
+  }
+}
+
+const errorText = new Map([[0x00, "#NULL!"], [0x07, "#DIV/0!"], [0x0F, "#VALUE!"], [0x17, "#REF!"], [0x1D, "#NAME?"], [0x24, "#NUM!"], [0x2A, "#N/A"], [0x2B, "#GETTING_DATA"]])
 
 const DAY_MS = 86_400_000
 /** Our Date back to a serial, the inverse of serialToDate. */
@@ -87,7 +126,9 @@ const readAll = (bytes: Uint8Array) =>
 
 describe("xls vs the committed SheetJS expectations", () => {
   it("covers every committed xls fixture", () => {
-    expect(fixtures.length).toBeGreaterThanOrEqual(7)
+    expect(fixtures.length).toBeGreaterThanOrEqual(8)
+    const files = fixtures.map(([source, name]) => `${source}/${name.replace(/\.json$/, "")}`)
+    expect(Object.keys(nameDifferences).filter((f) => !files.includes(f))).toEqual([])
   })
 
   for (const [source, name] of fixtures) {
@@ -98,6 +139,24 @@ describe("xls vs the committed SheetJS expectations", () => {
       const { wb, sheets, details } = await readAll(new Uint8Array(readFileSync(`test/corpus/${file}`)))
       expect(wb.format).toBe("xls")
       expect(wb.sheets.map((s) => ({ name: s.name, visibility: s.visibility }))).toEqual(expected.workbook.sheets)
+      // defined names: name, scope, formula (SheetJS's without a leading "=") and hidden, in file order
+      const differences = nameDifferences[file] ?? {}
+      const oracleNames = (expected.workbook.names ?? []).map((n) => {
+        const ref = typeof n.ref === "string" ? n.ref.replace(/^=/, "") : n.ref
+        const d = differences[n.name]
+        if (d?.formula !== undefined) expect(ref, `${n.name}: SheetJS formula`).toEqual(d.formula[0])
+        if (d?.hidden !== undefined) expect(n.hidden, `${n.name}: SheetJS hidden`).toBe(d.hidden[0])
+        return {
+          name: n.name,
+          formula: d?.formula !== undefined ? d.formula[1] : ref,
+          ...(n.sheet === undefined ? {} : { scope: n.sheet }),
+          hidden: d?.hidden !== undefined ? d.hidden[1] : n.hidden ?? false
+        }
+      })
+      expect(wb.definedNames).toEqual(oracleNames)
+      // every listed difference is about a name SheetJS reports, so the list can't go stale
+      const reported = new Set((expected.workbook.names ?? []).map((n) => n.name))
+      expect(Object.keys(differences).filter((n) => !reported.has(n)), "unused name differences").toEqual([])
       const date1904 = expected.workbook.date1904
       expected.sheets.forEach((oracle, k) => {
         const rows = sheets[k]!
@@ -123,7 +182,8 @@ describe("xls vs the committed SheetJS expectations", () => {
               expect([mine!._tag, (mine as Cell.BooleanCell).value], where).toEqual(["Boolean", value])
               break
             case "e":
-              expect([mine!._tag, (mine as Cell.ErrorCell).value], where).toEqual(["Error", cell.w])
+              // SheetJS gives no `w` for a formula's error result: name its code (MS-XLS BErr)
+              expect([mine!._tag, (mine as Cell.ErrorCell).value], where).toEqual(["Error", cell.w ?? errorText.get(value as number)])
               break
             case "n":
               if (mine!._tag === "Date") {
