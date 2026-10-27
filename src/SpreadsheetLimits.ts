@@ -31,7 +31,11 @@ export interface Limits {
   readonly inflateFloorBytes: number
   /** Entries in a zip central directory. */
   readonly maxZipEntries: number
-  /** Sheets in a workbook. */
+  /**
+   * Sheets in a workbook. In XLS, VB module BOUNDSHEETs (not sheets) are
+   * counted separately against the same bound: up to `maxSheets` sheets
+   * and up to `maxSheets` modules.
+   */
   readonly maxSheets: number
   /** Rows per sheet: row indexes must be `< maxRows`. */
   readonly maxRows: number
@@ -93,7 +97,7 @@ export type LimitOverrides = { readonly [K in keyof Limits]?: number | undefined
  * | maxRecordFields | 1 048 576 | defval fills per toRecords run: ~1M keys, well under a second |
  * | maxStringLength | 262 144 | 8x Excel's 32 767-character cell limit, room for CSV blobs |
  * | maxSharedStrings | 5 000 000 | |
- * | maxDefinedNames | 500 000 | ~90x the most in a 1 200-workbook corpus (5 576); a name costs ~80 bytes kept, ~300 while reading |
+ * | maxDefinedNames | 500 000 | ~90x the most in about 2 300 real-world workbooks (1 228 of them XLS): at most 5 576 names, in an XLS (213 in an XLSX); a name costs ~80 bytes kept, ~300 while reading |
  * | maxXmlDepth | 128 | worksheet XML is about 6 levels deep |
  * | maxXmlAttributes | 512 | |
  * | maxSectorChain | 1 048 576 | 512 MiB of 512-byte sectors |
