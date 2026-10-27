@@ -151,8 +151,8 @@ describe("xls defined names: which workbook a reference points at", () => {
   it("SUPBOOK strings and sizes are limited", async () => {
     const long = { globals: [selfBook(1), externalBook("\u0001p.xls", ["x".repeat(40)])], sheets: sheets("S") }
     expect(await errorOf(long, { maxStringLength: 20 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
-    // the path too
-    const longPath = { globals: [selfBook(1), externalBook(`\u0001${"p".repeat(40)}.xls`, ["x"])], sheets: sheets("S") }
+    // the path too: a book with no sheet names, so only the path can be too long
+    const longPath = { globals: [selfBook(1), externalBook(`\u0001${"p".repeat(40)}.xls`, [])], sheets: sheets("S") }
     expect(await errorOf(longPath, { maxStringLength: 20 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
     const names = Array.from({ length: 100 }, (_, k) => `Sheet${k}`)
     const big = { globals: [X.record(SUPBOOK, [...X.u16(100), ...X.xlString("\u0001p.xls")]), X.record(CONTINUE, names.flatMap(X.xlString))], sheets: sheets("S") }
