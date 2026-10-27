@@ -313,6 +313,15 @@ describe("cfb: hostile and broken files", () => {
     expect(readOk(openOk(trimmed), "Odd")).toEqual(pseudoRandom(100, 3))
   })
 
+  it("a stream starting at a DIFAT sector claims a sector the container owns", () => {
+    const layout = writeCfb([{ name: "Workbook", data: new Uint8Array(110 * 128 * 512) }, { name: "Other", data: new Uint8Array(5000) }])
+    expect(layout.difatSectors.length).toBe(1)
+    const bytes = layout.bytes.slice()
+    patch32(bytes, sectorOffset(layout.directorySectors[0]!) + layout.streams.get("Other")!.id * 128 + 116, layout.difatSectors[0]!)
+    const cfb = openOk(bytes)
+    expect(reasonOf(cfb.read(cfb.find("Other")!))).toMatch(/belongs to two streams/)
+  })
+
   it("deeply nested storages stop at maxStorageDepth (paths would cost depth²)", () => {
     let item: CfbItem = { name: "leaf", data: new Uint8Array([1]) }
     for (let k = 0; k < 10_000; k++) item = { name: `s${k % 10}`, children: [item] }
