@@ -1,7 +1,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { CONTINUE, RecordReader, readBof } from "../src/internal/biff/records.ts"
-import { readRichString, SegmentReader } from "../src/internal/biff/segments.ts"
+import { readRichString, SegmentReader, type Segments } from "../src/internal/biff/segments.ts"
 import { LimitExceeded, MalformedFile } from "../src/SpreadsheetError.ts"
 
 const record = (type: number, data: ReadonlyArray<number> | Uint8Array): Uint8Array => {
@@ -12,6 +12,9 @@ const record = (type: number, data: ReadonlyArray<number> | Uint8Array): Uint8Ar
   out.set(data, 4)
   return out
 }
+const listSegments = (s: Segments): Array<Array<number>> =>
+  Array.from({ length: s.count }, (_, k) => Array.from(s.bytes.subarray(s.bounds[2 * k]!, s.bounds[2 * k + 1]!)))
+
 const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array => {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
   let at = 0
@@ -66,12 +69,50 @@ describe("biff records", () => {
     const stream = concat([record(0x00FC, [1]), record(CONTINUE, [2, 3]), record(CONTINUE, []), record(CONTINUE, [4]), record(0x00FF, [9])])
     const reader = new RecordReader(stream, "Workbook")
     const sst = reader.nextWithContinues(100, "maxDecompressedBytes")
-    expect(sst && !(sst instanceof MalformedFile) && !(sst instanceof LimitExceeded) && sst.segments.map((s) => Array.from(s))).toEqual([[1], [2, 3], [], [4]])
+    // the empty CONTINUE continues nothing and is dropped
+    expect(sst && !(sst instanceof MalformedFile) && !(sst instanceof LimitExceeded) && listSegments(sst.segments)).toEqual([[1], [2, 3], [4]])
     expect(reader.peekType()).toBe(0x00FF)
     // 4 records' headers + 4 bytes = 20: 19 is over, under the caller's name
     const limited = new RecordReader(stream, "Workbook").nextWithContinues(19, "maxDecompressedBytes")
     expect(limited).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 19, actual: 20 })
     expect(new RecordReader(stream, "Workbook").nextWithContinues(20, "x")).toMatchObject({ type: 0x00FC })
+  })
+
+  it("10 million empty CONTINUEs (40 MB) under a 1 GiB cap: no storage per empty segment", () => {
+    const stream = new Uint8Array(4 + 1 + 10_000_000 * 4)
+    const v = new DataView(stream.buffer)
+    v.setUint16(0, 0x00FC, true)
+    v.setUint16(2, 1, true)
+    for (let k = 0; k < 10_000_000; k++) v.setUint16(5 + 4 * k, CONTINUE, true)
+    const reader = new RecordReader(stream, "Workbook")
+    const result = reader.nextWithContinues(1024 * 1024 * 1024, "maxDecompressedBytes")
+    if (result === undefined || "_tag" in result) throw new Error("expected a record")
+    expect(reader.records).toBe(10_000_001)
+    expect(result.segments.count).toBe(1)
+    expect(result.segments.bounds.byteLength).toBe(8)
+    expect(result.segments.bytes).toBe(stream) // ranges of the stream, no copy
+  })
+
+  it("1-byte CONTINUEs cost 8 bytes of storage each, under 2x the input", () => {
+    const n = 1_000_000
+    const stream = new Uint8Array(4 + 1 + n * 5)
+    const v = new DataView(stream.buffer)
+    v.setUint16(0, 0x00FC, true)
+    v.setUint16(2, 1, true)
+    for (let k = 0; k < n; k++) {
+      v.setUint16(5 + 5 * k, CONTINUE, true)
+      v.setUint16(7 + 5 * k, 1, true)
+      stream[9 + 5 * k] = k & 0xFF
+    }
+    const result = new RecordReader(stream, "Workbook").nextWithContinues(1024 * 1024 * 1024, "maxDecompressedBytes")
+    if (result === undefined || "_tag" in result) throw new Error("expected a record")
+    expect(result.segments.count).toBe(n + 1)
+    expect(result.segments.bounds.byteLength).toBe(8 * (n + 1))
+    expect(result.segments.bounds.byteLength).toBeLessThan(2 * stream.length)
+    const r = new SegmentReader(result.segments)
+    expect(r.remaining()).toBe(n + 1)
+    r.skip(1)
+    expect([r.u8(), r.u8(), r.u8()]).toEqual([0, 1, 2])
   })
 
   it("empty CONTINUE records count against the limit (4 bytes each)", () => {

@@ -29,20 +29,54 @@ const compressed = (bytes: Uint8Array): string => {
   return out
 }
 
+/**
+ * Segments without an object per segment: `count` byte ranges of `bytes`,
+ * the k-th from `bounds[2k]` to `bounds[2k + 1]` (exclusive). Storage is 8
+ * bytes per segment, whatever their number.
+ */
+export interface Segments {
+  readonly bytes: Uint8Array
+  readonly bounds: Uint32Array
+  readonly count: number
+}
+
+/** Segments from separate arrays (copied into one buffer); for tests and small inputs. */
+export const segmentsOf = (parts: ReadonlyArray<Uint8Array>): Segments => {
+  let total = 0
+  // progress: one part per iteration
+  for (const part of parts) total += part.length
+  const bytes = new Uint8Array(total)
+  const bounds = new Uint32Array(2 * parts.length)
+  let at = 0
+  parts.forEach((part, k) => {
+    bytes.set(part, at)
+    bounds[2 * k] = at
+    at += part.length
+    bounds[2 * k + 1] = at
+  })
+  return { bytes, bounds, count: parts.length }
+}
+
 export class SegmentReader {
-  private readonly segments: ReadonlyArray<Uint8Array>
+  private readonly bytes: Uint8Array
+  private readonly bounds: Uint32Array
+  private readonly count: number
   private segment = 0
+  /** Offset within the current segment. */
   private at = 0
   /** Bytes not yet read, over all segments. */
   private left: number
   /** Set when a read ran past the end; every later read fails too. */
   failed = false
 
-  constructor(segments: ReadonlyArray<Uint8Array>) {
-    this.segments = segments
+  constructor(segments: Segments | ReadonlyArray<Uint8Array>) {
+    const s = "bounds" in segments ? segments : segmentsOf(segments)
+    this.bytes = s.bytes
+    this.bounds = s.bounds
+    this.count = s.count
     let n = 0
-    // progress: one segment per iteration
-    for (const segment of segments) n += segment.length
+    // progress: k up to count
+    for (let k = 0; k < s.count; k++) n += s.bounds[2 * k + 1]! - s.bounds[2 * k]!
     this.left = n
   }
 
@@ -51,14 +85,18 @@ export class SegmentReader {
     return this.left
   }
 
+  private length(k: number): number {
+    return this.bounds[2 * k + 1]! - this.bounds[2 * k]!
+  }
+
   /** Moves to the next non-empty segment when the current one is used up; false at the end. */
   private settle(): boolean {
-    // progress: segment increases up to segments.length
-    while (this.segment < this.segments.length && this.at >= this.segments[this.segment]!.length) {
+    // progress: segment increases up to count
+    while (this.segment < this.count && this.at >= this.length(this.segment)) {
       this.segment++
       this.at = 0
     }
-    return this.segment < this.segments.length
+    return this.segment < this.count
   }
 
   /** Whether the cursor sits at the start of a segment other than the first (a CONTINUE boundary). */
@@ -72,7 +110,7 @@ export class SegmentReader {
       return undefined
     }
     this.left--
-    return this.segments[this.segment]![this.at++]
+    return this.bytes[this.bounds[2 * this.segment]! + this.at++]
   }
 
   u16(): number | undefined {
@@ -96,7 +134,7 @@ export class SegmentReader {
         this.failed = true
         return false
       }
-      const step = Math.min(left, this.segments[this.segment]!.length - this.at)
+      const step = Math.min(left, this.length(this.segment) - this.at)
       this.at += step
       this.left -= step
       left -= step
@@ -130,15 +168,15 @@ export class SegmentReader {
         }
         wide = (option & 0x01) !== 0
       }
-      const data = this.segments[this.segment]!
+      const base = this.bounds[2 * this.segment]!
       const width = wide ? 2 : 1
-      const fit = Math.floor((data.length - this.at) / width)
+      const fit = Math.floor((this.length(this.segment) - this.at) / width)
       if (fit === 0) {
         this.failed = true // half a 16-bit character at the end of a segment
         return undefined
       }
       const take = Math.min(left, fit)
-      const slice = data.subarray(this.at, this.at + take * width)
+      const slice = this.bytes.subarray(base + this.at, base + this.at + take * width)
       parts.push(wide ? utf16.decode(slice) : compressed(slice))
       this.at += take * width
       this.left -= take * width

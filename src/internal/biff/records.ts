@@ -14,6 +14,7 @@
  * @internal
  */
 import { LimitExceeded, MalformedFile } from "../../SpreadsheetError.ts"
+import type { Segments } from "./segments.ts"
 
 export const CONTINUE = 0x003C
 export const BOF_BIFF5_8 = 0x0809
@@ -28,8 +29,12 @@ export interface BiffRecord {
 
 /** A record and the data of the `CONTINUE` records right after it. */
 export interface ContinuedRecord extends BiffRecord {
-  /** `data` first, then each `CONTINUE`'s data. */
-  readonly segments: ReadonlyArray<Uint8Array>
+  /**
+   * `data` first, then each non-empty `CONTINUE`'s data, as ranges of the
+   * stream (8 bytes of storage per segment; empty CONTINUEs are dropped,
+   * they continue nothing).
+   */
+  readonly segments: Segments
 }
 
 export class RecordReader {
@@ -79,18 +84,36 @@ export class RecordReader {
   nextWithContinues(maxBytes: number, limit: string): ContinuedRecord | undefined | MalformedFile | LimitExceeded {
     const first = this.next()
     if (first === undefined || first instanceof MalformedFile) return first
-    const segments = [first.data]
+    // ranges of the stream, in a growable array: no object per segment
+    let bounds = new Uint32Array(16)
+    bounds[0] = first.offset + 4
+    bounds[1] = first.offset + 4 + first.data.length
+    let count = 1
     let total = 4 + first.data.length
-    // progress: each iteration reads one record (offset advances)
-    while (this.peekType() === CONTINUE) {
-      const next = this.next()
-      if (next === undefined) break
-      if (next instanceof MalformedFile) return next
-      total += 4 + next.data.length
+    const bytes = this.bytes
+    // progress: each iteration consumes one CONTINUE record (offset grows by 4 + length)
+    while (this.offset + 4 <= bytes.length && this.view.getUint16(this.offset, true) === CONTINUE) {
+      const at = this.offset
+      const length = this.view.getUint16(at + 2, true)
+      const end = at + 4 + length
+      if (end > bytes.length) {
+        return new MalformedFile({ format: "xls", part: this.part, offset: at, reason: "record 0x3c runs past the end of the stream" })
+      }
+      this.offset = end
+      this.records++
+      total += 4 + length
       if (total > maxBytes) return new LimitExceeded({ limit, max: maxBytes, actual: total })
-      segments.push(next.data)
+      if (length === 0) continue // nothing to continue: the offset advanced above
+      if (2 * count + 2 > bounds.length) {
+        const grown = new Uint32Array(bounds.length * 2)
+        grown.set(bounds)
+        bounds = grown
+      }
+      bounds[2 * count] = at + 4
+      bounds[2 * count + 1] = end
+      count++
     }
-    return { ...first, segments }
+    return { ...first, segments: { bytes, bounds: bounds.slice(0, 2 * count), count } }
   }
 }
 
