@@ -124,6 +124,13 @@ describe("xlsb reader", () => {
     ])
   })
 
+  it("record 0x003F isn't a cell (no short rich string): it adds nothing and doesn't move the short cells' column", async () => {
+    // laid out as a short rich string would be: style u32, flags byte, wide string
+    const r3f = B.record(0x3F, [...B.u32(0), 1, ...B.wide("not a cell")])
+    const { sheets } = await readOk(one([B.rowHdr(0), B.rk(2, B.rkInt(1)), r3f, B.shortRk(B.rkInt(2)), B.rowHdr(1), r3f]))
+    expect(values(sheets[0]!)).toEqual([[0, false, [[2, "Number", 1], [3, "Number", 2]]], [1, false, []]])
+  })
+
   it("rows are sparse: rows left out aren't emitted, rows without cells are; far cells cost one cell", async () => {
     const { sheets, details } = await readOk({
       sheets: [{ name: "S", part: B.sheetBin([B.rowHdr(0), B.rk(0, B.rkInt(1)), B.rowHdr(5), B.rowHdr(1048575), B.rk(16383, B.rkInt(2))], { before: [B.wsDim(0, 1048575, 0, 16383)] }) }]

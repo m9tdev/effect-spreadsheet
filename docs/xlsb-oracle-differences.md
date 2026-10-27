@@ -40,7 +40,7 @@ These are the intended differences:
 | -0 | `0` | `-0` |
 | an unknown error code | `Error` cell `#N/A` | an error cell with that code |
 | BrtCellBlank / BrtShortBlank (styled blanks) | `Empty` cells | stub cells (`t: "z"`), even with `sheetStubs: false` |
-| short cell records (BrtShortBlank ... BrtShortIsst, 0x000C-0x0012, and 0x003F taken as the short rich string) | read with no column field: the previous cell's column + 1, then a 4-byte style and the value. None occur in the corpus; SheetJS reads the synthetic ones in `names_formulas.xlsb` the same way (0x003F isn't in that fixture, so it is unconfirmed) | same columns and values |
+| short cell records (BrtShortBlank ... BrtShortIsst, 0x000C-0x0012) | read with no column field: the previous cell's column + 1, then a 4-byte style and the value. None occur in the corpus; SheetJS reads the synthetic ones in `names_formulas.xlsb` the same way | same columns and values |
 | record numbers of cells inside future-record blocks (BrtFRTBegin ... BrtFRTEnd), and cell records outside BrtBeginSheetData ... BrtEndSheetData | not cells: ignored (real files reuse 0x0001 inside such blocks). A cell record inside the sheet data before any BrtRowHdr is `MalformedFile` | ignores them too (the corpus files that have them agree cell for cell) |
 | chart, dialog and macro sheets | listed in `sheets`, with no rows | cells made up from a chart's caches |
 | sheet dimension | the declared BrtWsDim only (absent without one), `A1` for an empty sheet that declares it | `!ref` absent for an empty sheet |

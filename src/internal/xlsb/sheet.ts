@@ -79,7 +79,6 @@ const BRT_SHORT_REAL = 0x0010
 const BRT_SHORT_ST = 0x0011
 const BRT_SHORT_ISST = 0x0012
 const BRT_CELL_RSTRING = 0x003E
-const BRT_SHORT_RSTRING = 0x003F
 const BRT_END_SHEET_DATA = 0x0092
 const BRT_WS_DIM = 0x0094
 const BRT_COL_INFO = 0x003C
@@ -121,7 +120,7 @@ class Scope {
       this.sheetData = false
       return was
     }
-    return this.sheetData || (type !== BRT_ROW_HDR && !(type <= BRT_SHORT_ISST || type === BRT_CELL_RSTRING || type === BRT_SHORT_RSTRING))
+    return this.sheetData || (type !== BRT_ROW_HDR && !(type <= BRT_SHORT_ISST || type === BRT_CELL_RSTRING))
   }
 }
 
@@ -160,7 +159,7 @@ export class SheetRows {
     if (!this.scope.step(type)) return undefined
     if (type === BRT_ROW_HDR) return this.openRow(record)
     if (type === BRT_END_SHEET_DATA) return this.closeRow()
-    if (type <= BRT_SHORT_ISST || type === BRT_CELL_RSTRING || type === BRT_SHORT_RSTRING) return this.cell(record)
+    if (type <= BRT_SHORT_ISST || type === BRT_CELL_RSTRING) return this.cell(record)
     return undefined
   }
 
@@ -201,7 +200,7 @@ export class SheetRows {
     const type = record.type
     const data = record.data
     const f = new Fields(data)
-    const short = (type >= BRT_SHORT_BLANK && type <= BRT_SHORT_ISST) || type === BRT_SHORT_RSTRING
+    const short = type >= BRT_SHORT_BLANK && type <= BRT_SHORT_ISST
     // Cell: column u32 and style u24 (+ flags byte); the short forms have no column
     const column = short ? this.lastColumn + 1 : f.u32(0)
     const style = f.u32(short ? 0 : 4)
@@ -249,9 +248,8 @@ export class SheetRows {
       case BRT_CELL_ST:
       case BRT_SHORT_ST:
       case BRT_FMLA_STRING:
-      case BRT_CELL_RSTRING:
-      case BRT_SHORT_RSTRING: {
-        const rich = type === BRT_CELL_RSTRING || type === BRT_SHORT_RSTRING
+      case BRT_CELL_RSTRING: {
+        const rich = type === BRT_CELL_RSTRING
         const text = rich ? readRichStr(data, at, limits.maxStringLength) : readWideString(data, at, limits.maxStringLength)
         if (text === undefined) return truncated()
         if (text === null) return new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: limits.maxStringLength + 1 })
