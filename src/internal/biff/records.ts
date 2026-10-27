@@ -70,21 +70,24 @@ export class RecordReader {
   }
 
   /**
-   * The next record with the `CONTINUE` records that follow it. Their data
-   * together may not exceed `maxBytes` (a `LimitExceeded`).
+   * The next record with the `CONTINUE` records that follow it. Together,
+   * counting each record's 4-byte header (so empty `CONTINUE`s count too),
+   * they may not exceed `maxBytes`; past it, a `LimitExceeded` named `limit`
+   * (the caller's limit: the SST is capped by a different one than a
+   * single string).
    */
-  nextWithContinues(maxBytes: number): ContinuedRecord | undefined | MalformedFile | LimitExceeded {
+  nextWithContinues(maxBytes: number, limit: string): ContinuedRecord | undefined | MalformedFile | LimitExceeded {
     const first = this.next()
     if (first === undefined || first instanceof MalformedFile) return first
     const segments = [first.data]
-    let total = first.data.length
+    let total = 4 + first.data.length
     // progress: each iteration reads one record (offset advances)
     while (this.peekType() === CONTINUE) {
       const next = this.next()
       if (next === undefined) break
       if (next instanceof MalformedFile) return next
-      total += next.data.length
-      if (total > maxBytes) return new LimitExceeded({ limit: "maxStringLength", max: maxBytes, actual: total })
+      total += 4 + next.data.length
+      if (total > maxBytes) return new LimitExceeded({ limit, max: maxBytes, actual: total })
       segments.push(next.data)
     }
     return { ...first, segments }

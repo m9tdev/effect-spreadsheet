@@ -65,11 +65,22 @@ describe("biff records", () => {
   it("gathers CONTINUE records with their record, within a byte limit", () => {
     const stream = concat([record(0x00FC, [1]), record(CONTINUE, [2, 3]), record(CONTINUE, []), record(CONTINUE, [4]), record(0x00FF, [9])])
     const reader = new RecordReader(stream, "Workbook")
-    const sst = reader.nextWithContinues(100)
+    const sst = reader.nextWithContinues(100, "maxDecompressedBytes")
     expect(sst && !(sst instanceof MalformedFile) && !(sst instanceof LimitExceeded) && sst.segments.map((s) => Array.from(s))).toEqual([[1], [2, 3], [], [4]])
     expect(reader.peekType()).toBe(0x00FF)
-    const limited = new RecordReader(stream, "Workbook").nextWithContinues(2)
-    expect(limited).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    // 4 records' headers + 4 bytes = 20: 19 is over, under the caller's name
+    const limited = new RecordReader(stream, "Workbook").nextWithContinues(19, "maxDecompressedBytes")
+    expect(limited).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 19, actual: 20 })
+    expect(new RecordReader(stream, "Workbook").nextWithContinues(20, "x")).toMatchObject({ type: 0x00FC })
+  })
+
+  it("empty CONTINUE records count against the limit (4 bytes each)", () => {
+    const many = concat([record(0x00FC, [1]), ...Array.from({ length: 10_000 }, () => record(CONTINUE, []))])
+    const reader = new RecordReader(many, "Workbook")
+    const result = reader.nextWithContinues(1000, "maxDecompressedBytes")
+    expect(result).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 1000 })
+    // it stopped early: about 1000 / 4 records read, not 10 000
+    expect(reader.records).toBeLessThanOrEqual(252)
   })
 })
 

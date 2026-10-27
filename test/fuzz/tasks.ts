@@ -61,7 +61,7 @@ export const effectOf = (task: FuzzTask): Effect.Effect<unknown, unknown> => {
             const reader = new RecordReader(data, entry.path)
             // progress: every record advances the reader
             for (;;) {
-              const record = reader.nextWithContinues(limits.maxStringLength)
+              const record = reader.nextWithContinues(limits.maxDecompressedBytes, "maxDecompressedBytes")
               if (record === undefined) break
               if ("_tag" in record) return Effect.fail(record)
               if (record.type !== 0x00FC) continue
