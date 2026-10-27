@@ -5,7 +5,7 @@
  * error codes, and sheetDetails edge cases. Synthetic records only.
  */
 import { Effect, Exit, Stream } from "effect"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { BATCH_RECORDS, caps, Rows, type SheetContext, work } from "../src/internal/xls/sheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
@@ -17,8 +17,13 @@ import { failureOf } from "./helpers/run.ts"
 import { countYields } from "./helpers/yields.ts"
 import * as X from "./helpers/xls.ts"
 
+// A reader that stops advancing (e.g. a broken `behind`) loops with yields
+// instead of ending: reads time out in seconds, and tests in 10, rather than
+// each waiting for the run's 60-second test timeout.
+vi.setConfig({ testTimeout: 10_000 })
+
 const readExit = (bytes: Uint8Array, limits?: LimitOverrides) =>
-  Effect.runPromise(Effect.exit(Effect.gen(function*() {
+  Effect.runPromise(Effect.exit(Effect.timeout(Effect.gen(function*() {
     const wb = yield* Xls.read(bytes, { limits })
     const sheets: Array<Array<Workbook.Row>> = []
     const details: Array<Workbook.SheetDetails> = []
@@ -27,7 +32,7 @@ const readExit = (bytes: Uint8Array, limits?: LimitOverrides) =>
       details.push(yield* Workbook.sheetDetails(wb, sheet.index))
     }
     return { wb, sheets, details }
-  })))
+  }), "5 seconds")))
 
 const readOk = async (book: X.TestBook, limits?: LimitOverrides) => {
   const exit = await readExit(X.xls(book), limits)
