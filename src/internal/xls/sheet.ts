@@ -3,8 +3,9 @@
  *
  * The substream starts at its BOUNDSHEET offset with a worksheet BOF and
  * runs to its EOF. Records are read in batches (at most `BATCH_RECORDS`
- * per pull, with a yield before each), so the work between event-loop
- * turns is bounded.
+ * records or about `BATCH_CELLS` cells per pull, with a yield before each),
+ * and rows come out in chunks of at most `BATCH_RECORDS` rows or about
+ * `BATCH_CELLS` cells, so the work between event-loop turns is bounded.
  *
  * - Rows: ROW records give hidden rows (fDyZero) and rows without cells;
  *   cells mostly come row by row after their block of ROW records, but
@@ -38,8 +39,22 @@ import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { decodeRk, ERROR_CODES, Fields, readString } from "./fields.ts"
 import type { Globals } from "./globals.ts"
 
+/**
+ * Steps of the rows reader's loops (records scanned and read, cells, rows,
+ * queue and sort steps), summed over every read in this process. Tests use
+ * it to check that the work grows linearly with the sheet, whatever the
+ * machine's load; it costs one increment per step.
+ */
+export const work = { steps: 0 }
+
 /** Records handled per pull: bounded work between event-loop turns. */
 export const BATCH_RECORDS = 4096
+/**
+ * Cells per pull, read or emitted: a batch ends once it passes this (one
+ * MULBLANK holds up to 4 109 cells), and so does a chunk of rows (a row
+ * holds at most `maxColumns` cells, see `compact`).
+ */
+export const BATCH_CELLS = 65_536
 
 const ROW = 0x0208
 const LABELSST = 0x00FD
@@ -126,6 +141,7 @@ class RowScan {
   step(max: number): void {
     // progress: k up to max; every next() advances the reader
     for (let k = 0; k < max; k++) {
+      work.steps++
       const record = this.reader.next()
       if (record === undefined || record instanceof MalformedFile) {
         this.done = true
@@ -146,6 +162,23 @@ class RowScan {
   }
 }
 
+/**
+ * Sorts a row's cells by column in place, keeping the last cell of each
+ * column (`sort` is stable), and returns them.
+ */
+const compact = (cells: Array<Cell.Cell>): Array<Cell.Cell> => {
+  cells.sort((a, b) => a.column - b.column)
+  let kept = 0
+  // progress: k up to cells.length
+  for (let k = 0; k < cells.length; k++) {
+    work.steps++
+    const next = cells[k + 1]
+    if (next === undefined || next.column !== cells[k]!.column) cells[kept++] = cells[k]!
+  }
+  cells.length = kept
+  return cells
+}
+
 interface OpenRow {
   cells: Array<Cell.Cell>
   /** Columns came in increasing order so far. */
@@ -159,8 +192,10 @@ interface OpenRow {
  * are emitted in row order. Rows waiting for later cells hold only cells
  * already counted against `maxCellsPerSheet`.
  */
-class Rows {
-  out: Array<Row> = []
+export class Rows {
+  /** Rows ready to emit; `out[outAt]` is the next one (see `take`). */
+  private out: Array<Row> = []
+  private outAt = 0
   /** Rows with cells, not emitted yet. */
   private readonly open = new Map<number, OpenRow>()
   /** The row the last cell went to (most cells follow the one before). */
@@ -181,7 +216,8 @@ class Rows {
   /** Rows emitted so far (a ROW-only row is emitted once). */
   private readonly emitted = new Set<number>()
   private rowCount = 0
-  private cellCount = 0
+  /** Cells read so far (repeats included): counted against maxCellsPerSheet. */
+  cellCount = 0
   /** Depth of substreams nested in this one (embedded charts: BOF ... EOF). */
   nested = 0
   /** A FORMULA whose text result comes in the next STRING record. */
@@ -214,6 +250,7 @@ class Rows {
   private flushDeclared(before: number): SpreadsheetError | undefined {
     // progress: declaredAt increases up to declared.length
     while (this.declaredAt < this.declared.length && this.declared[this.declaredAt]! < before) {
+      work.steps++
       const index = this.declared[this.declaredAt++]!
       if (this.emitted.has(index)) continue
       const error = this.push(index, this.hidden.has(index), [])
@@ -235,18 +272,29 @@ class Rows {
       this.hotRow = -1
       this.hotEntry = undefined
     }
-    let cells = entry.cells
-    if (!entry.sorted) {
-      // stable by column, keeping the last cell of each column
-      const ordered = cells.map((c, k) => [c, k] as const).sort((a, b) => a[0].column - b[0].column || a[1] - b[1])
-      cells = []
-      // progress: one cell per iteration
-      for (let k = 0; k < ordered.length; k++) {
-        const next = ordered[k + 1]
-        if (next === undefined || next[0].column !== ordered[k]![0].column) cells.push(ordered[k]![0])
-      }
+    return this.push(index, this.hidden.has(index), entry.sorted ? entry.cells : compact(entry.cells))
+  }
+
+  /** Whether rows wait to be taken. */
+  queued(): boolean {
+    return this.outAt < this.out.length
+  }
+
+  /** The next chunk of rows: at least one, at most `BATCH_RECORDS` rows or until `BATCH_CELLS` cells are passed. */
+  take(): Arr.NonEmptyReadonlyArray<Row> {
+    const from = this.outAt
+    let cells = 0
+    // progress: outAt increases up to out.length
+    do {
+      work.steps++
+      cells += this.out[this.outAt++]!.cells.length
+    } while (this.outAt < this.out.length && this.outAt - from < BATCH_RECORDS && cells < BATCH_CELLS)
+    const chunk = this.out.slice(from, this.outAt) as unknown as Arr.NonEmptyReadonlyArray<Row>
+    if (this.outAt === this.out.length) {
+      this.out = []
+      this.outAt = 0
     }
-    return this.push(index, this.hidden.has(index), cells)
+    return chunk
   }
 
   /**
@@ -256,6 +304,7 @@ class Rows {
   complete(offset: number): SpreadsheetError | undefined {
     // progress: nextRow increases up to order.length
     while (this.nextAt <= offset) {
+      work.steps++
       const index = this.order[this.nextRow]!
       if (this.pendingString?.row === index) return undefined
       this.nextRow++
@@ -272,6 +321,7 @@ class Rows {
   }
 
   cell(row: number, cell: Cell.Cell): SpreadsheetError | undefined {
+    work.steps++
     const limits = this.context.limits
     if (cell.column >= limits.maxColumns) {
       return new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: cell.column + 1 })
@@ -289,6 +339,13 @@ class Rows {
     if (cell.column <= entry.lastColumn) entry.sorted = false
     entry.lastColumn = cell.column
     entry.cells.push(cell)
+    // repeated columns don't pile up: past 2 x maxColumns cells a row is
+    // compacted (to at most maxColumns), so the work is amortized
+    if (!entry.sorted && entry.cells.length > 2 * limits.maxColumns) {
+      compact(entry.cells)
+      entry.sorted = true
+      entry.lastColumn = entry.cells[entry.cells.length - 1]!.column
+    }
     return undefined
   }
 
@@ -299,6 +356,7 @@ class Rows {
     const left = Uint32Array.from(this.open.keys()).sort()
     // progress: one row per iteration
     for (const index of left) {
+      work.steps++
       const failed = this.flushDeclared(index) ?? this.finishRow(index)
       if (failed !== undefined) return failed
     }
@@ -475,19 +533,23 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
     let done = false
     const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
       if (reader === undefined || scan === undefined) return yield* Effect.fail(opened as SpreadsheetError)
-      // progress: each iteration reads up to BATCH_RECORDS records (the
-      // scan's or the reader's offset grows with each), or ends the stream
+      // progress: each iteration takes queued rows, or reads up to
+      // BATCH_RECORDS records (the scan's or the reader's offset grows with
+      // each), or ends the stream
       while (true) {
-        if (done) return yield* Cause.done()
         yield* Effect.yieldNow
+        if (rows.queued()) return rows.take()
+        if (done) return yield* Cause.done()
         if (!scan.done) {
           scan.step(BATCH_RECORDS)
           if (scan.done) rows.start(scan.lastAt)
           continue
         }
         let ended = false
+        const cellBudget = rows.cellCount + BATCH_CELLS
         // progress: k up to BATCH_RECORDS; every next() advances the reader
-        for (let k = 0; k < BATCH_RECORDS; k++) {
+        for (let k = 0; k < BATCH_RECORDS && rows.cellCount < cellBudget; k++) {
+          work.steps++
           const record = rows.nested === 0 && context.globals.biff8 && reader.peekType() === STRING
             ? reader.nextWithContinues(maxStringBytes, "maxStringLength")
             : reader.next()
@@ -511,11 +573,7 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
           const error = rows.end()
           if (error !== undefined) return yield* Effect.fail(error)
         }
-        if (rows.out.length > 0) {
-          const out = rows.out
-          rows.out = []
-          return out as unknown as Arr.NonEmptyReadonlyArray<Row>
-        }
+        if (rows.queued()) return rows.take()
       }
     })
     return pull
@@ -581,7 +639,8 @@ export const sheetDetails = (context: SheetContext): Effect.Effect<SheetDetails,
         if (first === undefined || last === undefined || grbit === undefined) {
           return yield* Effect.fail(malformed(part, "truncated COLINFO", record.offset))
         }
-        if ((grbit & 0x01) !== 0 && last >= first) hidden.push({ first, last: Math.min(last, limits.maxColumns - 1) })
+        // spans starting past the last column are ignored, as in XLSX
+        if ((grbit & 0x01) !== 0 && last >= first && first < limits.maxColumns) hidden.push({ first, last: Math.min(last, limits.maxColumns - 1) })
       } else if (record.type === MERGECELLS) {
         const count = f.u16(0)
         if (count === undefined || 2 + 8 * count > record.data.length) {

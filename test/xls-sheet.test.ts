@@ -7,12 +7,14 @@
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
-import { BATCH_RECORDS } from "../src/internal/xls/sheet.ts"
+import { BATCH_RECORDS, Rows, type SheetContext } from "../src/internal/xls/sheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
+import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xls from "../src/xls/index.ts"
 import { writeCfb } from "./helpers/cfb.ts"
 import { failureOf } from "./helpers/run.ts"
+import { countYields } from "./helpers/yields.ts"
 import * as X from "./helpers/xls.ts"
 
 const readExit = (bytes: Uint8Array, limits?: LimitOverrides) =>
@@ -245,6 +247,31 @@ describe("xls sheet: rows whose cells come in several places", () => {
   })
 })
 
+describe("xls sheet: repeated columns", () => {
+  it("a row's repeated columns don't pile up: past 2 x maxColumns cells it is compacted, the last cell of a column kept", async () => {
+    const limits = { ...SpreadsheetLimits.defaults, maxColumns: 8 }
+    const rows = new Rows({ limits } as unknown as SheetContext)
+    rows.start(new Map([[0, Infinity]]))
+    let most = 0
+    // 1 000 passes over columns 7..0 (unsorted): 8 000 cells for 8 columns
+    for (let k = 0; k < 8000; k++) {
+      expect(rows.cell(0, Cell.number(7 - (k % 8), k))).toBeUndefined()
+      most = Math.max(most, (rows as unknown as { open: Map<number, { cells: Array<unknown> }> }).open.get(0)!.cells.length)
+    }
+    expect(most).toBeLessThanOrEqual(2 * 8 + 1)
+    expect(rows.end()).toBeUndefined()
+    const [row] = rows.take()
+    expect(row.cells.map((c) => [c.column, Cell.value(c)])).toEqual(Array.from({ length: 8 }, (_, c) => [c, 8000 - 8 + 7 - c]))
+    // read end to end: the same rule over many MULBLANK and NUMBER records on the same columns
+    const records = Array.from({ length: 50 }, (_, k) => [X.mulBlank(0, 0, new Array(8).fill(0)), X.number(0, 7 - (k % 8), 0, k)]).flat()
+    const { sheets } = await readOk(one(records), { maxColumns: 8 })
+    // the last writes: the last MULBLANK everywhere, then NUMBER 49 in column 7 - 49 % 8 = 6
+    expect(sheets[0]![0]!.cells.map((c) => [c.column, c._tag, Cell.value(c) ?? null])).toEqual(
+      Array.from({ length: 8 }, (_, c) => (c === 6 ? [6, "Number", 49] : [c, "Empty", null]))
+    )
+  })
+})
+
 describe("xls sheet: sheetDetails", () => {
   it("reversed merges are normalized; COLINFO with last < first and an empty DIMENSIONS are ignored", async () => {
     const { details } = await readOk(one([
@@ -258,6 +285,28 @@ describe("xls sheet: sheetDetails", () => {
     // empty column range too; a one-cell dimension is kept (BIFF5 layout)
     expect((await readOk(one([X.dimensions(0, 5, 2, 2)]))).details[0]!.dimension).toBeUndefined()
     expect((await readOk(one([X.dimensions(1, 2, 2, 3, 5)], [], 5))).details[0]!.dimension).toEqual({ firstRow: 1, firstColumn: 2, lastRow: 1, lastColumn: 2 })
+  })
+
+  it("a COLINFO starting at or past maxColumns is ignored; one crossing it is clamped", async () => {
+    const { details } = await readOk(one([X.colInfo(256, 300, true), X.colInfo(400, 400, true), X.colInfo(250, 260, true)]), { maxColumns: 256 })
+    expect(details[0]!.hiddenColumns).toEqual([{ first: 250, last: 255 }])
+  })
+
+  it("a MERGECELLS shorter than its count is MalformedFile; sheetDetails yields over a long sheet", async () => {
+    const short = X.record(0x00E5, [...X.u16(2), ...X.u16(0), ...X.u16(1), ...X.u16(0), ...X.u16(1)])
+    expect(await errorOf(one([short]))).toMatchObject({ _tag: "MalformedFile", reason: "truncated MERGECELLS" })
+    // exactly as long as its count: fine
+    expect((await readOk(one([X.mergeCells([[0, 1, 0, 1]])]))).details[0]!.merges).toHaveLength(1)
+    const records = Array.from({ length: 10 * BATCH_RECORDS }, (_, k) => X.blank(k % 60_000, 0, 0))
+    const wb = await Effect.runPromise(Xls.read(X.xls(one(records))))
+    const run = await countYields(() => Effect.runPromise(Workbook.sheetDetails(wb, 0)))
+    expect(run.yields).toBeGreaterThanOrEqual(8)
+  })
+
+  it("a FORMULA shorter than its fixed 14 bytes is MalformedFile; 14 bytes read", async () => {
+    const bytes = [...X.u16(0), ...X.u16(0), ...X.u16(0), ...X.f64(5)]
+    expect(await errorOf(one([X.record(0x0006, bytes.slice(0, 13))]))).toMatchObject({ _tag: "MalformedFile", reason: "truncated record 0x6" })
+    expect(await cellsOf([X.record(0x0006, bytes)])).toEqual([[0, 0, "Number", 5]])
   })
 
   it("records of a nested substream (BOF ... EOF) are skipped, the sheet's own after it count", async () => {
