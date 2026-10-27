@@ -349,6 +349,31 @@ describe("xls sheet: sheetDetails", () => {
     expect(values(sheets[0]!)).toEqual([[0, false, [[1, "Number", 1]]]])
   })
 
+  it("an EOF inside a doubly nested substream closes one level only", async () => {
+    // BOF BOF EOF (records of the outer nested substream) EOF: those records are skipped too
+    const { details, sheets } = await readOk(one([
+      X.number(0, 0, 0, 1),
+      X.bof(0x0020),
+      X.bof(0x0020),
+      X.eof(),
+      X.colInfo(3, 3, true),
+      X.mergeCells([[9, 9, 0, 1]]),
+      X.number(5, 0, 0, 99),
+      X.eof(),
+      X.colInfo(5, 5, true),
+      X.number(1, 0, 0, 2)
+    ]))
+    expect(details[0]).toEqual({ hiddenColumns: [{ first: 5, last: 5 }], merges: [] })
+    expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Number", 1]]], [1, false, [[0, "Number", 2]]]])
+    // the record-header scan nests the same way: row 1 still streams before a broken tail is read
+    const nestedTwice = [X.bof(0x0020), X.bof(0x0020), X.eof(), X.number(5, 0, 0, 99), X.eof()]
+    const filler = Array.from({ length: 2 * BATCH_RECORDS }, (_, k) => X.number(2 + k, 0, 0, k))
+    const stream = X.workbookStream(one([X.number(0, 0, 0, 1), ...nestedTwice, X.number(1, 0, 0, 2), ...filler]))
+    const wb = await Effect.runPromise(Xls.read(writeCfb([{ name: "Workbook", data: stream.subarray(0, stream.length - 10) }]).bytes))
+    const first = await Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 2)))
+    expect(Array.from(first).map((r) => r.index)).toEqual([0, 1])
+  })
+
   it("a sheet offset that isn't at a BOF fails rows and sheetDetails", async () => {
     const stream = X.workbookStream(one([X.number(0, 0, 0, 1)]))
     const view = new DataView(stream.buffer)
