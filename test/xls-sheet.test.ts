@@ -235,7 +235,7 @@ describe("xls sheet: rows whose cells come in several places", () => {
     expect(await cellsOf([X.number(0, 0, 0, 1), X.number(0, 0, 0, 2)])).toEqual([[0, 0, "Number", 2]])
   })
 
-  it("rows in order still stream: the first one comes out before the rest of the sheet is read", async () => {
+  it("rows in order still stream: after the scan of the record headers, the first row comes out before the rest of the sheet's records are read", async () => {
     // row 0, then more than a batch of records, then a record past the end of the stream
     const filler = Array.from({ length: 2 * BATCH_RECORDS }, (_, k) => X.number(1 + k, 0, 0, k))
     const stream = X.workbookStream(one([X.number(0, 0, 0, 7), ...filler]))
@@ -244,6 +244,30 @@ describe("xls sheet: rows whose cells come in several places", () => {
     const first = await Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 1)))
     expect(Array.from(first).map((r) => r.index)).toEqual([0])
     expect(failureOf(await Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, 0)))))).toMatchObject({ _tag: "MalformedFile" })
+  })
+})
+
+describe("xls sheet: emitting rows", () => {
+  it("complete(Infinity) with a string still pending stops once every row is out", () => {
+    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
+    rows.start(new Map([[0, 5]]))
+    expect(rows.cell(0, Cell.number(0, 1))).toBeUndefined()
+    expect(rows.complete(5)).toBeUndefined()
+    // a FORMULA on a row the scan didn't place still waits for its STRING
+    rows.pendingString = { row: 1, column: 0, meta: undefined }
+    // the loop's bound is order.length: count the reads of `order`, so a
+    // loop that only stops by luck fails here instead of hanging the worker
+    const inner = (rows as unknown as { order: Uint32Array }).order
+    let reads = 0
+    ;(rows as unknown as { order: Uint32Array }).order = new Proxy(inner, {
+      get: (target, key) => {
+        if (++reads > 1000) throw new Error("complete() doesn't stop")
+        const value = Reflect.get(target, key, target)
+        return typeof value === "function" ? value.bind(target) : value
+      }
+    })
+    expect(rows.complete(Infinity)).toBeUndefined()
+    expect(rows.take().map((r) => r.index)).toEqual([0])
   })
 })
 

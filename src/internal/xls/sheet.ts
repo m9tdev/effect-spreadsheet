@@ -304,8 +304,8 @@ export class Rows {
    * cell record is at or before it (not one still waiting for its STRING).
    */
   complete(offset: number): SpreadsheetError | undefined {
-    // progress: nextRow increases up to order.length
-    while (this.nextAt <= offset) {
+    // progress: nextRow increases, bounded by order.length (offset may be Infinity)
+    while (this.nextRow < this.order.length && this.nextAt <= offset) {
       work.steps++
       const index = this.order[this.nextRow]!
       if (this.pendingString?.row === index) return undefined
