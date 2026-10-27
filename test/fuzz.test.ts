@@ -276,7 +276,7 @@ describe("fuzz: never a defect, never a hang", () => {
     )
   }, 180_000)
 
-  it("xlsb: mutated workbook, sheet, shared-string and external link parts inside a valid package, through the reader", async () => {
+  it("xlsb: mutated workbook, sheet, shared-string, style and external link parts inside a valid package, through the reader", async () => {
     const B = await import("./helpers/xlsb.ts")
     const sheet = B.sheetBin([
       B.rowHdr(0, true), B.isst(0, 1), B.rk(1, B.rkInt(5), 1), B.real(2, 45000, 1), B.cellSt(3, "x"), B.rstring(4, "r"), B.fmlaString(5, "f"),
@@ -289,6 +289,7 @@ describe("fuzz: never a defect, never a hang", () => {
     ])
     const strings = B.concat([B.beginSst(2), B.sstItem("a"), B.sstItem("b")])
     const external = B.concat([B.supTabs(["E"])])
+    const styles = B.stylesBin([0, 14, 164], { 164: "yyyy" })
     const arbMutation = (part: Uint8Array) =>
       fc.tuple(
         fc.integer({ min: 0, max: part.length }),
@@ -305,17 +306,22 @@ describe("fuzz: never a defect, never a hang", () => {
       })
     await fc.assert(
       fc.asyncProperty(
-        fc.constantFrom("sheet", "workbook", "strings", "external").chain((which) =>
-          fc.tuple(fc.constant(which), arbMutation(which === "sheet" ? sheet : which === "workbook" ? workbook : which === "strings" ? strings : external))
+        fc.constantFrom("sheet", "workbook", "strings", "external", "styles").chain((which) =>
+          fc.tuple(
+            fc.constant(which),
+            arbMutation({ sheet, workbook, strings, external, styles }[which]),
+            // a quarter of the packages deflated: inflate pieces cut records anywhere
+            fc.integer({ min: 0, max: 3 }).map((k) => (k === 0 ? "deflate" as const : "store" as const))
+          )
         ),
-        async ([which, mutated]) => {
+        async ([which, mutated, method]) => {
           const bytes = await B.xlsb({
             sheets: [{ name: "S", part: which === "sheet" ? mutated : sheet }, { name: "T", part: sheet }],
             workbookPart: which === "workbook" ? mutated : workbook,
             externalLinks: [which === "external" ? mutated : external],
-            xfs: [0, 14],
+            stylesPart: which === "styles" ? mutated : styles,
             stringsPart: which === "strings" ? mutated : strings,
-            method: "store"
+            method
           })
           await terminates({ op: "read", bytes })
           await terminates({ op: "read", bytes, limits: { maxRows: 1, maxColumns: 4, maxCellsPerSheet: 5, maxStringLength: 2, maxSharedStrings: 1, maxRecordBytes: 32, maxDefinedNames: 1 } })

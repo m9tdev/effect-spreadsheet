@@ -132,6 +132,24 @@ export const rkDouble = (n: number) => new DataView(new Uint8Array(f64(n)).buffe
 export const sheetBin = (body: ReadonlyArray<Uint8Array>, options: { readonly before?: ReadonlyArray<Uint8Array>; readonly after?: ReadonlyArray<Uint8Array> } = {}) =>
   concat([beginSheet(), ...(options.before ?? []), beginSheetData(), ...body, endSheetData(), ...(options.after ?? []), endSheet()])
 
+/** A styles part: custom formats, a cell style XF (which doesn't count), then one cell XF per numFmtId. */
+export const stylesBin = (xfs: ReadonlyArray<number>, formats: Readonly<Record<number, string>> = {}) => {
+  const codes = Object.entries(formats)
+  return concat([
+    record(0x116),
+    record(0x267, u32(codes.length)),
+    ...codes.map(([id, code]) => fmt(Number(id), code)),
+    record(0x268),
+    record(0x272, u32(1)),
+    xf(0x2A),
+    record(0x273),
+    record(0x269, u32(xfs.length)),
+    ...xfs.map(xf),
+    record(0x26A),
+    record(0x117)
+  ])
+}
+
 // ---- packages ----
 
 const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -151,6 +169,8 @@ export interface TestBook {
   readonly strings?: ReadonlyArray<string>
   /** A whole shared-strings part instead of the one made from `strings`. */
   readonly stringsPart?: Uint8Array
+  /** A whole styles part instead of the one made from `xfs` and `formats`. */
+  readonly stylesPart?: Uint8Array
   /** numFmtId per cell XF, and custom codes. */
   readonly xfs?: ReadonlyArray<number>
   readonly formats?: Readonly<Record<number, string>>
@@ -191,26 +211,9 @@ export const xlsb = async (book: TestBook): Promise<Uint8Array> => {
     rels.push(`<Relationship Id="rIdS" Type="${REL}/sharedStrings" Target="sharedStrings.bin"/>`)
     entries.push({ name: "xl/sharedStrings.bin", data: book.stringsPart ?? concat([beginSst(strings.length), ...strings.map(sstItem), record(0xA0)]) })
   }
-  if (book.xfs !== undefined) {
+  if (book.xfs !== undefined || book.stylesPart !== undefined) {
     rels.push(`<Relationship Id="rIdY" Type="${REL}/styles" Target="styles.bin"/>`)
-    const formats = Object.entries(book.formats ?? {})
-    entries.push({
-      name: "xl/styles.bin",
-      data: concat([
-        record(0x116),
-        record(0x267, u32(formats.length)),
-        ...formats.map(([id, code]) => fmt(Number(id), code)),
-        record(0x268),
-        // cell style XFs first: they don't count
-        record(0x272, u32(1)),
-        xf(0x2A),
-        record(0x273),
-        record(0x269, u32(book.xfs.length)),
-        ...book.xfs.map(xf),
-        record(0x26A),
-        record(0x117)
-      ])
-    })
+    entries.push({ name: "xl/styles.bin", data: book.stylesPart ?? stylesBin(book.xfs ?? [], book.formats ?? {}) })
   }
   ;(book.externalLinks ?? []).forEach((part, k) => {
     rels.push(`<Relationship Id="rIdX${k + 1}" Type="${REL}/externalLink" Target="externalLinks/externalLink${k + 1}.bin"/>`)
