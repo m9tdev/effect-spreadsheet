@@ -528,15 +528,23 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
     // one NumberFormat per format id, not per XF (an id's code is parsed once)
     const byId = new Map<number, NumberFormat>()
     const formats: Array<NumberFormat> = []
-    // progress: k up to xfFormats.length, yielding every BATCH_RECORDS
+    // a batch is BATCH_RECORDS XFs, or ends sooner once the codes parsed
+    // in it (each id's once) reach BATCH_BYTES characters
+    let units = 0
+    let cost = 0
+    // progress: k up to xfFormats.length, yielding between batches
     for (let k = 0; k < walk.xfFormats.length; k++) {
-      if (k % BATCH_RECORDS === 0) {
+      if (k === 0 || units >= BATCH_RECORDS || cost >= BATCH_BYTES) {
         if (k > 0) yield* Effect.yieldNow
         batches.count++
+        units = 0
+        cost = 0
       }
+      units++
       const id = walk.xfFormats[k]!
       let format = byId.get(id)
       if (format === undefined) {
+        cost += custom.get(id)?.length ?? 0
         format = formatFor(id, custom)
         byId.set(id, format)
       }

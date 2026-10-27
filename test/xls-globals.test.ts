@@ -488,6 +488,17 @@ describe("xls globals: long work yields", () => {
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
   })
 
+  it("XFs whose number formats have long codes end their batch by the codes' length, not only by count", async () => {
+    // 4 * BATCH_BYTES of codes, one XF per id: far fewer XFs than BATCH_RECORDS, yet each code is parsed once
+    const ids = Math.ceil((4 * BATCH_BYTES) / 8000)
+    const formats = Array.from({ length: ids }, (_, k) => X.format(164 + k, "0".repeat(8000)))
+    const alone = await turns(formats)
+    const run = await turns([...formats, ...Array.from({ length: ids }, (_, k) => X.xf(164 + k))])
+    expect(ids).toBeLessThan(BATCH_RECORDS)
+    expect(run.batches - alone.batches).toBeGreaterThanOrEqual(4)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+
   it("many defined names are read and resolved with yields", async () => {
     const records = 8 * BATCH_RECORDS
     const run = await turns([X.externSheet([0]), ...Array.from({ length: records }, (_, k) => X.name(`N${k}`, X.ref3d(0, k % 65536, 0)))])

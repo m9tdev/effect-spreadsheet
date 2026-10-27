@@ -5,7 +5,9 @@
  * Run: node scripts/bench/xls-globals.ts <case> [megabytes], where case is
  * `xf` (XF records), `format` (FORMAT records), `sst` (one SST of short
  * strings over CONTINUEs), `names` (NAME records) or `continue` (empty
- * CONTINUEs after an SST). Limits that would stop the flood are lifted.
+ * CONTINUEs after an SST) or `xf-formats` (4 096 FORMATs with 8 000-character
+ * codes and one XF per id, so the XF pass parses every code; megabytes is
+ * ignored). Limits that would stop the flood are lifted.
  */
 import { Effect, Exit } from "effect"
 import { monitorEventLoopDelay } from "node:perf_hooks"
@@ -73,6 +75,18 @@ if (kind === "sst") {
     })
   }
   count = strings
+} else if (kind === "xf-formats") {
+  const code = "0".repeat(8000)
+  for (let k = 0; k < 4096; k++) {
+    w.record(0x041E, (r) => {
+      r.u16(164 + k)
+      r.u16(code.length)
+      r.u8(0)
+      for (let c = 0; c < code.length; c++) r.u8(0x30)
+    })
+  }
+  for (let k = 0; k < 4096; k++) w.record(0x00E0, (r) => [0, 164 + k, 0, 0, 0, 0, 0, 0, 0, 0].forEach((n) => r.u16(n)))
+  count = 8192
 } else {
   if (kind === "continue") w.record(0x00FC, (r) => (r.u32(0), r.u32(0)))
   // progress: count grows, and the writer by at least 4 bytes per record
