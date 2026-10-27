@@ -1,7 +1,8 @@
 /** XLS workbook globals: defined-name text (SUPBOOK/EXTERNSHEET), BOF versions, sheet visibility, SST, text decoding, containers. */
 import { Effect, Exit, Stream } from "effect"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
+import { textDecoder } from "../src/internal/xls/fields.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
@@ -215,5 +216,32 @@ describe("xls globals: BOF version, sheets, SST", () => {
       const later = writeCfb([{ name: "Book", data: withVersion(book, version) }]).bytes
       expect(failureOf(await run(later))).toMatchObject({ _tag: "UnsupportedFormat", format: "xls", reason: `BIFF version 0x${version.toString(16)} in a BIFF5/8 BOF` })
     }
+  })
+})
+
+describe("xls globals: text decoders and containers", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it("an encoding the runtime lacks falls back to windows-1252", async () => {
+    expect(textDecoder("x-no-such-encoding").encoding).toBe("windows-1252")
+    expect(textDecoder("windows-1251").encoding).toBe("windows-1251")
+    // a runtime without Shift-JIS (small ICU): CODEPAGE 932 still reads, as windows-1252
+    const Real = globalThis.TextDecoder
+    vi.stubGlobal("TextDecoder", class extends Real {
+      constructor(label?: string, options?: TextDecoderOptions) {
+        if (label === "shift_jis") throw new RangeError(`unknown encoding ${label}`)
+        super(label, options)
+      }
+    })
+    const wb = await read({ biff: 5, globals: [X.codepage(932)], sheets: [{ name: "x", name5: [0x82, 0xA0], records: [] }] })
+    expect(wb.sheets[0]!.name).toBe("\u201A\u00A0")
+  })
+
+  it("CODEPAGE 28602 (no such ISO-8859 part) reads as windows-1252", async () => {
+    const wb = await read({ biff: 5, globals: [X.codepage(28602)], sheets: [{ name: "x", name5: [0x80, 0x41], records: [X.label5(0, 0, 0, [0x80])] }] })
+    expect(wb.sheets[0]!.name).toBe("\u20ACA")
+    expect(await texts(wb)).toEqual(["\u20AC"])
   })
 })

@@ -64,6 +64,19 @@ export const codepageLabel = (codepage: number): string => {
   }
 }
 
+/**
+ * A decoder for an encoding label, or windows-1252 when the runtime doesn't
+ * have that encoding (`TextDecoder` throws on unknown labels; runtimes
+ * without full ICU lack the East Asian ones).
+ */
+export const textDecoder = (label: string): TextDecoder => {
+  try {
+    return new TextDecoder(label)
+  } catch {
+    return new TextDecoder("windows-1252")
+  }
+}
+
 export interface Text {
   /** BIFF8 (UTF-16 strings) or BIFF5 (code-page strings). */
   readonly biff8: boolean

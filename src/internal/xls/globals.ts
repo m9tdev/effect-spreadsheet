@@ -15,7 +15,7 @@ import type { Limits } from "../../SpreadsheetLimits.ts"
 import { type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
-import { codepageLabel, Fields, readString, type Text } from "./fields.ts"
+import { codepageLabel, Fields, readString, type Text, textDecoder } from "./fields.ts"
 
 const BOUNDSHEET = 0x0085
 const CODEPAGE = 0x0042
@@ -215,7 +215,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
     return new UnsupportedFormat({ format: "xls", reason: `BIFF version 0x${bof.version.toString(16)} in a BIFF5/8 BOF` })
   }
   const biff8 = bof.version === 0x0600
-  let text: Text = { biff8, decoder: new TextDecoder("windows-1252"), maxLength: limits.maxStringLength }
+  let text: Text = { biff8, decoder: textDecoder("windows-1252"), maxLength: limits.maxStringLength }
   let date1904 = false
   const sheets: Array<SheetEntry> = []
   const custom = new Map<number, string>()
@@ -278,7 +278,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Globals | Sprea
         return new Encrypted({ format: "xls" })
       case CODEPAGE: {
         const cp = f.u16(0)
-        if (cp !== undefined) text = { ...text, decoder: new TextDecoder(codepageLabel(cp)) }
+        if (cp !== undefined) text = { ...text, decoder: textDecoder(codepageLabel(cp)) }
         continue
       }
       case DATEMODE:
