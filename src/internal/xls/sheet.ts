@@ -7,13 +7,18 @@
  * turns is bounded.
  *
  * - Rows: ROW records give hidden rows (fDyZero) and rows without cells;
- *   cells come row by row after their block of ROW records. A row is
- *   emitted when the cells move on to another row; ROW-only rows are
- *   emitted in order between them. Hidden rows are emitted with
- *   `hidden: true`, never skipped.
+ *   cells mostly come row by row after their block of ROW records, but
+ *   some writers put a row's cells in several places. A first pass over
+ *   the record headers (`RowScan`) finds where each row's last cell is; a
+ *   row is emitted, merged, once that record is handled, in row order
+ *   (rows before it wait, holding only cells already counted against
+ *   `maxCellsPerSheet`). ROW-only rows are emitted in order between them.
+ *   Hidden rows are emitted with `hidden: true`, never skipped.
  * - Cells: LABELSST, LABEL, RSTRING (text), NUMBER, RK, MULRK (numbers),
  *   BOOLERR (booleans and errors), BLANK, MULBLANK (Empty), FORMULA with
- *   its cached result (a following STRING record for text). Numbers whose
+ *   its cached result (a following STRING record for text, after any
+ *   SHRFMLA/ARRAY/TABLE, maybe continued by CONTINUE records). NaN and
+ *   infinities are `#NUM!` errors; unknown error codes are `#N/A`. Numbers whose
  *   XF has a date format become Dates, as in XLSX. Formula text isn't
  *   decompiled (no `formula`).
  * - Nothing is sized by DIMENSIONS; cost follows the records present.
@@ -27,8 +32,9 @@ import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { ColumnSpan, Range, Row, SheetDetails } from "../../Workbook.ts"
-import { BOF_BIFF5_8, EOF, type BiffRecord, RecordReader, readBof } from "../biff/records.ts"
+import { BOF_BIFF5_8, type BiffRecord, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { serialToDate } from "../xlsx/numFmt.ts"
+import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { decodeRk, ERROR_CODES, Fields, readString } from "./fields.ts"
 import type { Globals } from "./globals.ts"
 
@@ -46,7 +52,13 @@ const BOOLERR = 0x0205
 const BLANK = 0x0201
 const MULBLANK = 0x00BE
 const FORMULA = 0x0006
+/** FORMULA with the BIFF3/BIFF4 record number, which some writers still use: same fields up to the result. */
+const FORMULA_BIFF4 = 0x0406
 const STRING = 0x0207
+/** May sit between a FORMULA and its STRING (MS-XLS 2.1.7.20.5: FORMULA [SHRFMLA / ARRAY / TABLE] [STRING]). */
+const SHRFMLA = 0x04BC
+const ARRAY = 0x0221
+const TABLE = 0x0236
 const DIMENSIONS = 0x0200
 const COLINFO = 0x007D
 const MERGECELLS = 0x00E5
@@ -62,6 +74,20 @@ export interface SheetContext {
 const malformed = (part: string, reason: string, offset?: number) =>
   new MalformedFile({ format: "xls", part, reason, ...(offset === undefined ? {} : { offset }) })
 
+/**
+ * The data of a STRING record and its CONTINUEs may take at most this many
+ * bytes: the header (9), 2 bytes per character plus a 5-byte CONTINUE
+ * header and option byte per character in the worst split, and 4 bytes
+ * per rich-text run. More is a string over `maxStringLength`.
+ */
+const stringMaxBytes = (limits: Limits): number => 16 + 7 * limits.maxStringLength + 4 * 0xFFFF
+
+/**
+ * Unknown error codes (BOOLERR, FORMULA results) give `#N/A`, not a failure:
+ * as the XLSX reader, which keeps whatever error text a cell has.
+ */
+const errorCode = (code: number): string => ERROR_CODES.get(code) ?? "#N/A"
+
 /** Opens the substream: checks the offset and the worksheet BOF; the reader after it, or why not. */
 const openSubstream = (context: SheetContext): RecordReader | SpreadsheetError => {
   if (context.offset < 0 || context.offset + 4 > context.stream.length) {
@@ -76,13 +102,77 @@ const openSubstream = (context: SheetContext): RecordReader | SpreadsheetError =
   return reader
 }
 
-/** Builds rows from cell records. */
+/** Cell records: each starts with its row (u16). */
+const CELL_RECORDS: ReadonlySet<number> = new Set([LABELSST, LABEL, RSTRING, NUMBER, RK, MULRK, BOOLERR, BLANK, MULBLANK, FORMULA, FORMULA_BIFF4])
+
+/**
+ * A first pass over the substream's records (headers and row numbers only):
+ * the offset of each row's last cell record. Some writers emit a row's
+ * cells in several places; knowing where each row ends lets the main pass
+ * merge them and still emit every row as soon as it is complete. One entry
+ * per row with cells (at most 65 536: rows are u16).
+ */
+class RowScan {
+  readonly lastAt = new Map<number, number>()
+  done = false
+  private nested = 0
+  private readonly reader: RecordReader
+
+  constructor(context: SheetContext, offset: number) {
+    this.reader = new RecordReader(context.stream, context.part, offset)
+  }
+
+  /** Reads up to `max` records; `done` at the sheet's EOF or where the records stop (the main pass reports why). */
+  step(max: number): void {
+    // progress: k up to max; every next() advances the reader
+    for (let k = 0; k < max; k++) {
+      const record = this.reader.next()
+      if (record === undefined || record instanceof MalformedFile) {
+        this.done = true
+        return
+      }
+      // nested substreams as the main pass sees them (see `handle`)
+      if (record.type === BOF_BIFF5_8) this.nested++
+      else if (record.type === EOF) {
+        if (this.nested === 0) {
+          this.done = true
+          return
+        }
+        this.nested--
+      } else if (this.nested === 0 && CELL_RECORDS.has(record.type) && record.data.length >= 2) {
+        this.lastAt.set(record.data[0]! | (record.data[1]! << 8), record.offset)
+      }
+    }
+  }
+}
+
+interface OpenRow {
+  cells: Array<Cell.Cell>
+  /** Columns came in increasing order so far. */
+  sorted: boolean
+  lastColumn: number
+}
+
+/**
+ * Builds rows from cell records. Cells of a row are gathered until the
+ * record holding its last cell (from the `RowScan`) is handled, then rows
+ * are emitted in row order. Rows waiting for later cells hold only cells
+ * already counted against `maxCellsPerSheet`.
+ */
 class Rows {
   out: Array<Row> = []
-  private current: number | undefined
-  private cells: Array<Cell.Cell> = []
-  private sorted = true
-  private lastColumn = -1
+  /** Rows with cells, not emitted yet. */
+  private readonly open = new Map<number, OpenRow>()
+  /** The row the last cell went to (most cells follow the one before). */
+  private hotRow = -1
+  private hotEntry: OpenRow | undefined
+  /** Offset of each row's last cell record. */
+  private lastAt: ReadonlyMap<number, number> = new Map()
+  /** Rows with cells, ascending; `order[nextRow]` is the next one to emit. */
+  private order: Uint32Array = new Uint32Array(0)
+  private nextRow = 0
+  /** Offset of `order[nextRow]`'s last cell record (Infinity when none is left). */
+  private nextAt = Infinity
   /** Hidden flags from ROW records. */
   private readonly hidden = new Set<number>()
   /** Rows declared by ROW records, not emitted yet, in record order. */
@@ -103,6 +193,14 @@ class Rows {
     this.context = context
   }
 
+  /** Where each row's cells end, from the `RowScan`. */
+  start(lastAt: ReadonlyMap<number, number>): void {
+    this.lastAt = lastAt
+    this.order = Uint32Array.from(lastAt.keys()).sort()
+    this.nextRow = 0
+    this.nextAt = this.order.length > 0 ? lastAt.get(this.order[0]!)! : Infinity
+  }
+
   private push(index: number, hidden: boolean, cells: Array<Cell.Cell>): SpreadsheetError | undefined {
     const limits = this.context.limits
     if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
@@ -117,7 +215,7 @@ class Rows {
     // progress: declaredAt increases up to declared.length
     while (this.declaredAt < this.declared.length && this.declared[this.declaredAt]! < before) {
       const index = this.declared[this.declaredAt++]!
-      if (this.emitted.has(index) || index === this.current) continue
+      if (this.emitted.has(index)) continue
       const error = this.push(index, this.hidden.has(index), [])
       if (error !== undefined) return error
     }
@@ -128,11 +226,17 @@ class Rows {
     return undefined
   }
 
-  /** Ends the current row (if any). */
-  private finishRow(): SpreadsheetError | undefined {
-    if (this.current === undefined) return undefined
-    let cells = this.cells
-    if (!this.sorted) {
+  /** Emits row `index` with its cells (if it got any). */
+  private finishRow(index: number): SpreadsheetError | undefined {
+    const entry = this.open.get(index)
+    if (entry === undefined) return undefined
+    this.open.delete(index)
+    if (this.hotRow === index) {
+      this.hotRow = -1
+      this.hotEntry = undefined
+    }
+    let cells = entry.cells
+    if (!entry.sorted) {
       // stable by column, keeping the last cell of each column
       const ordered = cells.map((c, k) => [c, k] as const).sort((a, b) => a[0].column - b[0].column || a[1] - b[1])
       cells = []
@@ -142,10 +246,24 @@ class Rows {
         if (next === undefined || next[0].column !== ordered[k]![0].column) cells.push(ordered[k]![0])
       }
     }
-    const index = this.current
-    this.current = undefined
-    this.cells = []
     return this.push(index, this.hidden.has(index), cells)
+  }
+
+  /**
+   * After the record at `offset`: emits, in row order, the rows whose last
+   * cell record is at or before it (not one still waiting for its STRING).
+   */
+  complete(offset: number): SpreadsheetError | undefined {
+    // progress: nextRow increases up to order.length
+    while (this.nextAt <= offset) {
+      const index = this.order[this.nextRow]!
+      if (this.pendingString?.row === index) return undefined
+      this.nextRow++
+      this.nextAt = this.nextRow < this.order.length ? this.lastAt.get(this.order[this.nextRow]!)! : Infinity
+      const error = this.flushDeclared(index) ?? this.finishRow(index)
+      if (error !== undefined) return error
+    }
+    return undefined
   }
 
   row(index: number, hidden: boolean): void {
@@ -161,21 +279,30 @@ class Rows {
     if (++this.cellCount > limits.maxCellsPerSheet) {
       return new LimitExceeded({ limit: "maxCellsPerSheet", max: limits.maxCellsPerSheet, actual: this.cellCount })
     }
-    if (row !== this.current) {
-      const error = this.finishRow() ?? this.flushDeclared(row)
-      if (error !== undefined) return error
-      this.current = row
-      this.sorted = true
-      this.lastColumn = -1
+    let entry = this.hotRow === row ? this.hotEntry : this.open.get(row)
+    if (entry === undefined) {
+      entry = { cells: [], sorted: true, lastColumn: -1 }
+      this.open.set(row, entry)
     }
-    if (cell.column <= this.lastColumn) this.sorted = false
-    this.lastColumn = cell.column
-    this.cells.push(cell)
+    this.hotRow = row
+    this.hotEntry = entry
+    if (cell.column <= entry.lastColumn) entry.sorted = false
+    entry.lastColumn = cell.column
+    entry.cells.push(cell)
     return undefined
   }
 
   end(): SpreadsheetError | undefined {
-    return this.finishRow() ?? this.flushDeclared(Infinity)
+    const error = this.complete(Infinity)
+    if (error !== undefined) return error
+    // rows the scan didn't place (none when both passes agree), in row order
+    const left = Uint32Array.from(this.open.keys()).sort()
+    // progress: one row per iteration
+    for (const index of left) {
+      const failed = this.flushDeclared(index) ?? this.finishRow(index)
+      if (failed !== undefined) return failed
+    }
+    return this.flushDeclared(Infinity)
   }
 }
 
@@ -187,11 +314,13 @@ const numberCell = (globals: Globals, column: number, xf: number, value: number)
     const date = serialToDate(value, globals.date1904)
     if (date !== undefined) return Cell.date(column, date, meta)
   }
+  // NaN and infinities aren't Excel numbers: #NUM!, as for a formula result
+  if (!Number.isFinite(value)) return Cell.error(column, "#NUM!", meta)
   return Cell.number(column, value === 0 ? 0 : value, meta)
 }
 
 /** Handles one record of the substream; `true` at its EOF. */
-const handle = (record: BiffRecord, rows: Rows, context: SheetContext): SpreadsheetError | boolean => {
+const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: SheetContext): SpreadsheetError | boolean => {
   const { globals, part } = context
   // embedded substreams (chart objects) sit between BOF and EOF inside the sheet: skipped
   if (record.type === BOF_BIFF5_8) {
@@ -205,8 +334,11 @@ const handle = (record: BiffRecord, rows: Rows, context: SheetContext): Spreadsh
   const f = new Fields(record.data)
   const truncated = () => malformed(part, `truncated record 0x${record.type.toString(16)}`, record.offset)
   const tooLong = () => new LimitExceeded({ limit: "maxStringLength", max: context.limits.maxStringLength, actual: context.limits.maxStringLength + 1 })
-  // a formula's string result must come right after it
-  if (rows.pendingString !== undefined && record.type !== STRING) {
+  // a formula's string result comes right after it, or after its SHRFMLA, ARRAY or TABLE
+  if (
+    rows.pendingString !== undefined && record.type !== STRING && record.type !== SHRFMLA && record.type !== ARRAY &&
+    record.type !== TABLE
+  ) {
     const pending = rows.pendingString
     rows.pendingString = undefined
     const error = rows.cell(pending.row, Cell.text(pending.column, "", pending.meta))
@@ -249,7 +381,6 @@ const handle = (record: BiffRecord, rows: Rows, context: SheetContext): Spreadsh
       const at = rc()
       const value = f.f64(6)
       if (at === undefined || value === undefined) return truncated()
-      if (!Number.isFinite(value)) return malformed(part, "a number that isn't finite", record.offset)
       return rows.cell(at[0], numberCell(globals, at[1], at[2], value)) ?? false
     }
     case RK: {
@@ -286,9 +417,7 @@ const handle = (record: BiffRecord, rows: Rows, context: SheetContext): Spreadsh
       const isError = f.u8(7)
       if (at === undefined || value === undefined || isError === undefined) return truncated()
       if (isError === 1) {
-        const code = ERROR_CODES.get(value)
-        if (code === undefined) return malformed(part, `unknown error code 0x${value.toString(16)}`, record.offset)
-        return rows.cell(at[0], Cell.error(at[1], code)) ?? false
+        return rows.cell(at[0], Cell.error(at[1], errorCode(value))) ?? false
       }
       return rows.cell(at[0], Cell.boolean(at[1], value !== 0)) ?? false
     }
@@ -297,7 +426,8 @@ const handle = (record: BiffRecord, rows: Rows, context: SheetContext): Spreadsh
       if (at === undefined) return truncated()
       return rows.cell(at[0], Cell.empty(at[1])) ?? false
     }
-    case FORMULA: {
+    case FORMULA:
+    case FORMULA_BIFF4: {
       const at = rc()
       if (at === undefined || record.data.length < 14) return truncated()
       if (f.u16(12) === 0xFFFF) {
@@ -309,21 +439,25 @@ const handle = (record: BiffRecord, rows: Rows, context: SheetContext): Spreadsh
           return false
         }
         if (kind === 1) return rows.cell(at[0], Cell.boolean(at[1], value !== 0)) ?? false
-        if (kind === 2) return rows.cell(at[0], Cell.error(at[1], ERROR_CODES.get(value) ?? "#N/A")) ?? false
+        if (kind === 2) return rows.cell(at[0], Cell.error(at[1], errorCode(value))) ?? false
         return rows.cell(at[0], Cell.text(at[1], "")) ?? false
       }
       const value = f.f64(6)!
-      if (!Number.isFinite(value)) return rows.cell(at[0], Cell.error(at[1], "#NUM!")) ?? false
       return rows.cell(at[0], numberCell(globals, at[1], at[2], value)) ?? false
     }
     case STRING: {
       const pending = rows.pendingString
       if (pending === undefined) return false // a STRING without a formula: ignored
       rows.pendingString = undefined
-      const text = readString(record.data, 0, globals.text, 2)
-      if (text === undefined) return truncated()
-      if (text === null) return tooLong()
-      return rows.cell(pending.row, Cell.text(pending.column, text.value, pending.meta)) ?? false
+      // BIFF8: an XLUnicodeString, maybe continued (each CONTINUE restarts
+      // with an option byte); BIFF5: a u16-count code-page string
+      const read = "segments" in record
+        ? readRichString(new SegmentReader(record.segments), context.limits.maxStringLength)
+        : readString(record.data, 0, globals.text, 2)
+      if (read === undefined) return truncated()
+      if (read === null) return tooLong()
+      const text = typeof read === "string" ? read : read.value
+      return rows.cell(pending.row, Cell.text(pending.column, text, pending.meta)) ?? false
     }
     default:
       return false
@@ -335,27 +469,42 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
   Stream.fromPull(Effect.sync(() => {
     const opened = openSubstream(context)
     const reader = opened instanceof RecordReader ? opened : undefined
+    const scan = reader === undefined ? undefined : new RowScan(context, reader.offset)
     const rows = new Rows(context)
+    const maxStringBytes = stringMaxBytes(context.limits)
     let done = false
     const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
-      if (reader === undefined) return yield* Effect.fail(opened as SpreadsheetError)
+      if (reader === undefined || scan === undefined) return yield* Effect.fail(opened as SpreadsheetError)
       // progress: each iteration reads up to BATCH_RECORDS records (the
-      // reader's offset grows with each), or ends the stream
+      // scan's or the reader's offset grows with each), or ends the stream
       while (true) {
         if (done) return yield* Cause.done()
         yield* Effect.yieldNow
+        if (!scan.done) {
+          scan.step(BATCH_RECORDS)
+          if (scan.done) rows.start(scan.lastAt)
+          continue
+        }
         let ended = false
         // progress: k up to BATCH_RECORDS; every next() advances the reader
         for (let k = 0; k < BATCH_RECORDS; k++) {
-          const record = reader.next()
+          const record = rows.nested === 0 && context.globals.biff8 && reader.peekType() === STRING
+            ? reader.nextWithContinues(maxStringBytes, "maxStringLength")
+            : reader.next()
           if (record === undefined) return yield* Effect.fail(malformed(context.part, "the sheet has no EOF"))
           if (record instanceof MalformedFile) return yield* Effect.fail(record)
+          if (record instanceof LimitExceeded) {
+            const max = context.limits.maxStringLength
+            return yield* Effect.fail(new LimitExceeded({ limit: "maxStringLength", max, actual: max + 1 }))
+          }
           const result = handle(record, rows, context)
           if (result === true) {
             ended = true
             break
           }
           if (result !== false) return yield* Effect.fail(result)
+          const error = rows.complete(record.offset)
+          if (error !== undefined) return yield* Effect.fail(error)
         }
         if (ended) {
           done = true
