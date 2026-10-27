@@ -21,6 +21,18 @@ const SMALL = ROWS / 16
 /** As in xls-perf: 16n rows may take at most this many times 16 x the CPU time of n rows (load only slows a run down). */
 const MAX_SCALING = 2.2
 const ROUNDS = 8
+/**
+ * Records between two event-loop turns at most: those of two slices (a turn
+ * may see the end of one slice's rows and the next slice), of records of
+ * at least `MIN_RECORD_BYTES`. The smallest records in these sheets are RK
+ * cells (14 bytes with their header; the 300 blanks of every 1024th row are
+ * 10, too few to matter): 9 364 records, where a 1 MiB slice would give
+ * about 60 000.
+ */
+const MIN_RECORD_BYTES = 14
+/** The reader's slice, 64 KiB: written out, so a reader cutting bigger slices fails here. */
+const SLICE = 64 * 1024
+const MAX_RECORDS_PER_TURN = 2 * Math.ceil(SLICE / MIN_RECORD_BYTES)
 
 /**
  * Rows of every kind, every 10th hidden: a shared string, an RK number, a
@@ -64,13 +76,12 @@ describe("xlsb: 200 000 rows", () => {
         () => work.records
       )
       expect([rows, hidden]).toEqual([ROWS, ROWS / 10])
-      // a slice of SLICE_BYTES gives at most SLICE_BYTES / 2 records (and a
-      // turn may see the end of one slice's rows and the next slice)
-      expect(run.maxPerTurn).toBeLessThanOrEqual(SLICE_BYTES)
+      expect([B.rk(0, 0).length, SLICE_BYTES]).toEqual([MIN_RECORD_BYTES, SLICE])
+      expect(run.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
       expect(run.yields).toBeGreaterThanOrEqual(ROWS / (SLICE_BYTES / 2))
       const details = await countYields(() => Effect.runPromise(Workbook.sheetDetails(wb, 0)), () => work.records)
       expect(details.value.merges).toHaveLength(1)
-      expect(details.maxPerTurn).toBeLessThanOrEqual(SLICE_BYTES)
+      expect(details.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
     }, 300_000)
   }
 
@@ -87,9 +98,9 @@ describe("xlsb: 200 000 rows", () => {
       () => work.records
     )
     expect(rows).toBe(ROWS)
-    expect(run.maxPerTurn).toBeLessThanOrEqual(SLICE_BYTES)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
     const details = await countYields(() => Effect.runPromise(sheetDetails(Stream.make(part), "one.bin", limits)), () => work.records)
-    expect(details.maxPerTurn).toBeLessThanOrEqual(SLICE_BYTES)
+    expect(details.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
   }, 300_000)
 
   it("read in linear work: 16x the rows take 16x the records", async () => {
