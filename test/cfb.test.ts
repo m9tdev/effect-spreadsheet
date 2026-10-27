@@ -113,6 +113,28 @@ describe("cfb: reading", () => {
     expect(reasonOf(open(none, limits))).toBe("no FAT sectors")
   })
 
+  it("FAT sectors listed past the end of the file that only describe missing sectors are not read (as pyExcelerator writes)", () => {
+    // 109 FAT sectors declared and listed, the first the real one (the last
+    // sector of the file), the other 108 past the end of the file
+    const layout = writeCfb(SAMPLE)
+    const fat = layout.fatSectors[0]!
+    expect(layout.fatSectors.length).toBe(1)
+    expect(fat).toBe(layout.bytes.length / 512 - 2)
+    const listed = layout.bytes.slice()
+    patch32(listed, 44, 109)
+    for (let k = 1; k < 109; k++) patch32(listed, 76 + 4 * k, fat + k)
+    const cfb = openOk(listed)
+    expect(readOk(cfb, "Workbook")).toEqual(pseudoRandom(10_000, 1))
+    expect(readOk(cfb, "Edge")).toEqual(pseudoRandom(4095, 3))
+    expect(readOk(cfb, "_VBA_PROJECT_CUR/VBA/dir")).toEqual(pseudoRandom(700, 5))
+    // a FAT sector that describes sectors the file has, and is missing, still fails
+    const big = writeCfb([{ name: "Workbook", data: pseudoRandom(200 * 512, 9) }])
+    expect(big.fatSectors.length).toBe(2)
+    const missing = big.bytes.slice()
+    patch32(missing, 80, big.bytes.length / 512 + 5)
+    expect(reasonOf(open(missing, limits))).toBe(`FAT sector ${big.bytes.length / 512 + 5} is outside the file`)
+  })
+
   it("a partial last sector is read as far as it goes (pinned: the file opens and reads)", () => {
     const layout = writeCfb(SAMPLE)
     // the last sector is the FAT; its last 25 entries (unused) are cut off

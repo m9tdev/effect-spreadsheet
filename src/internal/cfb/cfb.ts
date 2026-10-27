@@ -215,9 +215,13 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
   if (fatSectors.length < declaredFat && !countLies) {
     return malformed(`found ${fatSectors.length} of ${declaredFat} FAT sectors`)
   }
-  const numFat = fatSectors.length
-
-  // the FAT itself
+  // the FAT itself. FAT sector k describes sectors k * perSector onwards, so
+  // only the first ceil(fileSectors / perSector) can describe sectors the
+  // file has; walks reject sectors past the file before using the FAT, so the
+  // rest are never consulted and are not read. (pyExcelerator lists FAT
+  // sectors past the end of a small file; those must not fail it, while a
+  // FAT sector a chain could need and the file lacks still does.)
+  const numFat = Math.min(fatSectors.length, Math.ceil(fileSectors / perSector))
   const fat = new Uint32Array(numFat * perSector)
   // progress: one FAT sector per iteration
   for (let k = 0; k < numFat; k++) {
