@@ -9,14 +9,14 @@ importers:
   .:
     devDependencies:
       '@effect/vitest':
-        specifier: 4.0.6
-        version: 4.0.6(effect@4.0.6)(vitest@5.0.5(@types/node@24.19.2)(vite@8.3.5(@types/node@24.19.2)))
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(vitest@5.0.5(@types/node@24.19.2)(vite@8.3.5(@types/node@24.19.2)))
       '@types/node':
         specifier: ^24
         version: 24.19.2
       effect:
-        specifier: 4.0.6
-        version: 4.0.6
+        specifier: 4.1.0
+        version: 4.1.0
       fast-check:
         specifier: ^4.10.2
         version: 4.10.2
@@ -29,10 +29,10 @@ importers:
 
 packages:
 
-  '@effect/vitest@4.0.6':
-    resolution: {integrity: sha512-oKNbtyUHK5+0o730CXwojULEu7f3+c235pYFD4U5T//o+hHrJbYbZU4bRkcv936tPr5IOnmujeyQiC/LuJJjHw==}
+  '@effect/vitest@4.1.0':
+    resolution: {integrity: sha512-+APF69oTYgGj5WCewowk1/udepH74xz4ONyH7d+UfcK0SrF3osiSwsWEyODUpJvWd6MIk5F5PcFJiE4evMuG2A==}
     peerDependencies:
-      effect: ^4.0.6
+      effect: ^4.1.0
       vitest: '>=5.0.0 <6.0.0'
 
   '@jridgewell/resolve-uri@3.1.2':
@@ -305,8 +305,8 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  effect@4.0.6:
-    resolution: {integrity: sha512-Tc3mkzuLR6t6P9dhLt0D2GrxYtmU5td4XEJEiXCmILz53IRIfJyHsKZWjTA3xEjiwpNTtXBgI4iqYPxMztBDrw==}
+  effect@4.1.0:
+    resolution: {integrity: sha512-lGx2MJJyrXA8RZb2UpQ/0Nkb5Utaimby7oD92+18noBxLPE85IFOvptdzau8dvcxAOwfwHo9iqapbKeFzqQM/Q==}
 
   es-module-lexer@2.3.2:
     resolution: {integrity: sha512-poHGpORABojJJucnV9KbOavETW8lBVnphkW77ER5/BQ5Fz7oXSoCNek7IH3vR5nRjdsEz926ibFYX8KtLQmdyw==}
@@ -559,9 +559,9 @@ packages:
 
 snapshots:
 
-  '@effect/vitest@4.0.6(effect@4.0.6)(vitest@5.0.5(@types/node@24.19.2)(vite@8.3.5(@types/node@24.19.2)))':
+  '@effect/vitest@4.1.0(effect@4.1.0)(vitest@5.0.5(@types/node@24.19.2)(vite@8.3.5(@types/node@24.19.2)))':
     dependencies:
-      effect: 4.0.6
+      effect: 4.1.0
       vitest: 5.0.5(@types/node@24.19.2)(vite@8.3.5(@types/node@24.19.2))
 
   '@jridgewell/resolve-uri@3.1.2': {}
@@ -712,7 +712,7 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  effect@4.0.6: {}
+  effect@4.1.0: {}
 
   es-module-lexer@2.3.2: {}
 
