@@ -120,7 +120,7 @@ describe("toRecords", () => {
     ])
   })
 
-  it("defval fills only header-named columns; far cells don't widen every record (B1 regression)", async () => {
+  it("defval fills only header-named columns; far cells don't widen every record", async () => {
     // header `a`, one row with a cell at column 16383, then 5000 rows of `y`
     const text = "a\n" + ",".repeat(16383) + "far\n" + "y\n".repeat(5000)
     expect(text.length).toBeLessThan(30_000)
@@ -228,7 +228,7 @@ describe("toRecords", () => {
       assert.strictEqual(error._tag === "LimitExceeded" && error.limit, "maxCellsPerSheet")
     }))
 
-  it("B1': a 16384-column header times 1300 rows with defval stays bounded and yielding", async () => {
+  it("a 16384-column header times 1300 rows with defval stays bounded and yielding", async () => {
     const header = Array.from({ length: 16384 }, (_, i) => `c${i}`).join(",")
     const bytes = enc(header + "\n" + "y\n".repeat(1300))
     expect(bytes.length).toBeLessThan(110_000)

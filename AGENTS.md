@@ -78,3 +78,5 @@ Read PLAN.md first. This is the project's rulebook.
   fresh review.
 - No `npm publish` without the user's OK.
 - Commit messages: imperative, with the scope (`csv: handle CRLF in quotes`).
+- Commit messages, PR text, issues and docs use plain terms: never reference
+  internal tracker keys, agent names or review rounds.

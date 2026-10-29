@@ -60,7 +60,7 @@ suffix logic needed). Four pinned tests would then have to change: "duplicate
 and empty header names are made unique like SheetJS", "columns past the header
 get __EMPTY names", "header row missing from sparse rows: columns get __EMPTY
 names", and "defval fills only header-named columns; far cells don't widen every
-record (B1 regression)" (its `__EMPTY` would become `__EMPTY_16383`). I don't
+record" (its `__EMPTY` would become `__EMPTY_16383`). I don't
 recommend this.
 
 ## 3. Interface
@@ -238,7 +238,7 @@ Lazy cases with `make(...)` and the `key` call order (from the tests):
 | 20 | header `a`; row `1,2,3` | `a, __EMPTY, __EMPTY_1` (pinned) |
 | 21 | header `a,,c`; row `1`; row `,2` | `named` = `a, c`; column 1 becomes `__EMPTY` on row 2 (pinned) |
 | 22 | header missing (`make([])`); cell at column 1 | `__EMPTY` (pinned) |
-| 23 | header `a`; row with one cell at column 16383 | `__EMPTY` (pinned, B1) |
+| 23 | header `a`; row with one cell at column 16383 | `__EMPTY` (pinned; the far cell doesn't widen other records) |
 | 24 | header `a`; row 1 data at column 2; row 2 at column 1 | column 2 `__EMPTY`, column 1 `__EMPTY_1` |
 
 ## 6. Cost bounds and loop progress (AGENTS.md Safety 1, 3, 4)
@@ -284,12 +284,12 @@ From `test/records.test.ts`:
 - "columns past the header get __EMPTY names" (example 20)
 - "header row missing from sparse rows: columns get __EMPTY names" (example 22)
 - "gap columns inside the header get no defval and are named when data appears" (example 21)
-- "defval fills only header-named columns; far cells don't widen every record (B1 regression)" (example 23, `named` only)
+- "defval fills only header-named columns; far cells don't widen every record" (example 23, `named` only)
 - "__proto__ header becomes an own key, not the prototype"
 - "dates in header become ISO text; values are cell values" (4.6)
 - "explicit header names; extra columns dropped"
 - "first-row header", "header by row index skips earlier rows", "defval fills missing header columns; blank rows skipped unless blankRows"
-- "B1': a 16384-column header times 1300 rows with defval stays fast, bounded and yielding" (16384 distinct names in `make`)
+- "a 16384-column header times 1300 rows with defval stays bounded and yielding" (16384 distinct names in `make`)
 - "works lazily on streams" (one `RecordKeys` per run)
 - the limit tests ("cells count against maxCellsPerSheet, …", "a dense file with defval needs no fills …", "Empty cells count against maxCellsPerSheet", "records built before a limit hit …") must keep their counts: naming keys adds no cells or fills.
 
