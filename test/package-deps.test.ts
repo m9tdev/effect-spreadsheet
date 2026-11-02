@@ -2,8 +2,8 @@ import { existsSync, readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 
 // Rule: effect and any @effect/* package used at runtime are peerDependencies
-// ("^4.1.0") and pinned devDependencies ("4.1.0"), never dependencies (a
-// second copy of effect breaks its runtime type checks).
+// ("^" + the pinned version) and devDependencies pinned to one exact version,
+// never dependencies (a second copy of effect breaks its runtime type checks).
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   license?: string
   files?: Array<string>
@@ -14,25 +14,32 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 
 const isEffect = (name: string) => name === "effect" || name.startsWith("@effect/")
 
+// The version we test against: effect's exact devDependency pin.
+const pin = pkg.devDependencies?.effect
+
 describe("package.json dependencies", () => {
   it("has no effect or @effect/* in dependencies", () => {
     const offending = Object.keys(pkg.dependencies ?? {}).filter(isEffect)
     expect(offending).toEqual([])
   })
 
-  it("has effect as a ^4.1.0 peer dependency", () => {
-    expect(pkg.peerDependencies?.["effect"]).toBe("^4.1.0")
+  it("pins effect in devDependencies to an exact version", () => {
+    expect(pin).toMatch(/^\d+\.\d+\.\d+$/)
   })
 
-  it("pins effect packages in devDependencies to 4.1.0", () => {
+  it("has effect as a peer dependency on ^ the pinned version", () => {
+    expect(pkg.peerDependencies?.["effect"]).toBe(`^${pin}`)
+  })
+
+  it("pins every effect package in devDependencies to the same version", () => {
     const dev = Object.entries(pkg.devDependencies ?? {}).filter(([name]) => isEffect(name))
     expect(dev.length).toBeGreaterThan(0)
-    for (const [name, range] of dev) expect([name, range]).toEqual([name, "4.1.0"])
+    for (const [name, range] of dev) expect([name, range]).toEqual([name, pin])
   })
 
   it("lists every peer effect package in devDependencies too", () => {
     for (const name of Object.keys(pkg.peerDependencies ?? {}).filter(isEffect)) {
-      expect(pkg.devDependencies?.[name], name).toBe("4.1.0")
+      expect(pkg.devDependencies?.[name], name).toBe(pin)
     }
   })
 })

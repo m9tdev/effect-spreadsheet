@@ -9,8 +9,8 @@ Read PLAN.md first. This is the project's rulebook.
   `node:` imports and no native deps under `src/`. Use web-standard APIs
   (`TextDecoder`, `DecompressionStream`, `Uint8Array`/`DataView`).
 - `effect` and every `@effect/*` package used at runtime are
-  `peerDependencies` (range covering Effect 4, e.g. `^4.1.0`), and also
-  `devDependencies` pinned to the version we test against (`4.1.0`). Never in
+  `peerDependencies` (`^` plus the pinned version, e.g. `^4.1.2`), and also
+  `devDependencies` pinned to the version we test against (`4.1.2`). Never in
   `dependencies`: the app's own Effect copy must be the one used, so its
   Data/Schema/Context types match ours. `test/package-deps.test.ts` enforces
   this; every later package follows the same rule.
@@ -77,6 +77,7 @@ Read PLAN.md first. This is the project's rulebook.
 - Work on a branch in a git worktree. Main only moves by merges after a
   fresh review.
 - No `npm publish` without the user's OK.
-- Commit messages: imperative, with the scope (`csv: handle CRLF in quotes`).
-- Commit messages, PR text, issues and docs use plain terms: never reference
-  internal tracker keys, agent names or review rounds.
+- Commit messages are imperative, with the scope (`csv: handle CRLF in
+  quotes`). Commit messages, PR text, issues, docs, code comments and test
+  names use plain terms: never internal tracker keys, agent or chat names,
+  review rounds or reviewer labels.
