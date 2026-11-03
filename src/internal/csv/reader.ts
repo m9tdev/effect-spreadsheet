@@ -58,7 +58,7 @@ export const rowsFromByteStream = <E, R>(
       let inputBytes = 0
       let upstreamDone = false
       let finished = false
-      const pullUpstream = Pull.catchDone(upstream, () => Effect.succeed(undefined))
+      const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
 
       const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, E | SpreadsheetError> = Effect.gen(function*() {
         // progress: each iteration consumes >= 1 queued byte (offset grows,

@@ -348,7 +348,7 @@ export const sheetRows = (
       const rows = new SheetRows(context)
       const decoder = new XmlDecoder(context.part)
       const tokenizer = new XmlTokenizer(rows, context.limits, context.part)
-      const pullUpstream = Pull.catchDone(upstream, () => Effect.succeed(undefined))
+      const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
       let done = false
       const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
         // progress: each iteration pulls one upstream piece (consumed), or

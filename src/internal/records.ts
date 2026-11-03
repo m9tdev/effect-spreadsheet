@@ -204,7 +204,7 @@ export const recordsStream = <E, R>(
   Stream.transformPull(rows, (upstream) =>
     Effect.sync(() => {
       const builder = new RecordBuilder(options, limits)
-      const pullUpstream = Pull.catchDone(upstream, () => Effect.succeed(undefined))
+      const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
       let chunk: ReadonlyArray<Row> = []
       let i = 0
       let upstreamDone = false
