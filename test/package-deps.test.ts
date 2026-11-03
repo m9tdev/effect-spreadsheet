@@ -14,6 +14,10 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 
 const isEffect = (name: string) => name === "effect" || name.startsWith("@effect/")
 
+// Dev-only Effect tooling (the diagnostics CLI) is never imported by the
+// library or the tests, so it follows its own release line instead of effect's.
+const devTools = new Set(["@effect/tsgo"])
+
 // The version we test against: effect's exact devDependency pin.
 const pin = pkg.devDependencies?.effect
 
@@ -31,10 +35,14 @@ describe("package.json dependencies", () => {
     expect(pkg.peerDependencies?.["effect"]).toBe(`^${pin}`)
   })
 
-  it("pins every effect package in devDependencies to the same version", () => {
-    const dev = Object.entries(pkg.devDependencies ?? {}).filter(([name]) => isEffect(name))
+  it("pins every effect package in devDependencies to the same version, and dev tools exactly", () => {
+    const dev = Object.entries(pkg.devDependencies ?? {}).filter(([name]) => isEffect(name) && !devTools.has(name))
     expect(dev.length).toBeGreaterThan(0)
     for (const [name, range] of dev) expect([name, range]).toEqual([name, pin])
+    for (const name of devTools) {
+      const range = pkg.devDependencies?.[name]
+      if (range !== undefined) expect(range, name).toMatch(/^\d+\.\d+\.\d+$/)
+    }
   })
 
   it("lists every peer effect package in devDependencies too", () => {

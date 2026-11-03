@@ -2,7 +2,36 @@
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        // Effect diagnostics, run by `pnpm lint:effect` (effect-tsgo). Rules not
+        // listed keep their default severity; only errors fail the script.
+        "diagnosticSeverity": {
+          "flatMapIdentityToFlatten": "error",
+          "mapConstToAs": "error",
+          "mapMapErrorToMapBoth": "error",
+          "mapSomeCatchNoSuchElement": "error",
+          "resultMatchToFromResult": "error",
+          "suspendFailToFailSync": "error",
+          "matchBooleanToIsSuccess": "error",
+          "effectSucceedWithUndefined": "error",
+          "failCauseToConstructor": "error",
+          "manualMetricTapToTrack": "error",
+          "provideMergeAllToArray": "error",
+          "typeUnionToSchemaUnion": "error",
+          "effectTryWithoutCatch": "error",
+          // src only calls JSON.stringify on strings, to quote them in error
+          // messages, which cannot throw; tests and benchmarks only parse their
+          // own fixtures and print results.
+          "globalJson": "off",
+          "globalJsonInEffect": "off",
+          // Only hit in tests (`sheets.push(yield* x)`), where hoisting adds nothing.
+          "yieldInCallArgument": "off"
+        }
+      }
+    ]
   },
   "include": ["src", "test", "scripts/bench", "vitest.config.ts"]
 }

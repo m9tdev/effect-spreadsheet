@@ -309,7 +309,7 @@ export const sheetRows = (
     Effect.sync(() => {
       const rows = new SheetRows(context)
       const splitter = new RecordSplitter(context.part, context.limits.maxRecordBytes)
-      const pullUpstream = Pull.catchDone(upstream, () => Effect.succeed(undefined))
+      const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
       let done = false
       const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
         // progress: each iteration pulls one upstream piece (consumed), or
