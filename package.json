@@ -46,6 +46,7 @@
     "effect": "^4.1.2"
   },
   "devDependencies": {
+    "@effect/tsgo": "0.64.1",
     "@effect/vitest": "4.1.2",
     "@types/node": "^24",
     "effect": "4.1.2",
