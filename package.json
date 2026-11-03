@@ -40,6 +40,7 @@
   "scripts": {
     "check": "tsc -p tsconfig.json",
     "build": "tsc -p tsconfig.build.json",
+    "lint:effect": "effect-tsgo diagnostics --project tsconfig.json --severity error --format text",
     "test": "vitest run"
   },
   "peerDependencies": {
