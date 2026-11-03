@@ -22,12 +22,15 @@
           "provideMergeAllToArray": "error",
           "typeUnionToSchemaUnion": "error",
           "effectTryWithoutCatch": "error",
-          // src only calls JSON.stringify on strings, to quote them in error
-          // messages, which cannot throw; tests and benchmarks only parse their
-          // own fixtures and print results.
+          // The three rules below are already off by default; they are listed
+          // to record why they are not turned on.
+          // The JSON rules would flag src's JSON.stringify calls, which only
+          // quote strings in error messages and cannot throw, and tests and
+          // benchmarks, which only parse their own fixtures and print results.
           "globalJson": "off",
           "globalJsonInEffect": "off",
-          // Only hit in tests (`sheets.push(yield* x)`), where hoisting adds nothing.
+          // Only tests pass `yield*` straight into a call (`sheets.push(yield* x)`),
+          // where hoisting it into a const adds nothing.
           "yieldInCallArgument": "off"
         }
       }
