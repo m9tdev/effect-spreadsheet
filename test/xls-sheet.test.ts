@@ -218,6 +218,32 @@ describe("xls sheet: rows whose cells come in several places", () => {
     expect(twice.every((r) => r.cells.length === 2 && r.cells[1]!.column === 1)).toBe(true)
   })
 
+  it("a hidden ROW record after its row's cells still hides the row; a visible one there doesn't hold the row back", async () => {
+    const { sheets } = await readOk(one([X.number(0, 0, 0, 1), X.number(1, 0, 0, 2), X.row(0, true)]))
+    expect(values(sheets[0]!)).toEqual([
+      [0, true, [[0, "Number", 1]]],
+      [1, false, [[0, "Number", 2]]]
+    ])
+    // a visible ROW repeated after other rows' cells changes nothing: row 0 isn't held for it
+    const saved = caps.heldCells
+    try {
+      caps.heldCells = 10
+      const late = [X.row(0), X.number(0, 0, 0, 1), ...Array.from({ length: 20 }, (_, r) => X.number(r + 1, 0, 0, r)), X.row(0)]
+      expect((await readOk(one(late))).sheets[0]!.map((r) => [r.index, r.hidden])).toEqual(Array.from({ length: 21 }, (_, r) => [r, false]))
+    } finally {
+      caps.heldCells = saved
+    }
+  })
+
+  it("rows declared only by ROW records come out in row order among the others, whatever the record order", async () => {
+    const after = (await readOk(one([X.number(5, 0, 0, 1), X.row(2, true)]))).sheets[0]!
+    expect(values(after)).toEqual([[2, true, []], [5, false, [[0, "Number", 1]]]])
+    const descending = (await readOk(one([X.row(3), X.row(1, true)]))).sheets[0]!
+    expect(values(descending)).toEqual([[1, true, []], [3, false, []]])
+    const mixed = (await readOk(one([X.row(4), X.number(2, 0, 0, 1), X.row(0, true), X.number(3, 0, 0, 2), X.row(1)]))).sheets[0]!
+    expect(mixed.map((r) => [r.index, r.hidden])).toEqual([[0, true], [1, false], [2, false], [3, false], [4, false]])
+  })
+
   it("a row waits for its formula's STRING even when the row's cells come back later", async () => {
     expect(await cellsOf([
       X.number(1, 0, 0, 1),
@@ -324,11 +350,10 @@ describe("xls sheet: emitting rows", () => {
 
   it("ROW-only rows count towards a batch: complete() and end() stop at the budget and go on in the next batch", () => {
     const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
-    // rows 0-999 declared by ROW records only, row 1000 with a cell (its last at offset 5), row 2000 declared after it
-    rows.start(new Map([[1000, 5]]))
+    // rows 0-999 declared by ROW records only (at offsets 1-4), row 1000 with a cell (at offset 5), row 2000 declared after it (offset 6)
+    rows.start(new Map([...Array.from({ length: 1000 }, (_, r) => [r, 1 + (r % 4)] as const), [1000, 5], [2000, 6]]))
     // progress: r up to 1000
     for (let r = 0; r < 1000; r++) rows.row(r, r % 3 === 0)
-    rows.row(2000, false)
     expect(rows.cell(1000, Cell.number(0, 1))).toBeUndefined()
     const out: Array<number> = []
     const drain = () => {
@@ -346,7 +371,11 @@ describe("xls sheet: emitting rows", () => {
       expect(out.length - before).toBeLessThanOrEqual(101)
     }
     expect(out).toEqual(Array.from({ length: 1001 }, (_, r) => r))
-    // after the EOF: rows the scan didn't place and the declared rest, through end()
+    rows.row(2000, false)
+    expect(rows.complete(6)).toBeUndefined()
+    drain()
+    expect(out.slice(1001)).toEqual([2000])
+    // after the EOF: rows the scan didn't place, cells and ROW records alike, through end()
     expect(rows.cell(1500, Cell.number(0, 2))).toBeUndefined()
     // progress: r up to 1000
     for (let r = 0; r < 1000; r++) rows.row(3000 + r, false)
@@ -361,7 +390,7 @@ describe("xls sheet: emitting rows", () => {
       drain()
       expect(out.length - before).toBeLessThanOrEqual(101)
     }
-    expect(out.slice(1001)).toEqual([1500, 2000, ...Array.from({ length: 1000 }, (_, r) => 3000 + r)])
+    expect(out.slice(1002)).toEqual([1500, ...Array.from({ length: 1000 }, (_, r) => 3000 + r)])
   })
 
   it("end() emits rows the scan didn't place within the budget, over several batches", () => {

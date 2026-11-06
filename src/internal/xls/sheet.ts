@@ -9,11 +9,11 @@
  *
  * - Rows: ROW records give hidden rows (fDyZero) and rows without cells;
  *   cells mostly come row by row after their block of ROW records, but
- *   some writers put a row's cells in several places. A first pass over
- *   the record headers (`RowScan`) finds where each row's last cell is; a
- *   row is emitted, merged, once that record is handled, in row order
- *   (rows before it wait, holding only cells already counted against
- *   `maxCellsPerSheet`). ROW-only rows are emitted in order between them.
+ *   some writers put a row's cells (or its ROW record) in several places.
+ *   A first pass over the record headers (`RowScan`) finds where each row
+ *   ends; a row is emitted, merged, once that record is handled, in row
+ *   order (rows before it wait, holding only cells already counted against
+ *   `maxCellsPerSheet`). ROW-only rows are emitted in that same order.
  *   Hidden rows are emitted with `hidden: true`, never skipped.
  * - Cells: LABELSST, LABEL, RSTRING (text), NUMBER, RK, MULRK (numbers),
  *   BOOLERR (booleans and errors), BLANK, MULBLANK (Empty), FORMULA with
@@ -134,11 +134,15 @@ const openSubstream = (context: SheetContext): RecordReader | SpreadsheetError =
 const CELL_RECORDS: ReadonlySet<number> = new Set([LABELSST, LABEL, RSTRING, NUMBER, RK, MULRK, BOOLERR, BLANK, MULBLANK, FORMULA, FORMULA_BIFF4])
 
 /**
- * A first pass over the substream's records (headers and row numbers only):
- * the offset of each row's last cell record. Some writers emit a row's
- * cells in several places; knowing where each row ends lets the main pass
- * merge them and still emit every row as soon as it is complete. One entry
- * per row with cells (at most 65 536: rows are u16).
+ * A first pass over the substream's records (headers, row numbers and ROW
+ * flags only): where each row ends, the offset of its last cell record or
+ * of a ROW record that matters (its first one, or one that hides it). Some
+ * writers emit a row's cells, or a ROW record after them, in several
+ * places; knowing where each row ends lets the main pass merge them, with
+ * the row's hidden flag, and still emit every row, in row order, as soon as
+ * it is complete. A later ROW record that doesn't hide the row changes
+ * nothing, so the row doesn't wait for it. One entry per row with cells or a
+ * ROW record (at most 65 536: rows are u16).
  */
 class RowScan {
   readonly lastAt = new Map<number, number>()
@@ -168,8 +172,10 @@ class RowScan {
           return
         }
         this.nested--
-      } else if (this.nested === 0 && CELL_RECORDS.has(record.type) && record.data.length >= 2) {
-        this.lastAt.set(record.data[0]! | (record.data[1]! << 8), record.offset)
+      } else if (this.nested === 0 && record.data.length >= 2) {
+        const row = record.data[0]! | (record.data[1]! << 8)
+        if (CELL_RECORDS.has(record.type)) this.lastAt.set(row, record.offset)
+        else if (record.type === ROW && (!this.lastAt.has(row) || ((record.data[12] ?? 0) & 0x20) !== 0)) this.lastAt.set(row, record.offset)
       }
     }
   }
@@ -200,9 +206,9 @@ interface OpenRow {
 }
 
 /**
- * Builds rows from cell records. Cells of a row are gathered until the
- * record holding its last cell (from the `RowScan`) is handled, then rows
- * are emitted in row order. Rows waiting for later cells hold only cells
+ * Builds rows from cell and ROW records. Cells of a row are gathered until
+ * the record where it ends (from the `RowScan`) is handled, then rows are
+ * emitted in row order. Rows waiting for later records hold only cells
  * already counted against `maxCellsPerSheet`.
  */
 export class Rows {
@@ -214,35 +220,29 @@ export class Rows {
   /** The row the last cell went to (most cells follow the one before). */
   private hotRow = -1
   private hotEntry: OpenRow | undefined
-  /** Offset of each row's last cell record. */
+  /** Offset of the record where each row ends (see `RowScan`). */
   private lastAt: ReadonlyMap<number, number> = new Map()
-  /** Rows with cells, ascending; `order[nextRow]` is the next one to emit. */
+  /** Rows the scan placed, ascending; `order[nextRow]` is the next one to emit. */
   private order: Uint32Array = new Uint32Array(0)
   private nextRow = 0
-  /** Offset of `order[nextRow]`'s last cell record (Infinity when none is left). */
+  /** Offset of the record where `order[nextRow]` ends (Infinity when none is left). */
   private nextAt = Infinity
   /** Hidden flags from ROW records. */
   private readonly hidden = new Set<number>()
-  /** Rows declared by ROW records, not emitted yet, in record order (each once). */
-  private declared: Array<number> = []
-  private declaredAt = 0
-  /** Rows ever declared: a repeated ROW record isn't queued again (it would only be passed over). */
-  private readonly declaredOnce = new Set<number>()
+  /** Rows declared by ROW records (each once, however many ROW records it has). */
+  private readonly declared = new Set<number>()
   /** Rows the scan didn't place, in row order (set by `end`); `left[leftAt]` is the next one. */
   private left: Uint32Array | undefined
   private leftAt = 0
-  /** Rows emitted so far (a ROW-only row is emitted once). */
-  private readonly emitted = new Set<number>()
   private rowCount = 0
   /** Cells read so far (repeats included): counted against maxCellsPerSheet. */
   cellCount = 0
   /** Cells in `open` rows: exactly those held, not emitted yet (see `caps`). */
   held = 0
   /**
-   * Cells read, cells sorted (compacting a row) and rows emitted (or a
-   * declared row passed over, already out): the work that a batch spends,
-   * up to `budget`. Emitting rows stops at the budget and goes on in the
-   * next batch.
+   * Cells read, cells sorted (compacting a row) and rows emitted: the
+   * work that a batch spends, up to `budget`. Emitting rows stops at the
+   * budget and goes on in the next batch.
    */
   effort = 0
   budget = Infinity
@@ -257,7 +257,7 @@ export class Rows {
     this.context = context
   }
 
-  /** Where each row's cells end, from the `RowScan`. */
+  /** Where each row ends, from the `RowScan`. */
   start(lastAt: ReadonlyMap<number, number>): void {
     this.lastAt = lastAt
     this.order = Uint32Array.from(lastAt.keys()).sort()
@@ -270,37 +270,17 @@ export class Rows {
     if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
     if (++this.rowCount > limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: this.rowCount })
     this.out.push({ index, hidden, cells })
-    this.emitted.add(index)
     return undefined
   }
 
-  /** Emits declared ROW-only rows up to (not including) `before`, until `effort` reaches `budget` (see `declaredBefore`). */
-  private flushDeclared(before: number): SpreadsheetError | undefined {
-    // progress: declaredAt increases up to declared.length
-    while (this.declaredBefore(before) && this.effort < this.budget) {
-      work.steps++
-      this.effort++
-      const index = this.declared[this.declaredAt++]!
-      if (this.emitted.has(index)) continue
-      const error = this.push(index, this.hidden.has(index), [])
-      if (error !== undefined) return error
-    }
-    if (this.declaredAt === this.declared.length) {
-      this.declared = []
-      this.declaredAt = 0
-    }
-    return undefined
-  }
-
-  /** Whether declared rows before `before` are left for `flushDeclared` (it stopped at the budget). */
-  private declaredBefore(before: number): boolean {
-    return this.declaredAt < this.declared.length && this.declared[this.declaredAt]! < before
-  }
-
-  /** Emits row `index` with its cells (if it got any). */
+  /** Emits row `index` with its cells, or without any if only ROW records declared it. */
   private finishRow(index: number): SpreadsheetError | undefined {
     const entry = this.open.get(index)
-    if (entry === undefined) return undefined
+    if (entry === undefined) {
+      if (!this.declared.has(index)) return undefined
+      this.effort++
+      return this.push(index, this.hidden.has(index), [])
+    }
     this.open.delete(index)
     this.held -= entry.cells.length
     if (this.hotRow === index) {
@@ -334,8 +314,8 @@ export class Rows {
   }
 
   /**
-   * After the record at `offset`: emits, in row order, the rows whose last
-   * cell record is at or before it (not one still waiting for its STRING),
+   * After the record at `offset`: emits, in row order, the rows that end
+   * at or before it (not one still waiting for its STRING),
    * until `effort` reaches `budget` (see `behind`).
    */
   complete(offset: number): SpreadsheetError | undefined {
@@ -344,10 +324,6 @@ export class Rows {
       work.steps++
       const index = this.order[this.nextRow]!
       if (this.pendingString?.row === index) return undefined
-      // the ROW-only rows before it first: at the budget, `index` waits (still `behind`)
-      const flushed = this.flushDeclared(index)
-      if (flushed !== undefined) return flushed
-      if (this.declaredBefore(index)) return undefined
       this.nextRow++
       this.nextAt = this.nextRow < this.order.length ? this.lastAt.get(this.order[this.nextRow]!)! : Infinity
       const error = this.finishRow(index)
@@ -363,9 +339,7 @@ export class Rows {
 
   row(index: number, hidden: boolean): void {
     if (hidden) this.hidden.add(index)
-    if (this.declaredOnce.has(index)) return
-    this.declaredOnce.add(index)
-    this.declared.push(index)
+    this.declared.add(index)
   }
 
   cell(row: number, cell: Cell.Cell): SpreadsheetError | undefined {
@@ -408,21 +382,18 @@ export class Rows {
    * call it again in the next batch).
    */
   end(): SpreadsheetError | boolean {
-    // rows the scan didn't place (none when both passes agree), in row order
-    const left = this.left ??= Uint32Array.from(this.open.keys()).sort()
-    // progress: leftAt increases up to left.length (or flushDeclared's declaredAt does, until the budget)
+    // rows the scan didn't place (none when both passes agree), in row order:
+    // the rows still open and the declared rows it has no entry for
+    this.left ??= Uint32Array.from(new Set([...this.open.keys(), ...[...this.declared].filter((index) => !this.lastAt.has(index))])).sort()
+    const left = this.left
+    // progress: leftAt increases up to left.length
     while (this.leftAt < left.length) {
       if (this.effort >= this.budget) return false
       work.steps++
-      const index = left[this.leftAt]!
-      const flushed = this.flushDeclared(index)
-      if (flushed !== undefined) return flushed
-      if (this.declaredBefore(index)) return false
-      this.leftAt++
-      const failed = this.finishRow(index)
+      const failed = this.finishRow(left[this.leftAt++]!)
       if (failed !== undefined) return failed
     }
-    return this.flushDeclared(Infinity) ?? !this.declaredBefore(Infinity)
+    return true
   }
 }
 
