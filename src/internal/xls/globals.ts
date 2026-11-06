@@ -19,7 +19,7 @@ import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, Unsuppo
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { DefinedName } from "../../Workbook.ts"
 import { BOF_BIFF5_8, continued, EOF, type Gathering, RecordReader, readBof } from "../biff/records.ts"
-import { readRichString, SegmentReader, utf16 } from "../biff/segments.ts"
+import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
 import { codepageLabel, Fields, readString, type Text, textDecoder } from "./fields.ts"
@@ -199,7 +199,10 @@ export const BATCH_BYTES = 16 * BATCH_CELLS
  */
 export const batches = { count: 0 }
 
-/** What the walk works on between records: the CONTINUEs of an SST or SUPBOOK, then its strings. */
+/**
+ * What the walk works on between records: the CONTINUEs of an SST,
+ * SUPBOOK, EXTERNSHEET or NAME, then the strings of an SST or SUPBOOK.
+ */
 type Pending =
   | { readonly kind: "continues"; readonly type: number; readonly gathering: Gathering }
   | { readonly kind: "sst"; readonly segments: SegmentReader; readonly unique: number }
@@ -275,7 +278,7 @@ class GlobalsWalk {
     return "more"
   }
 
-  /** Reads one record (an SST or SUPBOOK becomes `pending`); "done" at the EOF. */
+  /** Reads one record (an SST, SUPBOOK, EXTERNSHEET or NAME becomes `pending`); "done" at the EOF. */
   private record(): "done" | SpreadsheetError | undefined {
     const { reader, limits, biff8 } = this
     const record = reader.next()
@@ -291,6 +294,8 @@ class GlobalsWalk {
         return new Encrypted({ format: "xls" })
       case SST:
       case SUPBOOK:
+      case EXTERNSHEET:
+      case NAME:
         // BIFF5 has no SST; its EXTERNSHEETs and NAMEs aren't read, so neither are its SUPBOOKs
         if (biff8) {
           this.pending = { kind: "continues", type: record.type, gathering: reader.startContinues(record, limits.maxDecompressedBytes, "maxDecompressedBytes") }
@@ -342,44 +347,62 @@ class GlobalsWalk {
       case XF:
         this.xfFormats.push(f.u16(2) ?? 0)
         return undefined
-      case EXTERNSHEET: {
-        if (!biff8) return undefined
-        const count = f.u16(0) ?? 0
-        this.xtis = []
-        // progress: k up to count; each entry is 6 bytes inside the record
-        for (let k = 0; k < count && 2 + 6 * k + 6 <= record.data.length; k++) {
-          this.xtis.push({ book: f.u16(2 + 6 * k)!, first: f.u16(2 + 6 * k + 2)!, last: f.u16(2 + 6 * k + 4)! })
-        }
-        return undefined
-      }
-      case NAME: {
-        if (!biff8) return undefined
-        const grbit = f.u16(0)
-        const cch = f.u8(3)
-        const cce = f.u16(4)
-        const itab = f.u16(8)
-        const flags = f.u8(14)
-        if (grbit === undefined || cch === undefined || cce === undefined || itab === undefined || flags === undefined) return undefined
-        if (cch > limits.maxStringLength) return tooLong(limits, cch)
-        const wide = (flags & 0x01) !== 0
-        const nameEnd = 15 + cch * (wide ? 2 : 1)
-        if (nameEnd + cce > record.data.length) return undefined
-        if (this.names.length >= limits.maxDefinedNames) {
-          return new LimitExceeded({ limit: "maxDefinedNames", max: limits.maxDefinedNames, actual: this.names.length + 1 })
-        }
-        const raw = record.data.subarray(15, nameEnd)
-        const chars = wide ? utf16.decode(raw) : String.fromCharCode(...raw)
-        const builtin = (grbit & 0x20) !== 0
-        const name = builtin ? `_xlnm.${BUILTIN_NAMES[chars.charCodeAt(0)] ?? chars}` : chars
-        this.names.push({ name, hidden: (grbit & 0x01) !== 0, scope: itab > 0 ? itab - 1 : undefined, rgce: record.data.subarray(nameEnd, nameEnd + cce) })
-        return undefined
-      }
       default:
         return undefined
     }
   }
 
-  /** Goes on with an SST or SUPBOOK: reads its CONTINUEs, then its strings, within the batch's budget. */
+  /**
+   * An EXTERNSHEET (with its CONTINUEs): the XTIs, as many as declared and
+   * present. A few hundred kilobytes at most (65 535 entries of 6 bytes),
+   * all counted in the batch's bytes while its CONTINUEs were read.
+   */
+  private externSheet(segments: SegmentReader): undefined {
+    const count = segments.u16() ?? 0
+    this.xtis = []
+    // progress: k up to count; each entry reads 6 of the bytes left
+    for (let k = 0; k < count && segments.remaining() >= 6; k++) {
+      this.xtis.push({ book: segments.u16()!, first: segments.u16()!, last: segments.u16()! })
+    }
+    return undefined
+  }
+
+  /**
+   * A NAME (with its CONTINUEs): its name and formula. One whose header,
+   * name or formula is cut short is skipped. Name characters continued in a
+   * CONTINUE start with their own option byte there, as other strings do.
+   */
+  private name(segments: SegmentReader): LimitExceeded | undefined {
+    const { limits } = this
+    const grbit = segments.u16()
+    segments.u8() // keyboard shortcut
+    const cch = segments.u8()
+    const cce = segments.u16()
+    segments.skip(2)
+    const itab = segments.u16()
+    segments.skip(4)
+    const flags = segments.u8()
+    if (grbit === undefined || cch === undefined || cce === undefined || itab === undefined || flags === undefined) return undefined
+    if (cch > limits.maxStringLength) return tooLong(limits, cch)
+    const chars = segments.chars(cch, (flags & 0x01) !== 0)
+    if (chars === undefined || segments.remaining() < cce) return undefined
+    if (this.names.length >= limits.maxDefinedNames) {
+      return new LimitExceeded({ limit: "maxDefinedNames", max: limits.maxDefinedNames, actual: this.names.length + 1 })
+    }
+    const rgce = new Uint8Array(cce)
+    // progress: k up to cce, with at least cce bytes left
+    for (let k = 0; k < cce; k++) rgce[k] = segments.u8()!
+    const builtin = (grbit & 0x20) !== 0
+    const name = builtin ? `_xlnm.${BUILTIN_NAMES[chars.charCodeAt(0)] ?? chars}` : chars
+    this.names.push({ name, hidden: (grbit & 0x01) !== 0, scope: itab > 0 ? itab - 1 : undefined, rgce })
+    return undefined
+  }
+
+  /**
+   * Goes on with a record that may be continued: reads its CONTINUEs, then
+   * an SST's or SUPBOOK's strings within the batch's budget, or reads an
+   * EXTERNSHEET or NAME whole.
+   */
   private resume(pending: Pending): SpreadsheetError | undefined {
     const { reader, limits } = this
     if (pending.kind === "continues") {
@@ -392,6 +415,10 @@ class GlobalsWalk {
       if (done !== true) return done
       const record = continued(pending.gathering)
       const segments = new SegmentReader(record.segments)
+      if (pending.type === EXTERNSHEET || pending.type === NAME) {
+        this.pending = undefined
+        return pending.type === EXTERNSHEET ? this.externSheet(segments) : this.name(segments)
+      }
       if (pending.type === SST) {
         segments.u32() // total count
         const unique = segments.u32()
