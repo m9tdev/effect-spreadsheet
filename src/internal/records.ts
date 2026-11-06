@@ -173,13 +173,11 @@ export class RecordBuilder {
     // progress: one cell per iteration
     for (const cell of row.cells) {
       if (limit !== undefined && (cell.column >= limit || this.dropped.has(cell.column))) continue
-      const key = namer.key(cell.column)
       const v = Cell.value(cell)
-      if (v === undefined) {
-        if (defval !== undefined) set(record, key, defval)
-        continue
-      }
-      set(record, key, v)
+      // An Empty cell is not data: a header-named column already holds its
+      // defval fill, and an unnamed column gets no key until data appears.
+      if (v === undefined) continue
+      set(record, namer.key(cell.column), v)
       empty = false
     }
     if (empty && !this.options.blankRows) return undefined

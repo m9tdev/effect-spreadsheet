@@ -24,6 +24,17 @@ a,,b,,c
 | effect-spreadsheet | `{ a: 1, b: 3, __EMPTY: 4, c: 5 }` | `{ __EMPTY_1: 2 }` |
 | SheetJS | `{ a: 1, b: 3, __EMPTY_1: 4, c: 5 }` | `{ __EMPTY: 2 }` |
 
+An Empty cell (a formatted cell with no value, such as `<c r="B2" s="1"/>`
+in XLSX) is not a data cell: it gives its column no key. SheetJS skips such
+cells too (it drops them on read), but it still numbers the blank header
+columns by column order. With header `a,(blank),c`, a formatted blank cell
+in B2 and the text `x` in D3:
+
+| | record 1 | record 2 |
+|---|---|---|
+| effect-spreadsheet | `{ a: 1 }` | `{ a: 2, __EMPTY: "x" }` |
+| SheetJS | `{ a: 1 }` | `{ a: 2, __EMPTY_1: "x" }` |
+
 ## 2. `defval` doesn't fill columns with a blank header
 
 `defval` fills only the columns the header names, so a blank header column
@@ -40,6 +51,14 @@ with `defval: null`:
 |---|---|
 | effect-spreadsheet | `{ a: 1, b: null }` |
 | SheetJS | `{ a: 1, __EMPTY: null, b: null }` |
+
+An Empty cell in a blank header column gets no `defval` either. The same
+XLSX as in item 1, with `defval: null`:
+
+| | record 1 | record 2 |
+|---|---|---|
+| effect-spreadsheet | `{ a: 1, c: null }` | `{ a: 2, c: null, __EMPTY: "x" }` |
+| SheetJS | `{ a: 1, __EMPTY: null, c: null, __EMPTY_1: null }` | `{ a: 2, __EMPTY: null, c: null, __EMPTY_1: "x" }` |
 
 ## 3. Repeated names in an explicit header are made unique (new)
 
