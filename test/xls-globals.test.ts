@@ -144,6 +144,46 @@ describe("xls defined names: which workbook a reference points at", () => {
     expect(formulas(wb)).toEqual({ Far: "[1]Second!$A$1" })
   })
 
+  it("EXTERNSHEET entries continued in a CONTINUE record are read", async () => {
+    // 1 400 XTIs: one record holds 1 370 (2 + 6 * 1 370 = 8 222 bytes), the rest go in a CONTINUE
+    const count = 1400
+    const data = Array.from(xtis(Array.from({ length: count }, (_, k) => [0, k % 3, k % 3] as const))).slice(4)
+    const cut = 2 + 6 * 1370
+    const names = [X.name("InFirst", ref3d(0x3A, 1369, 0, 0)), X.name("InNext", ref3d(0x3A, 1370, 0, 0)), X.name("Last", ref3d(0x3A, count - 1, 0, 0))]
+    const wb = await read({
+      globals: [selfBook(3), X.record(0x0017, data.slice(0, cut)), X.record(CONTINUE, data.slice(cut)), ...names],
+      sheets: sheets("One", "Two", "Three")
+    })
+    expect(formulas(wb)).toEqual({ InFirst: "Two!$A$1", InNext: "Three!$A$1", Last: "Two!$A$1" })
+    // an entry split between the record and its CONTINUE is joined
+    const split = await read({
+      globals: [selfBook(3), X.record(0x0017, data.slice(0, cut + 3)), X.record(CONTINUE, data.slice(cut + 3)), ...names],
+      sheets: sheets("One", "Two", "Three")
+    })
+    expect(formulas(split)).toEqual({ InFirst: "Two!$A$1", InNext: "Three!$A$1", Last: "Two!$A$1" })
+    // the record and its CONTINUEs together are bounded by maxDecompressedBytes
+    const book = { globals: [selfBook(3), X.record(0x0017, data.slice(0, cut)), X.record(CONTINUE, data.slice(cut))], sheets: sheets("One", "Two", "Three") }
+    expect(await errorOf(book, { maxDecompressedBytes: 8300 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes" })
+  })
+
+  it("a NAME continued in a CONTINUE record is read whole", async () => {
+    // the formula split between the NAME and its CONTINUE
+    const data = Array.from(X.name("Split", ref3d(0x3A, 0, 0, 0))).slice(4)
+    const wb = await read({
+      globals: [selfBook(1), xtis([[0, 0, 0]]), X.record(0x0018, data.slice(0, -3)), X.record(CONTINUE, data.slice(-3))],
+      sheets: sheets("S")
+    })
+    expect(wb.definedNames).toEqual([{ name: "Split", formula: "S!$A$1", hidden: false }])
+    // the name's characters split: the CONTINUE starts with their option byte
+    const chars = Array.from(X.name("Name", ref3d(0x3A, 0, 0, 0))).slice(4)
+    const cut = 15 + 2
+    const named = await read({
+      globals: [selfBook(1), xtis([[0, 0, 0]]), X.record(0x0018, chars.slice(0, cut)), X.record(CONTINUE, [0x00, ...chars.slice(cut)])],
+      sheets: sheets("S")
+    })
+    expect(named.definedNames).toEqual([{ name: "Name", formula: "S!$A$1", hidden: false }])
+  })
+
   it("with no SUPBOOK at all, SUPBOOK 0 is this workbook; a missing XTI gives an empty formula", async () => {
     const wb = await read({
       globals: [xtis([[0, 0, 0], [1, 0, 0]]), X.name("A", ref3d(0x3A, 0, 0, 0)), X.name("B", ref3d(0x3A, 1, 0, 0)), X.name("C", ref3d(0x3A, 9, 0, 0))],
