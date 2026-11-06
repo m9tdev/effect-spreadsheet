@@ -140,9 +140,10 @@ export const open = (
   /**
    * Counts `n` more output bytes of `entry` (`soFar` after them) under
    * `limits`; an error if a limit is crossed. Only bytes past the entry's
-   * high-water mark are charged, and only a chunk that charged something can
-   * go over the budget: once one read went over it, re-reads of what was
-   * already inflated still pass.
+   * high-water mark are charged, so re-reads of what was already inflated
+   * pass. A chunk that would take the total over the budget is rejected
+   * without being charged or raising the high-water mark, so a re-read
+   * fails at the same point again.
    */
   const account = (entry: ZipEntry, soFar: number, n: number, limits: Limits): SpreadsheetError | undefined => {
     inflated += n
@@ -151,13 +152,16 @@ export const open = (
     }
     const before = highWater.get(entry) ?? 0
     if (soFar <= before) return undefined
-    charged += soFar - before
-    highWater.set(entry, soFar)
+    const total = charged + (soFar - before)
     const budget = inflateBudget(bytes.length, limits)
-    if (charged <= budget) return undefined
-    return budget < limits.maxDecompressedBytes
-      ? new LimitExceeded({ limit: "maxInflateRatio", max: limits.maxInflateRatio, actual: Math.ceil(charged / Math.max(1, bytes.length)) })
-      : new LimitExceeded({ limit: "maxDecompressedBytes", max: limits.maxDecompressedBytes, actual: charged })
+    if (total > budget) {
+      return budget < limits.maxDecompressedBytes
+        ? new LimitExceeded({ limit: "maxInflateRatio", max: limits.maxInflateRatio, actual: Math.ceil(total / Math.max(1, bytes.length)) })
+        : new LimitExceeded({ limit: "maxDecompressedBytes", max: limits.maxDecompressedBytes, actual: total })
+    }
+    charged = total
+    highWater.set(entry, soFar)
+    return undefined
   }
 
   const finish = (entry: ZipEntry, size: number, crc: number): SpreadsheetError | undefined => {
