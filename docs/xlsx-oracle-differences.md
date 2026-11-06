@@ -27,6 +27,8 @@ These are the intended differences:
 | a `<row r>` the same as or below an earlier row's (a row given twice, or rows out of order), also when a row without `r` takes its index from its first cell | `MalformedFile` at that row: rows are streamed in order, each index once, so an earlier row can't take more cells. No file of the SheetJS test corpus has one | merges the cells into one sheet by address |
 | a cell whose `r` names another row than its `<row>` | `MalformedFile` at that cell (none in the SheetJS test corpus) | puts the cell at its own address |
 | a `<row>` without `r` | the row its first cell's `r` names; without one, the previous row + 1 (a later cell's `r` doesn't decide it, it must agree) | each cell at its own address |
+| an inline string (`t="inlineStr"`) with a `<v>` and no `<is>`; an `<is>` in a cell without `t` or `<v>` | the text of the `<v>`; the text of the `<is>` | an empty string; a `t: "z"` stub |
+| elements nested in a cell, below its own children (e.g. in its `<extLst>`) | skipped: they don't end the cell or give its value, whatever their names | a nested `<c>` ends the cell and is read as a cell of its own; a nested `<is>` or `<f>` can give the cell's text or formula |
 | a defined name whose `localSheetId` names no sheet | no `scope`: it looks workbook-wide | keeps `Sheet: 99` |
 | XLM macro sheets (and chart and dialog sheets) | no rows, empty `sheetDetails` | cells, where it reads them |
 
