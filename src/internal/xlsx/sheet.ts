@@ -21,7 +21,10 @@
  *   string (`str`), boolean, error, ISO date (`d`) and number (default).
  *   A number whose style has a date format becomes a `Date` (1900 or 1904
  *   system), unless it is outside Excel's date range. Cells without a value
- *   are `Empty` (with their formula, if any).
+ *   are `Empty` (with their formula, if any). The type decides where the
+ *   value is: `<is>` for an inline string (else its `<v>`), `<v>` for the
+ *   others. Only a cell's first `<v>`, `<f>` and `<is>` count, and only its
+ *   direct children: elements nested deeper (in an `<extLst>`) are skipped.
  * - Nothing is sized by the declared `<dimension>`; cost follows the cells
  *   present. Limits: row and column indexes, rows and cells per sheet,
  *   string lengths, and the XML limits.
@@ -106,6 +109,13 @@ export class SheetRows implements XmlHandler {
   private cell: PendingCell | undefined
   /** Where cell text goes: the value, the formula, or the inline string. */
   private target: "value" | "formula" | undefined
+  /**
+   * Elements open inside the cell: 0 between its own children. Only its
+   * direct children give its value, and only its own end tag closes it, so
+   * elements nested in an extension (`<extLst>`) are skipped, whatever
+   * their names (the tokenizer checks that end tags match).
+   */
+  private depth = 0
   private readonly rich: RichText
 
   private readonly context: SheetContext
@@ -117,10 +127,12 @@ export class SheetRows implements XmlHandler {
 
   open = (name: string, attributes: XmlAttributes): SpreadsheetError | undefined => {
     if (this.cell !== undefined) {
+      const depth = this.depth++
       if (this.cell.inline) {
         this.rich.open(name)
         return undefined
       }
+      if (depth > 0) return undefined
       // the first <v>, <f> and <is> count; a repeated one is skipped, not appended
       if (name === "v") {
         this.target = this.cell.value === undefined ? "value" : undefined
@@ -147,15 +159,19 @@ export class SheetRows implements XmlHandler {
   close = (name: string): SpreadsheetError | undefined => {
     const cell = this.cell
     if (cell !== undefined) {
+      const depth = --this.depth
+      // below 0: the cell's own </c>
+      if (depth < 0) return this.closeCell(cell)
       if (cell.inline) {
-        if (name === "is") {
+        if (depth === 0) {
+          // </is>
           cell.inline = false
           cell.inlineValue = this.rich.take()
         } else this.rich.close(name)
         return undefined
       }
-      if (name === "v" || name === "f") this.target = undefined
-      else if (name === "c") return this.closeCell(cell)
+      // the end of a direct child: <v>, <f> or another
+      if (depth === 0) this.target = undefined
       return undefined
     }
     if (name === "row" && this.rowIndex !== undefined) return this.closeRow()
@@ -167,6 +183,8 @@ export class SheetRows implements XmlHandler {
     const cell = this.cell
     if (cell === undefined) return undefined
     if (cell.inline) return this.rich.text(value)
+    // text directly in the <v> or <f>, not in an element nested in it
+    if (this.depth !== 1) return undefined
     const max = this.context.limits.maxStringLength
     if (this.target === "value") {
       cell.value!.push(value)
@@ -243,12 +261,14 @@ export class SheetRows implements XmlHandler {
       inlineValue: undefined
     }
     this.target = undefined
+    this.depth = 0
     return undefined
   }
 
   private closeCell(pending: PendingCell): SpreadsheetError | undefined {
     this.cell = undefined
     this.target = undefined
+    this.depth = 0
     const cell = this.toCell(pending)
     if (cell instanceof MalformedFile) return cell
     const max = this.context.limits.maxCellsPerSheet
