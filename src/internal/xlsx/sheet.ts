@@ -8,6 +8,10 @@
  *   cell's reference, else the previous row + 1. Rows without cells are
  *   emitted too; rows the file leaves out are not (rows are sparse).
  *   Hidden rows (`hidden="1"`) are emitted with `hidden: true`.
+ * - Row indexes must go up: a row whose index is the same as or below the
+ *   previous row's, or a cell whose reference names another row than its
+ *   own, is MalformedFile. Rows are streamed, so a row already emitted
+ *   can't be merged with a later one.
  * - Cells: `<c r>` gives the column, else the previous cell's + 1. A row
  *   whose cells are out of order is sorted, keeping the last of duplicates.
  *   An unsorted row is compacted that way as soon as it holds more than
@@ -87,8 +91,8 @@ export class SheetRows implements XmlHandler {
   private rowCount = 0
 
   private inSheetData = false
+  /** The open row's index; -1 until its first cell decides it (a row without `r`). */
   private rowIndex: number | undefined
-  private rowExplicit = false
   private rowHidden = false
   private rowCells: Array<Cell.Cell> = []
   /** `rowCells` is in strictly increasing column order. */
@@ -185,12 +189,11 @@ export class SheetRows implements XmlHandler {
       const index = Number(r) - 1
       if (index < 0) return malformed("row number 0", this.context.part)
       if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
+      if (index <= this.previousRow) return this.backwards(index)
       this.rowIndex = index
-      this.rowExplicit = true
     } else {
       // decided by the first cell's reference, or previous + 1, at the first cell / row end
       this.rowIndex = -1
-      this.rowExplicit = false
     }
     this.rowHidden = isTrue(attr(attributes, "hidden"))
     this.rowCells = []
@@ -202,6 +205,7 @@ export class SheetRows implements XmlHandler {
   private openCell(attributes: XmlAttributes): SpreadsheetError | undefined {
     const limits = this.context.limits
     let column = this.lastColumn + 1
+    let row: number | undefined
     const r = attr(attributes, "r")
     if (r !== undefined) {
       const ref = parseCellRef(r)
@@ -209,10 +213,16 @@ export class SheetRows implements XmlHandler {
         return malformed(`bad cell reference ${JSON.stringify(r.slice(0, 20))}`, this.context.part)
       }
       column = ref.column
-      if (!this.rowExplicit && this.rowIndex === -1 && ref.row !== undefined) {
-        if (ref.row >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: ref.row + 1 })
-        this.rowIndex = ref.row
-      }
+      row = ref.row
+    }
+    if (this.rowIndex === -1) {
+      // a row without `r`: its first cell decides, by its reference or as the previous row + 1
+      const index = row ?? this.previousRow + 1
+      if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
+      if (index <= this.previousRow) return this.backwards(index)
+      this.rowIndex = index
+    } else if (row !== undefined && row !== this.rowIndex) {
+      return malformed(`cell ${JSON.stringify(r!.slice(0, 20))} in row ${this.rowIndex! + 1}`, this.context.part)
     }
     if (column >= limits.maxColumns) {
       return new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: column + 1 })
@@ -319,6 +329,11 @@ export class SheetRows implements XmlHandler {
     const code = pending.style === undefined ? undefined : this.context.styles.formats[pending.style]?.code
     if (code === undefined) return meta
     return { ...meta, numFmt: code }
+  }
+
+  /** A row whose index (0-based) isn't above the previous row's. */
+  private backwards(index: number): MalformedFile {
+    return malformed(`row ${index + 1} after row ${this.previousRow + 1}`, this.context.part)
   }
 
   private closeRow(): SpreadsheetError | undefined {

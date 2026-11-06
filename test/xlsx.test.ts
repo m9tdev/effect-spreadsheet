@@ -231,6 +231,62 @@ describe("xlsx: cells and rows", () => {
   })
 })
 
+describe("xlsx: row order", () => {
+  const sheet = (data: string): TestWorkbook => ({ sheets: [{ name: "S", data }] })
+  const malformedAt = (reason: string) => ({ _tag: "MalformedFile", format: "xlsx", reason })
+
+  it("a row index given twice is MalformedFile, not two rows with the same index", async () => {
+    expect(await errorOf(sheet(`<row r="1"><c r="A1"><v>1</v></c></row><row r="1"><c r="B1"><v>2</v></c></row>`)))
+      .toMatchObject(malformedAt("row 1 after row 1"))
+    // the second one hidden: not a second row 1 with its own hidden flag
+    expect(await errorOf(sheet(`<row r="1"><c r="A1"><v>1</v></c></row><row r="2"><c r="A2"><v>2</v></c></row><row r="1" hidden="1"><c r="B1"><v>3</v></c></row>`)))
+      .toMatchObject(malformedAt("row 1 after row 2"))
+  })
+
+  it("a row index going back is MalformedFile, also when a row without r takes it from its first cell", async () => {
+    expect(await errorOf(sheet(`<row r="3"><c r="A3"><v>1</v></c></row><row r="1"><c r="A1"><v>2</v></c></row>`)))
+      .toMatchObject(malformedAt("row 1 after row 3"))
+    expect(await errorOf(sheet(`<row r="5"><c r="A5"><v>1</v></c></row><row><c r="A2"><v>2</v></c></row>`)))
+      .toMatchObject(malformedAt("row 2 after row 5"))
+  })
+
+  it("toRecords with header: 0 fails on rows out of order instead of reading the header row as data", async () => {
+    const bytes = await xlsx(sheet(`<row r="2"><c r="A2"><v>1</v></c></row><row r="1"><c r="A1" t="inlineStr"><is><t>name</t></is></c></row>`))
+    const exit = await Effect.runPromise(Effect.exit(Effect.gen(function*() {
+      const wb = yield* Xlsx.read(bytes)
+      return Array.from(yield* Stream.runCollect(Spreadsheet.toRecords(Workbook.rows(wb, 0), { header: 0 })))
+    })))
+    expect(failureOf(exit)).toMatchObject(malformedAt("row 1 after row 2"))
+  })
+
+  it("a row without r whose first cell has no r is the previous row + 1, not a later cell's row", async () => {
+    // the later cell names row 5, so it isn't in this row (row 1)
+    expect(await errorOf(sheet(`<row><c><v>1</v></c><c r="B5"><v>2</v></c></row>`))).toMatchObject(malformedAt(`cell "B5" in row 1`))
+    expect(await errorOf(sheet(`<row r="3"/><row><c><v>1</v></c><c r="B7"><v>2</v></c></row>`))).toMatchObject(malformedAt(`cell "B7" in row 4`))
+  })
+
+  it("a cell whose reference names another row than its row is MalformedFile", async () => {
+    expect(await errorOf(sheet(`<row r="1"><c r="A5"><v>1</v></c></row>`))).toMatchObject(malformedAt(`cell "A5" in row 1`))
+    // a row without r takes its first cell's row; a later cell must agree
+    expect(await errorOf(sheet(`<row><c r="A2"><v>1</v></c><c r="B7"><v>2</v></c></row>`))).toMatchObject(malformedAt(`cell "B7" in row 2`))
+    // references without a row (column only) are fine
+    const { sheets } = await readOk(sheet(`<row r="2"><c r="A"><v>1</v></c><c r="B2"><v>2</v></c></row><row r="4"><c r="C4"><v>3</v></c></row>`))
+    expect(values(sheets[0]!)).toEqual([[1, false, [[0, "Number", 1], [1, "Number", 2]]], [3, false, [[2, "Number", 3]]]])
+  })
+
+  it("a bad row past the rows taken doesn't fail an early stop", async () => {
+    // enough rows before the bad one that it comes in a later inflated piece
+    let data = ""
+    for (let r = 1; r <= 5000; r++) data += `<row r="${r}"><c r="A${r}"><v>${r}</v></c></row>`
+    data += `<row r="1"><c r="B1"><v>0</v></c></row>`
+    const bytes = await xlsx(sheet(data))
+    const wb = await Effect.runPromise(Xlsx.read(bytes))
+    expect(failureOf(await Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, 0)))))).toMatchObject(malformedAt("row 1 after row 5000"))
+    const first = Array.from(await Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 2))))
+    expect(values(first)).toEqual([[0, false, [[0, "Number", 1]]], [1, false, [[0, "Number", 2]]]])
+  })
+})
+
 describe("xlsx: sheet details", () => {
   const withLayout = (layout: string, data = `<row><c><v>1</v></c></row>`) =>
     xlsx({ sheets: [{ name: "S", raw: `<worksheet xmlns="x"><dimension ref="B2:D9"/><cols>${layout}</cols><sheetData>${data}</sheetData><mergeCells><mergeCell ref="A1:C1"/><mergeCell ref="B3:B4"/></mergeCells></worksheet>` }] })
@@ -298,8 +354,8 @@ describe("xlsx: hostile and broken files", () => {
     expect(failureOf(exit)).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows", max: 1000 })
     expect(seen).toBeLessThanOrEqual(1000)
     expect(await errorOf(sheet(`<row><c><v>1</v></c><c><v>2</v></c><c><v>3</v></c></row>`), { maxCellsPerSheet: 2 })).toMatchObject({ limit: "maxCellsPerSheet" })
-    // rows repeating an index still count
-    expect(await errorOf(sheet(`<row r="1"/>`.repeat(5)), { maxRows: 3 })).toMatchObject({ limit: "maxRows", actual: 4 })
+    // rows repeating an index don't pile up: the first repeat fails
+    expect(await errorOf(sheet(`<row r="1"/>`.repeat(5)), { maxRows: 3 })).toMatchObject({ _tag: "MalformedFile", reason: "row 1 after row 1" })
   })
 
   it("the input size and defined names have limits", async () => {

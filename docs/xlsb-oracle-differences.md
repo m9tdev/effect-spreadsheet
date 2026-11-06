@@ -56,6 +56,7 @@ These are the intended differences:
 | defined names: formulas other than a single 3-D reference or area (unions such as print titles `$A:$B,$1:$2`, constants, functions) | `""` (formulas aren't decompiled) | the decompiled formula |
 | defined names: `hidden` | the BrtName's fHidden flag (e.g. `_xlnm._FilterDatabase`) | not reported |
 | a broken record (truncated, a string past its record, a shared string out of range, a cell before any row) | `MalformedFile` at that record's offset; e.g. one corpus file's BrtBundleSh has 4 bytes more than MS-XLSB's layout | reads on, sometimes into garbage (that file's sheet names come out as binary) |
+| a BrtRowHdr whose row is the same as or below an earlier row's (a row given twice, or rows out of order) | `MalformedFile` at that row header: rows are streamed in order, each index once, so an earlier row can't take more cells. No corpus file has one | merges the cells into one sheet by address (rows 1, 2, 1 give two rows) |
 | a package whose workbook part isn't `xl/workbook.bin` (one corpus file, `wtf/workbook.bin`) | `Spreadsheet.read` sees a plain `zip` (`UnsupportedFormat`); `Xlsb.read` reads it through the package relationships | reads it |
 | built-in number format 14 | `numFmt: "mm-dd-yy"` (as ECMA-376 lists it) | `z: "m/d/yy"` |
 | formatted text (`w`) | not produced | `w` |
