@@ -283,4 +283,15 @@ describe("xls: hostile and broken files", () => {
     const { sheets } = await readOk(one([X.labelSst(0, 0, 0, 0), X.labelSst(0, 1, 0, 1)], sstRecords))
     expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Text", "abc"], [1, "Text", "日本"]]]])
   })
+
+  it("an SST string continued in a CONTINUE that holds only its option byte reads whole, and later strings too", async () => {
+    // "abc" stored as "ab" | CONTINUE [00] | CONTINUE [00 "c"], then "xyz"
+    const sstRecords = [
+      X.record(0x00FC, [...X.u32(2), ...X.u32(2), ...X.u16(3), 0, 0x61, 0x62]),
+      X.record(0x003C, [0x00]),
+      X.record(0x003C, [0x00, 0x63, ...X.xlString("xyz")])
+    ]
+    const { sheets } = await readOk(one([X.labelSst(0, 0, 0, 0), X.labelSst(0, 1, 0, 1)], sstRecords))
+    expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Text", "abc"], [1, "Text", "xyz"]]]])
+  })
 })
