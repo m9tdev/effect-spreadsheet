@@ -287,6 +287,50 @@ describe("xlsx: row order", () => {
   })
 })
 
+describe("xlsx: where a cell's value comes from", () => {
+  const firstCells = async (data: string) => {
+    const { sheets } = await readOk({ sharedStrings: ["sst0", "sst1"], sheets: [{ name: "S", data: `<row r="1">${data}</row>` }] })
+    return sheets[0]![0]!.cells.map((c) => [c.column, c._tag, Cell.value(c), c.formula])
+  }
+
+  it("the cell's type decides between <v> and <is>", async () => {
+    // an <is> doesn't turn a shared string, formula string, number or boolean into inline text
+    expect(await firstCells(`<c r="A1" t="s"><v>0</v><is><t>x</t></is></c>`)).toEqual([[0, "Text", "sst0", undefined]])
+    expect(await firstCells(`<c r="A1" t="s"><is><t>x</t></is><v>1</v></c>`)).toEqual([[0, "Text", "sst1", undefined]])
+    expect(await firstCells(`<c r="A1" t="str"><f>"a"</f><v>b</v><is><t>x</t></is></c>`)).toEqual([[0, "Text", "b", `"a"`]])
+    expect(await firstCells(`<c r="A1"><v>3</v><is><t>x</t></is></c>`)).toEqual([[0, "Number", 3, undefined]])
+    expect(await firstCells(`<c r="A1"><is><t>x</t></is><v>3</v></c>`)).toEqual([[0, "Number", 3, undefined]])
+    expect(await firstCells(`<c r="A1" t="b"><v>1</v><is><t>x</t></is></c>`)).toEqual([[0, "Boolean", true, undefined]])
+    // an inline string takes <is>, before or after a <v>, which isn't glued onto it
+    expect(await firstCells(`<c r="A1" t="inlineStr"><is><t>x</t></is><v>5</v></c>`)).toEqual([[0, "Text", "x", undefined]])
+    expect(await firstCells(`<c r="A1" t="inlineStr"><v>5</v><is><t>x</t></is></c>`)).toEqual([[0, "Text", "x", undefined]])
+    expect(await firstCells(`<c r="A1" t="inlineStr"><is><t>a</t></is><v>_x0041_</v></c>`)).toEqual([[0, "Text", "a", undefined]])
+    // still read: an inline string written in <v>, and an <is> in a cell without a type
+    expect(await firstCells(`<c r="A1" t="inlineStr"><v>c_x0044_</v></c>`)).toEqual([[0, "Text", "cD", undefined]])
+    expect(await firstCells(`<c r="A1"><is><t>7</t></is></c>`)).toEqual([[0, "Text", "7", undefined]])
+  })
+
+  it("a repeated <v>, <f> or <is> in one cell: the first one counts, nothing is glued together", async () => {
+    expect(await firstCells(`<c r="A1"><v>1</v><v>2</v></c>`)).toEqual([[0, "Number", 1, undefined]])
+    expect(await firstCells(`<c r="A1"><v></v><v>2</v></c>`)).toEqual([[0, "Empty", undefined, undefined]])
+    expect(await firstCells(`<c r="A1" t="str"><v>a</v><v>b</v></c>`)).toEqual([[0, "Text", "a", undefined]])
+    expect(await firstCells(`<c r="A1" t="s"><v>0</v><v>1</v></c>`)).toEqual([[0, "Text", "sst0", undefined]])
+    expect(await firstCells(`<c r="A1"><f>1+1</f><f>2</f><v>2</v></c>`)).toEqual([[0, "Number", 2, "1+1"]])
+    expect(await firstCells(`<c r="A1" t="inlineStr"><is><t>x</t></is><is><t>y</t></is></c>`)).toEqual([[0, "Text", "x", undefined]])
+  })
+
+  it("elements nested in a cell (as in its extLst) neither end the cell nor give its value", async () => {
+    expect(await firstCells(`<c r="A1"><extLst><ext uri="x"><c/></ext></extLst><v>1</v></c>`)).toEqual([[0, "Number", 1, undefined]])
+    expect(await firstCells(`<c r="A1"><extLst><ext uri="x"><c r="Z9"><v>7</v></c></ext></extLst><v>1</v></c><c r="B1"><v>2</v></c>`))
+      .toEqual([[0, "Number", 1, undefined], [1, "Number", 2, undefined]])
+    expect(await firstCells(`<c r="A1"><v>1</v><extLst><ext uri="x"><v>9</v><f>Z</f></ext></extLst></c>`)).toEqual([[0, "Number", 1, undefined]])
+    expect(await firstCells(`<c r="A1" t="inlineStr"><extLst><ext uri="x"><is><t>q</t></is></ext></extLst><is><t>x</t></is></c>`))
+      .toEqual([[0, "Text", "x", undefined]])
+    // an element named is inside the inline string doesn't end it
+    expect(await firstCells(`<c r="A1" t="inlineStr"><is><t>x</t><extLst><is/></extLst><t>y</t></is></c>`)).toEqual([[0, "Text", "xy", undefined]])
+  })
+})
+
 describe("xlsx: sheet details", () => {
   const withLayout = (layout: string, data = `<row><c><v>1</v></c></row>`) =>
     xlsx({ sheets: [{ name: "S", raw: `<worksheet xmlns="x"><dimension ref="B2:D9"/><cols>${layout}</cols><sheetData>${data}</sheetData><mergeCells><mergeCell ref="A1:C1"/><mergeCell ref="B3:B4"/></mergeCells></worksheet>` }] })
