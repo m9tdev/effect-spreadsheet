@@ -166,7 +166,11 @@ export interface RowsOptions {
   /**
    * Overrides on top of the limits the workbook was read with (the
    * `SpreadsheetLimits` in context at read time, plus the read call's own
-   * overrides). The context at streaming time doesn't matter.
+   * overrides). The context at streaming time doesn't matter. Zip inflate
+   * limits (`maxDecompressedBytes`, `maxInflateRatio`, `inflateFloorBytes`)
+   * set this call's budget against the archive-wide total; bytes of the
+   * sheet already inflated by an earlier read aren't counted again, so a
+   * lower limit doesn't stop a re-read of them.
    */
   readonly limits?: LimitOverrides | undefined
 }
