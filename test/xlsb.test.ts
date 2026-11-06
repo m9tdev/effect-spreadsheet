@@ -233,6 +233,26 @@ describe("xlsb reader", () => {
     expect(failureOf(await Effect.runPromiseExit(Workbook.sheetDetails(wb, 0)))).toMatchObject(expected)
   })
 
+  it("a row index given again, or going back, is MalformedFile at its row header, not a second row", async () => {
+    const malformed = (reason: string, offset: number) => ({ _tag: "MalformedFile", format: "xlsb", reason, offset })
+    const rows = [B.rowHdr(0), B.rk(0, B.rkInt(1)), B.rowHdr(1), B.rk(0, B.rkInt(2))]
+    const at = B.sheetBin(rows).length - B.concat([B.endSheetData(), B.endSheet()]).length
+    // rows 0, 1, 0 (the second 0 hidden): not a second row 0 with its own hidden flag
+    expect(await errorOf(one([...rows, B.rowHdr(0, true), B.rk(1, B.rkInt(3))]))).toMatchObject(malformed("row 1 after row 2", at))
+    expect(await errorOf(one([...rows, B.rowHdr(1)]))).toMatchObject(malformed("row 2 after row 2", at))
+  })
+
+  it("a bad row header past the rows taken doesn't fail an early stop", async () => {
+    // enough rows before the bad one that it comes in a later slice
+    const rows: Array<Uint8Array> = []
+    for (let r = 0; r < 10_000; r++) rows.push(B.rowHdr(r), B.rk(0, B.rkInt(r)))
+    rows.push(B.rowHdr(0))
+    const wb = await Effect.runPromise(Xlsb.read(await B.xlsb(one(rows))))
+    expect(failureOf(await Effect.runPromiseExit(Stream.runCollect(Workbook.rows(wb, 0))))).toMatchObject({ _tag: "MalformedFile", reason: "row 1 after row 10000" })
+    const first = Array.from(await Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 2))))
+    expect(values(first)).toEqual([[0, false, [[0, "Number", 0]]], [1, false, [[0, "Number", 1]]]])
+  })
+
   it("stored (uncompressed) parts read the same as deflated ones", async () => {
     const book = one([B.rowHdr(2, true), B.isst(1, 0)], { strings: ["x"], method: "store" })
     const { sheets } = await readOk(book)
@@ -453,7 +473,8 @@ describe("xlsb defined names", () => {
 describe("xlsb limits and malformed input", () => {
   it("row and column indexes, rows, cells and strings are limited", async () => {
     expect(await errorOf(one([B.rowHdr(10)]), { maxRows: 10 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows", actual: 11 })
-    expect(await errorOf(one([B.rowHdr(0), B.rowHdr(0), B.rowHdr(0)]), { maxRows: 2 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows", actual: 3 })
+    // rows repeating an index don't pile up: the first repeat fails
+    expect(await errorOf(one([B.rowHdr(0), B.rowHdr(0), B.rowHdr(0)]), { maxRows: 2 })).toMatchObject({ _tag: "MalformedFile", reason: "row 1 after row 1" })
     expect(await errorOf(one([B.rowHdr(0), B.rk(8, 0)]), { maxColumns: 8 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxColumns", actual: 9 })
     expect(await errorOf(one([B.rowHdr(0), B.blank(0), B.blank(1), B.blank(2)]), { maxCellsPerSheet: 2 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxCellsPerSheet", actual: 3 })
     // a string's real length is reported (the limit is over the package's XML attribute lengths)

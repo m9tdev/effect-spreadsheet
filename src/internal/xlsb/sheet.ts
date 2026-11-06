@@ -12,7 +12,9 @@
  *   cell records follow it. A row is emitted when the next row starts or
  *   the sheet data ends, in document order; rows without cells are emitted
  *   too, rows the file leaves out are not. Hidden rows are emitted with
- *   `hidden: true`, never skipped.
+ *   `hidden: true`, never skipped. Row indexes must go up: a BrtRowHdr whose
+ *   index is the same as or below the previous row's is MalformedFile (rows
+ *   are streamed, so a row already emitted can't be merged with a later one).
  * - Cells: blank, RK, error, boolean, real, inline string, rich string and
  *   shared string cells, the four formula cells (their cached result; the
  *   formula isn't decompiled), and the short forms MS-XLSB defines (no
@@ -145,6 +147,8 @@ export class SheetRows {
   private rowCount = 0
   /** The open row's index; undefined before the first row and after the sheet data. */
   private rowIndex: number | undefined
+  /** The last row's index, -1 before the first row. */
+  private previousRow = -1
   private rowHidden = false
   private rowCells: Array<Cell.Cell> = []
   private rowSorted = true
@@ -187,8 +191,10 @@ export class SheetRows {
     const flags = f.u16(10)
     if (index === undefined || flags === undefined) return malformed("truncated row header", this.context.part, record.offset)
     if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
+    if (index <= this.previousRow) return malformed(`row ${index + 1} after row ${this.previousRow + 1}`, this.context.part, record.offset)
     if (++this.rowCount > limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: this.rowCount })
     this.rowIndex = index
+    this.previousRow = index
     this.rowHidden = (flags & ROW_HIDDEN) !== 0
     this.rowCells = []
     this.rowSorted = true
