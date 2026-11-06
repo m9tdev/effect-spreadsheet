@@ -57,13 +57,16 @@ interface PendingCell {
   column: number
   type: string | undefined
   style: number | undefined
+  /** The text of the cell's first `<v>` (a repeated one is ignored). */
   value: Array<string> | undefined
   valueLength: number
+  /** The text of the first `<f>`. */
   formula: Array<string> | undefined
   formulaLength: number
+  /** Inside the first `<is>`. */
   inline: boolean
-  /** The value came from <is> (already unescaped), not from <v>. */
-  fromInline: boolean
+  /** The first `<is>`'s text, unescaped. Used only by an inline string (or a cell without `t` and `<v>`). */
+  inlineValue: string | undefined
 }
 
 /**
@@ -118,13 +121,14 @@ export class SheetRows implements XmlHandler {
         this.rich.open(name)
         return undefined
       }
+      // the first <v>, <f> and <is> count; a repeated one is skipped, not appended
       if (name === "v") {
-        this.target = "value"
+        this.target = this.cell.value === undefined ? "value" : undefined
         this.cell.value ??= []
       } else if (name === "f") {
-        this.target = "formula"
+        this.target = this.cell.formula === undefined ? "formula" : undefined
         this.cell.formula ??= []
-      } else if (name === "is") {
+      } else if (name === "is" && this.cell.inlineValue === undefined) {
         this.cell.inline = true
         this.rich.take()
       }
@@ -146,9 +150,7 @@ export class SheetRows implements XmlHandler {
       if (cell.inline) {
         if (name === "is") {
           cell.inline = false
-          cell.value = [this.rich.take()]
-          cell.type = "inlineStr"
-          cell.fromInline = true
+          cell.inlineValue = this.rich.take()
         } else this.rich.close(name)
         return undefined
       }
@@ -238,7 +240,7 @@ export class SheetRows implements XmlHandler {
       formula: undefined,
       formulaLength: 0,
       inline: false,
-      fromInline: false
+      inlineValue: undefined
     }
     this.target = undefined
     return undefined
@@ -273,6 +275,11 @@ export class SheetRows implements XmlHandler {
     const part = this.context.part
     const formulaText = pending.formula === undefined ? "" : pending.formula.join("")
     const meta: Cell.Meta | undefined = formulaText === "" ? undefined : { formula: unescapeXstring(formulaText) }
+    // the type decides where the value is: <is> for an inline string (else
+    // its <v>), <v> for every other type; a cell without `t` or `<v>` takes <is>
+    if (pending.inlineValue !== undefined && (pending.type === "inlineStr" || (pending.type === undefined && pending.value === undefined))) {
+      return Cell.text(column, pending.inlineValue, meta)
+    }
     if (pending.value === undefined) return Cell.empty(column, meta)
     const raw = pending.value.length === 1 ? pending.value[0]! : pending.value.join("")
     switch (pending.type) {
@@ -288,8 +295,8 @@ export class SheetRows implements XmlHandler {
       }
       case "inlineStr":
       case "str":
-        // <is> text is unescaped already; text in <v> (str, or inlineStr written that way) not yet
-        return Cell.text(column, pending.fromInline ? raw : unescapeXstring(raw), meta)
+        // text in <v> (str, or inlineStr written that way)
+        return Cell.text(column, unescapeXstring(raw), meta)
       case "b": {
         const v = raw.trim()
         if (v === "1" || v === "true") return Cell.boolean(column, true, meta)
