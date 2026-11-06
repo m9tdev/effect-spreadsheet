@@ -6,7 +6,7 @@ import * as Csv from "../src/csv/index.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
-import { csvAoa, csvExit, csvRows, enc, failureOf, toAoa } from "./helpers/run.ts"
+import { chunksOf, csvAoa, csvExit, csvRows, csvUntilError, enc, failureOf, toAoa } from "./helpers/run.ts"
 import { countYields } from "./helpers/yields.ts"
 
 describe("csv: structure", () => {
@@ -493,6 +493,92 @@ describe("csv: streaming", () => {
       const s = Csv.rows(enc("a,b\n"))
       assert.deepStrictEqual(toAoa(Array.from(yield* Stream.runCollect(s))), toAoa(Array.from(yield* Stream.runCollect(s))))
     }))
+})
+
+describe("csv: rows before an error", () => {
+  // Chunk sizes from one byte to more than a 64 KiB parsing step, and the
+  // whole input as one Uint8Array.
+  const sizes = [1, 2, 3, 5, 7, 64, 4096, 65_536, 65_537]
+  // A given encoding decodes each chunk at once; a detected one waits for
+  // 64 KiB or the end. A given delimiter parses at once; a sniffed one
+  // waits for 16 Ki characters or the end.
+  const settings: Array<[string | undefined, Csv.Encoding | undefined]> = [
+    [",", "utf-8"],
+    [undefined, "utf-8"],
+    [",", undefined],
+    [undefined, undefined]
+  ]
+  const everyChunking = (bytes: Uint8Array): Array<[string, Uint8Array | Stream.Stream<Uint8Array>]> => [
+    ["whole", bytes],
+    ...sizes.map((n): [string, Stream.Stream<Uint8Array>] => [`chunks of ${n}`, Stream.fromIterable(chunksOf(bytes, n))])
+  ]
+
+  it("a malformed field in strict mode: the rows before it come out, then the error, however chunked", async () => {
+    const bytes = enc('a\nb\nc\n"x"y\nd\n')
+    for (const [delimiter, encoding] of settings) {
+      for (const [label, input] of everyChunking(bytes)) {
+        const { error, rows } = await csvUntilError(input, { strict: true, delimiter, encoding })
+        expect([label, delimiter, encoding, rows]).toEqual([label, delimiter, encoding, [["a"], ["b"], ["c"]]])
+        expect([label, error?._tag === "MalformedFile" && error.offset]).toEqual([label, 9])
+      }
+    }
+  })
+
+  it("an unterminated quote at the end in strict mode: the rows before it come out, then the error", async () => {
+    const bytes = enc('a\nb\n"c')
+    for (const [delimiter, encoding] of settings) {
+      for (const [label, input] of everyChunking(bytes)) {
+        const { error, rows } = await csvUntilError(input, { strict: true, delimiter, encoding })
+        expect([label, delimiter, encoding, rows]).toEqual([label, delimiter, encoding, [["a"], ["b"]]])
+        expect([label, error?._tag === "MalformedFile" && error.reason]).toEqual([label, "unterminated quoted field in row 3"])
+      }
+    }
+  })
+
+  it("limits hit in the middle of a step: the rows within the limit come out, then the limit error", async () => {
+    const bytes = enc("a,b\nc,d\ne,f\ng,h\n")
+    const cases: Array<[Csv.ReadOptions, number, string]> = [
+      [{ limits: { maxRows: 2 } }, 2, "maxRows"],
+      [{ limits: { maxCellsPerSheet: 5 } }, 2, "maxCellsPerSheet"],
+      [{ limits: { maxColumns: 1 } }, 0, "maxColumns"],
+      [{ limits: { maxStringLength: 1 } }, 4, "maxStringLength"]
+    ]
+    const longer = enc("a,b\nc,d\ne,f\ng,h\nxy\n")
+    for (const [options, count, limit] of cases) {
+      const input = limit === "maxStringLength" ? longer : bytes
+      for (const [delimiter, encoding] of settings) {
+        for (const [label, chunked] of everyChunking(input)) {
+          const { error, rows } = await csvUntilError(chunked, { ...options, delimiter, encoding })
+          expect([label, delimiter, encoding, limit, rows.length]).toEqual([label, delimiter, encoding, limit, count])
+          expect([label, error?._tag === "LimitExceeded" && error.limit]).toEqual([label, limit])
+        }
+      }
+    }
+  })
+
+  it("more than one 64 KiB step of rows before the error all come out, however chunked", async () => {
+    const lines = Array.from({ length: 10_000 }, (_, i) => `row,${i}`)
+    const bytes = enc(lines.join("\n") + '\n"x"y\n')
+    for (const [label, input] of everyChunking(bytes)) {
+      // tiny chunks of 90 KB are slow and add nothing over the small inputs above
+      if (label === "chunks of 1" || label === "chunks of 2" || label === "chunks of 3") continue
+      const { error, rows } = await csvUntilError(input, { strict: true })
+      expect([label, rows.length, rows[9_999]]).toEqual([label, 10_000, ["row", "9999"]])
+      expect([label, error?._tag]).toEqual([label, "MalformedFile"])
+    }
+  })
+
+  it("the parse error stays the error even if the input stream would fail next", async () => {
+    // after the rows before the error come out, the next pull must report
+    // the parse error, not read more input
+    const input = Stream.concat(Stream.make(enc('a\n"x"y\n')), Stream.fail("boom" as const))
+    const seen: Array<Workbook.Row> = []
+    const error = await Effect.runPromise(Effect.flip(
+      Stream.runForEach(Csv.rows(input, { strict: true, delimiter: ",", encoding: "utf-8" }), (row) => Effect.sync(() => seen.push(row)))
+    ))
+    expect(toAoa(seen)).toEqual([["a"]])
+    expect(error !== "boom" && error._tag).toBe("MalformedFile")
+  })
 })
 
 describe("csv: workbook", () => {
