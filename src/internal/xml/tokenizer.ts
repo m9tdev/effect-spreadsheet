@@ -324,16 +324,13 @@ export class XmlTokenizer {
       else if (c === 0x21) {
         if (head.startsWith("!--")) kind = Kind.Comment
         else if (head.startsWith("![CDATA[")) kind = Kind.Cdata
-        else if ("!--".startsWith(head) || "![CDATA[".startsWith(head)) need = head.length + 1
-        else {
-          this.fail(
-            this.malformed(
-              head.startsWith("!DOCTYPE") || "!DOCTYPE".startsWith(head)
-                ? "DTDs (<!DOCTYPE>) are not supported"
-                : "unsupported declaration",
-              this.markupStart
-            )
-          )
+        else if (head.startsWith("!DOCTYPE")) {
+          this.fail(this.malformed("DTDs (<!DOCTYPE>) are not supported", this.markupStart))
+          return i + 1
+        } else if ("!--".startsWith(head) || "![CDATA[".startsWith(head) || "!DOCTYPE".startsWith(head)) {
+          need = head.length + 1
+        } else {
+          this.fail(this.malformed("unsupported declaration", this.markupStart))
           return i + 1
         }
       } else kind = Kind.Start
