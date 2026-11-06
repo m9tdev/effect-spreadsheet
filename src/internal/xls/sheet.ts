@@ -9,12 +9,14 @@
  *
  * - Rows: ROW records give hidden rows (fDyZero) and rows without cells;
  *   cells mostly come row by row after their block of ROW records, but
- *   some writers put a row's cells in several places. A first pass over
- *   the record headers (`RowScan`) finds where each row's last cell is; a
- *   row is emitted, merged, once that record is handled, in row order
- *   (rows before it wait, holding only cells already counted against
- *   `maxCellsPerSheet`). ROW-only rows are emitted in order between them.
- *   Hidden rows are emitted with `hidden: true`, never skipped.
+ *   some writers put a row's cells in several places, or ROW records after
+ *   the cells. A first pass over the record headers (`RowScan`) finds where
+ *   each row's last cell is, and the rows ROW records declare or hide; a
+ *   row is emitted, merged, once its last cell record is handled, in row
+ *   order (rows before it wait, holding only cells already counted against
+ *   `maxCellsPerSheet`). ROW-only rows are emitted at their place in that
+ *   order, without waiting for any record. Hidden rows are emitted with
+ *   `hidden: true`, never skipped.
  * - Cells: LABELSST, LABEL, RSTRING (text), NUMBER, RK, MULRK (numbers),
  *   BOOLERR (booleans and errors), BLANK, MULBLANK (Empty), FORMULA with
  *   its cached result (a following STRING record for text, after any
@@ -33,7 +35,7 @@ import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { ColumnSpan, Range, Row, SheetDetails } from "../../Workbook.ts"
-import { BOF_BIFF5_8, type BiffRecord, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
+import { BOF_BIFF5_8, type BiffRecord, CONTINUE, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { serialToDate } from "../xlsx/numFmt.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { decodeRk, ERROR_CODES, Fields, readString } from "./fields.ts"
@@ -134,14 +136,21 @@ const openSubstream = (context: SheetContext): RecordReader | SpreadsheetError =
 const CELL_RECORDS: ReadonlySet<number> = new Set([LABELSST, LABEL, RSTRING, NUMBER, RK, MULRK, BOOLERR, BLANK, MULBLANK, FORMULA, FORMULA_BIFF4])
 
 /**
- * A first pass over the substream's records (headers and row numbers only):
- * the offset of each row's last cell record. Some writers emit a row's
- * cells in several places; knowing where each row ends lets the main pass
- * merge them and still emit every row as soon as it is complete. One entry
- * per row with cells (at most 65 536: rows are u16).
+ * A first pass over the substream's records (headers, row numbers and ROW
+ * flags only): the offset of each row's last cell record, and the rows ROW
+ * records declare and hide. Some writers emit a row's cells in several
+ * places, or ROW records after the cells; knowing all this up front lets the
+ * main pass merge a row's cells, with its hidden flag, and still emit every
+ * row, in row order, as soon as its cells are complete. A row declared only
+ * by ROW records has no cell to wait for: its entry is -1, due at once. One
+ * entry per row with cells or a ROW record (at most 65 536: rows are u16).
  */
 class RowScan {
   readonly lastAt = new Map<number, number>()
+  /** Rows with a ROW record. */
+  readonly declared = new Set<number>()
+  /** Rows with a ROW record that hides them (fDyZero). */
+  readonly hidden = new Set<number>()
   done = false
   private nested = 0
   private readonly reader: RecordReader
@@ -168,8 +177,14 @@ class RowScan {
           return
         }
         this.nested--
-      } else if (this.nested === 0 && CELL_RECORDS.has(record.type) && record.data.length >= 2) {
-        this.lastAt.set(record.data[0]! | (record.data[1]! << 8), record.offset)
+      } else if (this.nested === 0 && record.data.length >= 2) {
+        const row = record.data[0]! | (record.data[1]! << 8)
+        if (CELL_RECORDS.has(record.type)) this.lastAt.set(row, record.offset)
+        else if (record.type === ROW) {
+          this.declared.add(row)
+          if (((record.data[12] ?? 0) & 0x20) !== 0) this.hidden.add(row)
+          if (!this.lastAt.has(row)) this.lastAt.set(row, -1)
+        }
       }
     }
   }
@@ -200,10 +215,10 @@ interface OpenRow {
 }
 
 /**
- * Builds rows from cell records. Cells of a row are gathered until the
- * record holding its last cell (from the `RowScan`) is handled, then rows
- * are emitted in row order. Rows waiting for later cells hold only cells
- * already counted against `maxCellsPerSheet`.
+ * Builds rows from cell records and the `RowScan`'s ROW records. Cells of a
+ * row are gathered until the record holding its last cell is handled, then
+ * rows are emitted in row order. Rows waiting for later cells hold only
+ * cells already counted against `maxCellsPerSheet`.
  */
 export class Rows {
   /** Rows ready to emit; `out[outAt]` is the next one (see `take`). */
@@ -214,35 +229,28 @@ export class Rows {
   /** The row the last cell went to (most cells follow the one before). */
   private hotRow = -1
   private hotEntry: OpenRow | undefined
-  /** Offset of each row's last cell record. */
+  /** Offset of each row's last cell record, -1 for a row with ROW records only (see `RowScan`). */
   private lastAt: ReadonlyMap<number, number> = new Map()
-  /** Rows with cells, ascending; `order[nextRow]` is the next one to emit. */
+  /** Rows the scan placed, ascending; `order[nextRow]` is the next one to emit. */
   private order: Uint32Array = new Uint32Array(0)
   private nextRow = 0
-  /** Offset of `order[nextRow]`'s last cell record (Infinity when none is left). */
+  /** `lastAt` of `order[nextRow]` (Infinity when none is left). */
   private nextAt = Infinity
-  /** Hidden flags from ROW records. */
-  private readonly hidden = new Set<number>()
-  /** Rows declared by ROW records, not emitted yet, in record order (each once). */
-  private declared: Array<number> = []
-  private declaredAt = 0
-  /** Rows ever declared: a repeated ROW record isn't queued again (it would only be passed over). */
-  private readonly declaredOnce = new Set<number>()
+  /** Rows declared by ROW records, and those they hide (from the `RowScan`). */
+  private declared: ReadonlySet<number> = new Set()
+  private hidden: ReadonlySet<number> = new Set()
   /** Rows the scan didn't place, in row order (set by `end`); `left[leftAt]` is the next one. */
   private left: Uint32Array | undefined
   private leftAt = 0
-  /** Rows emitted so far (a ROW-only row is emitted once). */
-  private readonly emitted = new Set<number>()
   private rowCount = 0
   /** Cells read so far (repeats included): counted against maxCellsPerSheet. */
   cellCount = 0
   /** Cells in `open` rows: exactly those held, not emitted yet (see `caps`). */
   held = 0
   /**
-   * Cells read, cells sorted (compacting a row) and rows emitted (or a
-   * declared row passed over, already out): the work that a batch spends,
-   * up to `budget`. Emitting rows stops at the budget and goes on in the
-   * next batch.
+   * Cells read, cells sorted (compacting a row) and rows emitted: the
+   * work that a batch spends, up to `budget`. Emitting rows stops at the
+   * budget and goes on in the next batch.
    */
   effort = 0
   budget = Infinity
@@ -257,9 +265,11 @@ export class Rows {
     this.context = context
   }
 
-  /** Where each row's cells end, from the `RowScan`. */
-  start(lastAt: ReadonlyMap<number, number>): void {
+  /** Where each row's cells end and the rows ROW records declare and hide, from the `RowScan`. */
+  start(lastAt: ReadonlyMap<number, number>, declared: ReadonlySet<number> = new Set(), hidden: ReadonlySet<number> = new Set()): void {
     this.lastAt = lastAt
+    this.declared = declared
+    this.hidden = hidden
     this.order = Uint32Array.from(lastAt.keys()).sort()
     this.nextRow = 0
     this.nextAt = this.order.length > 0 ? lastAt.get(this.order[0]!)! : Infinity
@@ -270,37 +280,17 @@ export class Rows {
     if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
     if (++this.rowCount > limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: this.rowCount })
     this.out.push({ index, hidden, cells })
-    this.emitted.add(index)
     return undefined
   }
 
-  /** Emits declared ROW-only rows up to (not including) `before`, until `effort` reaches `budget` (see `declaredBefore`). */
-  private flushDeclared(before: number): SpreadsheetError | undefined {
-    // progress: declaredAt increases up to declared.length
-    while (this.declaredBefore(before) && this.effort < this.budget) {
-      work.steps++
-      this.effort++
-      const index = this.declared[this.declaredAt++]!
-      if (this.emitted.has(index)) continue
-      const error = this.push(index, this.hidden.has(index), [])
-      if (error !== undefined) return error
-    }
-    if (this.declaredAt === this.declared.length) {
-      this.declared = []
-      this.declaredAt = 0
-    }
-    return undefined
-  }
-
-  /** Whether declared rows before `before` are left for `flushDeclared` (it stopped at the budget). */
-  private declaredBefore(before: number): boolean {
-    return this.declaredAt < this.declared.length && this.declared[this.declaredAt]! < before
-  }
-
-  /** Emits row `index` with its cells (if it got any). */
+  /** Emits row `index` with its cells, or without any if only ROW records declared it. */
   private finishRow(index: number): SpreadsheetError | undefined {
     const entry = this.open.get(index)
-    if (entry === undefined) return undefined
+    if (entry === undefined) {
+      if (!this.declared.has(index)) return undefined
+      this.effort++
+      return this.push(index, this.hidden.has(index), [])
+    }
     this.open.delete(index)
     this.held -= entry.cells.length
     if (this.hotRow === index) {
@@ -344,10 +334,6 @@ export class Rows {
       work.steps++
       const index = this.order[this.nextRow]!
       if (this.pendingString?.row === index) return undefined
-      // the ROW-only rows before it first: at the budget, `index` waits (still `behind`)
-      const flushed = this.flushDeclared(index)
-      if (flushed !== undefined) return flushed
-      if (this.declaredBefore(index)) return undefined
       this.nextRow++
       this.nextAt = this.nextRow < this.order.length ? this.lastAt.get(this.order[this.nextRow]!)! : Infinity
       const error = this.finishRow(index)
@@ -359,13 +345,6 @@ export class Rows {
   /** Whether rows complete at `offset` are left for `complete` (it stopped at the budget). */
   behind(offset: number): boolean {
     return this.nextRow < this.order.length && this.nextAt <= offset && this.pendingString?.row !== this.order[this.nextRow]
-  }
-
-  row(index: number, hidden: boolean): void {
-    if (hidden) this.hidden.add(index)
-    if (this.declaredOnce.has(index)) return
-    this.declaredOnce.add(index)
-    this.declared.push(index)
   }
 
   cell(row: number, cell: Cell.Cell): SpreadsheetError | undefined {
@@ -410,19 +389,14 @@ export class Rows {
   end(): SpreadsheetError | boolean {
     // rows the scan didn't place (none when both passes agree), in row order
     const left = this.left ??= Uint32Array.from(this.open.keys()).sort()
-    // progress: leftAt increases up to left.length (or flushDeclared's declaredAt does, until the budget)
+    // progress: leftAt increases up to left.length
     while (this.leftAt < left.length) {
       if (this.effort >= this.budget) return false
       work.steps++
-      const index = left[this.leftAt]!
-      const flushed = this.flushDeclared(index)
-      if (flushed !== undefined) return flushed
-      if (this.declaredBefore(index)) return false
-      this.leftAt++
-      const failed = this.finishRow(index)
+      const failed = this.finishRow(left[this.leftAt++]!)
       if (failed !== undefined) return failed
     }
-    return this.flushDeclared(Infinity) ?? !this.declaredBefore(Infinity)
+    return true
   }
 }
 
@@ -455,9 +429,10 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
   const truncated = () => malformed(part, `truncated record 0x${record.type.toString(16)}`, record.offset)
   const tooLong = () => new LimitExceeded({ limit: "maxStringLength", max: context.limits.maxStringLength, actual: context.limits.maxStringLength + 1 })
   // a formula's string result comes right after it, or after its SHRFMLA, ARRAY or TABLE
+  // (any of them maybe continued by CONTINUE records, which are part of it)
   if (
     rows.pendingString !== undefined && record.type !== STRING && record.type !== SHRFMLA && record.type !== ARRAY &&
-    record.type !== TABLE
+    record.type !== TABLE && record.type !== CONTINUE
   ) {
     const pending = rows.pendingString
     rows.pendingString = undefined
@@ -476,8 +451,8 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
     case ROW: {
       const row = f.u16(0)
       const grbit = f.u16(12)
+      // the `RowScan` already took the declared row and its hidden flag
       if (row === undefined || grbit === undefined) return truncated()
-      rows.row(row, (grbit & 0x20) !== 0)
       return false
     }
     case LABELSST: {
@@ -608,7 +583,7 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
         if (done) return yield* Cause.done()
         if (!scan.done) {
           scan.step(BATCH_RECORDS)
-          if (scan.done) rows.start(scan.lastAt)
+          if (scan.done) rows.start(scan.lastAt, scan.declared, scan.hidden)
           continue
         }
         rows.budget = rows.effort + BATCH_CELLS

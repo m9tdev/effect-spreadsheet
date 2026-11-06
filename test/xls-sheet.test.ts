@@ -129,6 +129,19 @@ describe("xls sheet: formula string results", () => {
     expect(await cellsOf([rstring])).toEqual([[0, 2, "Text", "rich"]])
   })
 
+  it("a FORMULA, SHRFMLA, ARRAY or TABLE continued by a CONTINUE record still takes the STRING after it", async () => {
+    // the formula's own bytes split across a CONTINUE: the CONTINUE is part of it, not a record in between
+    const data = Array.from(X.formula(0, 0, 0, { kind: 0 }).subarray(4))
+    expect(await cellsOf([X.record(0x0006, data.slice(0, -1)), X.record(CONTINUE, data.slice(-1)), X.string("res")])).toEqual([[0, 0, "Text", "res"]])
+    for (const type of [SHRFMLA, ARRAY, TABLE]) {
+      const split = [X.record(type, new Array(10).fill(0)), X.record(CONTINUE, new Array(4).fill(0))]
+      expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), ...split, X.string("shared"), X.number(1, 0, 0, 2)]), type.toString(16)).toEqual([
+        [0, 0, "Text", "shared"],
+        [1, 0, "Number", 2]
+      ])
+    }
+  })
+
   it("FORMULA with the BIFF4 record number 0x0406 reads like FORMULA", async () => {
     expect(await cellsOf([
       formula406(0, 0, X.f64(3)),
@@ -216,6 +229,41 @@ describe("xls sheet: rows whose cells come in several places", () => {
     const twice = (await readOk(one([...pass(0), ...pass(1)]), { maxRows: 150 })).sheets[0]!
     expect(twice.map((r) => r.index)).toEqual(Array.from({ length: 150 }, (_, r) => r))
     expect(twice.every((r) => r.cells.length === 2 && r.cells[1]!.column === 1)).toBe(true)
+  })
+
+  it("a hidden ROW record after its row's cells still hides the row", async () => {
+    const { sheets } = await readOk(one([X.number(0, 0, 0, 1), X.number(1, 0, 0, 2), X.row(0, true)]))
+    expect(values(sheets[0]!)).toEqual([
+      [0, true, [[0, "Number", 1]]],
+      [1, false, [[0, "Number", 2]]]
+    ])
+  })
+
+  it("ROW records after the cells hold no row back: they don't count against the held-cell cap", async () => {
+    const saved = caps.heldCells
+    try {
+      caps.heldCells = 10
+      // 20 rows of cells, then a ROW record for an empty row before them
+      const empty = [...Array.from({ length: 20 }, (_, r) => X.number(r + 1, 0, 0, r)), X.row(0)]
+      expect((await readOk(one(empty))).sheets[0]!.map((r) => [r.index, r.hidden, r.cells.length])).toEqual([
+        [0, false, 0],
+        ...Array.from({ length: 20 }, (_, r) => [r + 1, false, 1])
+      ])
+      // a hiding ROW record for the first row with cells, and a visible one repeated, both after all the cells
+      const late = [X.row(0), ...Array.from({ length: 21 }, (_, r) => X.number(r, 0, 0, r)), X.row(0, true), X.row(1)]
+      expect((await readOk(one(late))).sheets[0]!.map((r) => [r.index, r.hidden])).toEqual(Array.from({ length: 21 }, (_, r) => [r, r === 0]))
+    } finally {
+      caps.heldCells = saved
+    }
+  })
+
+  it("rows declared only by ROW records come out in row order among the others, whatever the record order", async () => {
+    const after = (await readOk(one([X.number(5, 0, 0, 1), X.row(2, true)]))).sheets[0]!
+    expect(values(after)).toEqual([[2, true, []], [5, false, [[0, "Number", 1]]]])
+    const descending = (await readOk(one([X.row(3), X.row(1, true)]))).sheets[0]!
+    expect(values(descending)).toEqual([[1, true, []], [3, false, []]])
+    const mixed = (await readOk(one([X.row(4), X.number(2, 0, 0, 1), X.row(0, true), X.number(3, 0, 0, 2), X.row(1)]))).sheets[0]!
+    expect(mixed.map((r) => [r.index, r.hidden])).toEqual([[0, true], [1, false], [2, false], [3, false], [4, false]])
   })
 
   it("a row waits for its formula's STRING even when the row's cells come back later", async () => {
@@ -324,32 +372,36 @@ describe("xls sheet: emitting rows", () => {
 
   it("ROW-only rows count towards a batch: complete() and end() stop at the budget and go on in the next batch", () => {
     const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
-    // rows 0-999 declared by ROW records only, row 1000 with a cell (its last at offset 5), row 2000 declared after it
-    rows.start(new Map([[1000, 5]]))
-    // progress: r up to 1000
-    for (let r = 0; r < 1000; r++) rows.row(r, r % 3 === 0)
-    rows.row(2000, false)
-    expect(rows.cell(1000, Cell.number(0, 1))).toBeUndefined()
-    const out: Array<number> = []
+    // rows 0-999 and 2000 declared by ROW records only (due at once), row 1000 with a cell (its last at offset 5)
+    const declared = new Set([...Array.from({ length: 1000 }, (_, r) => r), 2000])
+    const hidden = new Set(Array.from({ length: 1000 }, (_, r) => r).filter((r) => r % 3 === 0))
+    rows.start(new Map([...[...declared].map((r) => [r, -1] as const), [1000, 5]]), declared, hidden)
+    const out: Array<[number, boolean]> = []
     const drain = () => {
       // progress: each take() takes at least one row
-      while (rows.queued()) out.push(...rows.take().map((r) => r.index))
+      while (rows.queued()) out.push(...rows.take().map((r) => [r.index, r.hidden] as [number, boolean]))
     }
+    // before row 1000's cell: the ROW-only rows before it are due, over several batches
     // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
-    for (let batch = 0; rows.behind(5); batch++) {
+    for (let batch = 0; rows.behind(-1); batch++) {
       if (batch > 1002) throw new Error("complete() doesn't go on")
       rows.budget = rows.effort + 100
-      expect(rows.complete(5)).toBeUndefined()
+      expect(rows.complete(-1)).toBeUndefined()
       const before = out.length
       drain()
       // a budget of 100: at most 100 rows, one more for the row it ends with
       expect(out.length - before).toBeLessThanOrEqual(101)
     }
-    expect(out).toEqual(Array.from({ length: 1001 }, (_, r) => r))
-    // after the EOF: rows the scan didn't place and the declared rest, through end()
-    expect(rows.cell(1500, Cell.number(0, 2))).toBeUndefined()
+    expect(out).toEqual(Array.from({ length: 1000 }, (_, r) => [r, r % 3 === 0]))
+    // row 1000 waits for its cell; once it is in, row 2000 follows at once
+    expect(rows.cell(1000, Cell.number(0, 1))).toBeUndefined()
+    rows.budget = rows.effort + 100
+    expect(rows.complete(5)).toBeUndefined()
+    drain()
+    expect(out.slice(1000)).toEqual([[1000, false], [2000, false]])
+    // after the EOF: rows the scan didn't place, through end()
     // progress: r up to 1000
-    for (let r = 0; r < 1000; r++) rows.row(3000 + r, false)
+    for (let r = 0; r < 1000; r++) expect(rows.cell(3000 + r, Cell.number(0, r))).toBeUndefined()
     let ended: unknown = false
     // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
     for (let batch = 0; ended !== true; batch++) {
@@ -361,7 +413,7 @@ describe("xls sheet: emitting rows", () => {
       drain()
       expect(out.length - before).toBeLessThanOrEqual(101)
     }
-    expect(out.slice(1001)).toEqual([1500, 2000, ...Array.from({ length: 1000 }, (_, r) => 3000 + r)])
+    expect(out.slice(1002).map(([r]) => r)).toEqual(Array.from({ length: 1000 }, (_, r) => 3000 + r))
   })
 
   it("end() emits rows the scan didn't place within the budget, over several batches", () => {
@@ -388,15 +440,9 @@ describe("xls sheet: emitting rows", () => {
     expect(out).toEqual(Array.from({ length: 1000 }, (_, r) => r))
   })
 
-  it("a repeated ROW record isn't queued again: a flood of one row costs one step to emit", () => {
-    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
-    rows.start(new Map())
-    // progress: k up to 10 000
-    for (let k = 0; k < 10_000; k++) rows.row(k % 2, k === 7)
-    const before = work.steps
-    expect(rows.end()).toBe(true)
-    expect(work.steps - before).toBeLessThanOrEqual(2)
-    expect(rows.take().map((r) => [r.index, r.hidden])).toEqual([[0, false], [1, true]])
+  it("repeated ROW records give one row each, hidden if any of them hides it", async () => {
+    const flood = Array.from({ length: 10_000 }, (_, k) => X.row(k % 2, k === 7))
+    expect(values((await readOk(one(flood))).sheets[0]!)).toEqual([[0, false, []], [1, true, []]])
   })
 
   it("a row waiting for its formula's STRING doesn't stop the reader: the read ends at once (pending STRING isn't behind)", async () => {
