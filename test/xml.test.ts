@@ -159,7 +159,7 @@ const errorKey = (error: SpreadsheetError | undefined) =>
 
 const XMLISH = fc.constantFrom(
   "<", ">", "/", "a", "b", " ", "=", '"', "'", "&", ";", "#", "x", "!", "-", "[", "?", "]", "\r", "\n", "\t",
-  "amp", "<a>", "</a>", "<![CDATA[", "-->", "<!--", "<?", "?>", "]]>", "é", "&#10;", "&#13;", "&lt;"
+  "amp", "<a>", "</a>", "<![CDATA[", "-->", "<!--", "<?", "?>", "]]>", "é", "&#10;", "&#13;", "&lt;", "<!D", "OCTYPE"
 )
 
 describe("xml tokenizer: split invariance and cost", () => {
@@ -171,6 +171,32 @@ describe("xml tokenizer: split invariance and cost", () => {
     for (let cut = 0; cut <= doc.length; cut++) {
       const split = tokenize([doc.slice(0, cut), doc.slice(cut)])
       expect([split.events, errorKey(split.error)], `cut at ${cut}`).toEqual([whole.events, errorKey(whole.error)])
+    }
+  })
+
+  it("a declaration that starts like <!DOCTYPE gives the same error wherever the input is split", () => {
+    const docs = [
+      "<root><!D</root>",
+      "<root><!DOC x></root>",
+      "<root><!DOCTYPE x></root>",
+      "<!DOCTYPE x><a/>",
+      "<a/><!DOCTYPEx>",
+      "<a><!Dx/>y</a>",
+      "<a><!DOCTYPE",
+      "<a><!DO"
+    ]
+    for (const doc of docs) {
+      const whole = one(doc)
+      expect(whole.error, doc).toMatchObject({ _tag: "MalformedFile" })
+      for (let cut = 0; cut <= doc.length; cut++) {
+        const split = tokenize([doc.slice(0, cut), doc.slice(cut)])
+        expect([split.events, errorKey(split.error)], `${doc} cut at ${cut}`).toEqual([whole.events, errorKey(whole.error)])
+      }
+      const perChar = tokenize([...doc])
+      expect([perChar.events, errorKey(perChar.error)], `${doc} one character per piece`).toEqual([
+        whole.events,
+        errorKey(whole.error)
+      ])
     }
   })
 
