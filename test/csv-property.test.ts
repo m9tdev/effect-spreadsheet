@@ -2,7 +2,7 @@ import { describe, it } from "@effect/vitest"
 import { Effect, Stream } from "effect"
 import fc from "fast-check"
 import { expect } from "vitest"
-import { csvAoa, csvExit, csvRows, enc, failureOf, splitAt } from "./helpers/run.ts"
+import { csvAoa, csvExit, csvRows, csvUntilError, enc, failureOf, splitAt } from "./helpers/run.ts"
 
 /** Independent, naive reference for the lenient parser (whole string at once). */
 const reference = (text: string, delimiter: string): Array<Array<string | undefined>> => {
@@ -110,6 +110,29 @@ describe("csv properties", () => {
         }
       ),
       { numRuns: 300 }
+    )
+  })
+
+  it("on maxRows, any chunking gives the rows within the limit, then the limit error", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        csvText.chain((text) => fc.tuple(fc.constant(text), cutsFor(enc(text).length))),
+        fc.nat(20),
+        async ([text, cuts], maxRows) => {
+          const bytes = enc(text)
+          // given encoding and delimiter: each chunk is parsed as it comes
+          const options = { delimiter: ",", encoding: "utf-8" } as const
+          const all = await csvAoa(bytes, options)
+          fc.pre(all.length > maxRows)
+          const expected = all.slice(0, maxRows)
+          for (const input of [bytes, Stream.fromIterable(splitAt(bytes, cuts))]) {
+            const { error, rows } = await csvUntilError(input, { ...options, limits: { maxRows } })
+            expect(rows).toEqual(expected)
+            expect(error?._tag === "LimitExceeded" && error.limit).toBe("maxRows")
+          }
+        }
+      ),
+      { numRuns: 200 }
     )
   })
 

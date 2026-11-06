@@ -65,6 +65,9 @@ export const rowsFromByteStream = <E, R>(
         // chunkIndex grows past exhausted chunks), or pulls one upstream
         // chunk, or finishes. After `finished` the pull ends.
         while (true) {
+          // rows completed before a parse error came out on the last pull;
+          // the error comes now, before any more input is read or decoded
+          if (parser.error !== undefined) return yield* Effect.fail(parser.error)
           if (finished) return yield* Cause.done()
           let rows: Array<Row> | SpreadsheetError
           if (chunkIndex < chunks.length) {

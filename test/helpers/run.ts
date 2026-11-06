@@ -29,6 +29,32 @@ export const toAoa = (rows: ReadonlyArray<Row>): Array<Array<unknown>> =>
 export const csvAoa = async (input: Uint8Array | string | Stream.Stream<Uint8Array>, options?: Csv.ReadOptions) =>
   toAoa(await Effect.runPromise(csvRows(input, options)))
 
+/**
+ * Streams rows into a list until the stream ends or fails: the rows a
+ * consumer saw, as arrays of values, and the error, if any.
+ */
+export const csvUntilError = async (
+  input: Uint8Array | string | Stream.Stream<Uint8Array>,
+  options?: Csv.ReadOptions
+): Promise<{ rows: Array<Array<unknown>>; error: SpreadsheetError | undefined }> => {
+  const seen: Array<Row> = []
+  const exit = await Effect.runPromise(Effect.exit(
+    Stream.runForEach(
+      Csv.rows(typeof input === "string" ? enc(input) : input as Uint8Array, options),
+      (row) => Effect.sync(() => seen.push(row))
+    )
+  ))
+  return { rows: toAoa(seen), error: failureOf(exit) }
+}
+
+/** Splits bytes into chunks of `size` bytes (the last one may be shorter). */
+export const chunksOf = (bytes: Uint8Array, size: number): Array<Uint8Array> => {
+  const out: Array<Uint8Array> = []
+  // progress: i grows by size >= 1
+  for (let i = 0; i < bytes.length; i += size) out.push(bytes.subarray(i, i + size))
+  return out
+}
+
 /** Splits bytes at the given cut points (sorted, deduplicated, in range). */
 export const splitAt = (bytes: Uint8Array, cuts: ReadonlyArray<number>): Array<Uint8Array> => {
   const points = [...new Set(cuts.map((c) => Math.max(0, Math.min(bytes.length, c))))].sort((a, b) => a - b)

@@ -79,9 +79,16 @@ export class CsvParser {
     return String.fromCharCode(this.delimiter)
   }
 
+  /** The error that stopped parsing, if any. Once set, it stays. */
+  get error(): SpreadsheetError | undefined {
+    return this.failure
+  }
+
   /**
    * Feeds a piece of text; `final` marks the end of input. Returns the rows
-   * completed by this piece, or the error that stopped parsing.
+   * completed by this piece, or the error that stopped parsing. If the
+   * piece completed rows before the error, those rows are returned first;
+   * the error is then in `error` and returned by the next call.
    */
   feed(text: string, final: boolean): Array<Row> | SpreadsheetError {
     if (this.failure !== undefined) return this.failure
@@ -95,7 +102,7 @@ export class CsvParser {
     }
     this.parse(text)
     if (final && this.failure === undefined) this.finish()
-    if (this.failure !== undefined) return this.failure
+    if (this.failure !== undefined && this.out.length === 0) return this.failure
     const rows = this.out
     this.out = []
     return rows
