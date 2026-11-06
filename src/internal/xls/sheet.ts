@@ -9,12 +9,14 @@
  *
  * - Rows: ROW records give hidden rows (fDyZero) and rows without cells;
  *   cells mostly come row by row after their block of ROW records, but
- *   some writers put a row's cells (or its ROW record) in several places.
- *   A first pass over the record headers (`RowScan`) finds where each row
- *   ends; a row is emitted, merged, once that record is handled, in row
+ *   some writers put a row's cells in several places, or ROW records after
+ *   the cells. A first pass over the record headers (`RowScan`) finds where
+ *   each row's last cell is, and the rows ROW records declare or hide; a
+ *   row is emitted, merged, once its last cell record is handled, in row
  *   order (rows before it wait, holding only cells already counted against
- *   `maxCellsPerSheet`). ROW-only rows are emitted in that same order.
- *   Hidden rows are emitted with `hidden: true`, never skipped.
+ *   `maxCellsPerSheet`). ROW-only rows are emitted at their place in that
+ *   order, without waiting for any record. Hidden rows are emitted with
+ *   `hidden: true`, never skipped.
  * - Cells: LABELSST, LABEL, RSTRING (text), NUMBER, RK, MULRK (numbers),
  *   BOOLERR (booleans and errors), BLANK, MULBLANK (Empty), FORMULA with
  *   its cached result (a following STRING record for text, after any
@@ -135,17 +137,20 @@ const CELL_RECORDS: ReadonlySet<number> = new Set([LABELSST, LABEL, RSTRING, NUM
 
 /**
  * A first pass over the substream's records (headers, row numbers and ROW
- * flags only): where each row ends, the offset of its last cell record or
- * of a ROW record that matters (its first one, or one that hides it). Some
- * writers emit a row's cells, or a ROW record after them, in several
- * places; knowing where each row ends lets the main pass merge them, with
- * the row's hidden flag, and still emit every row, in row order, as soon as
- * it is complete. A later ROW record that doesn't hide the row changes
- * nothing, so the row doesn't wait for it. One entry per row with cells or a
- * ROW record (at most 65 536: rows are u16).
+ * flags only): the offset of each row's last cell record, and the rows ROW
+ * records declare and hide. Some writers emit a row's cells in several
+ * places, or ROW records after the cells; knowing all this up front lets the
+ * main pass merge a row's cells, with its hidden flag, and still emit every
+ * row, in row order, as soon as its cells are complete. A row declared only
+ * by ROW records has no cell to wait for: its entry is -1, due at once. One
+ * entry per row with cells or a ROW record (at most 65 536: rows are u16).
  */
 class RowScan {
   readonly lastAt = new Map<number, number>()
+  /** Rows with a ROW record. */
+  readonly declared = new Set<number>()
+  /** Rows with a ROW record that hides them (fDyZero). */
+  readonly hidden = new Set<number>()
   done = false
   private nested = 0
   private readonly reader: RecordReader
@@ -175,7 +180,11 @@ class RowScan {
       } else if (this.nested === 0 && record.data.length >= 2) {
         const row = record.data[0]! | (record.data[1]! << 8)
         if (CELL_RECORDS.has(record.type)) this.lastAt.set(row, record.offset)
-        else if (record.type === ROW && (!this.lastAt.has(row) || ((record.data[12] ?? 0) & 0x20) !== 0)) this.lastAt.set(row, record.offset)
+        else if (record.type === ROW) {
+          this.declared.add(row)
+          if (((record.data[12] ?? 0) & 0x20) !== 0) this.hidden.add(row)
+          if (!this.lastAt.has(row)) this.lastAt.set(row, -1)
+        }
       }
     }
   }
@@ -206,10 +215,10 @@ interface OpenRow {
 }
 
 /**
- * Builds rows from cell and ROW records. Cells of a row are gathered until
- * the record where it ends (from the `RowScan`) is handled, then rows are
- * emitted in row order. Rows waiting for later records hold only cells
- * already counted against `maxCellsPerSheet`.
+ * Builds rows from cell records and the `RowScan`'s ROW records. Cells of a
+ * row are gathered until the record holding its last cell is handled, then
+ * rows are emitted in row order. Rows waiting for later cells hold only
+ * cells already counted against `maxCellsPerSheet`.
  */
 export class Rows {
   /** Rows ready to emit; `out[outAt]` is the next one (see `take`). */
@@ -220,17 +229,16 @@ export class Rows {
   /** The row the last cell went to (most cells follow the one before). */
   private hotRow = -1
   private hotEntry: OpenRow | undefined
-  /** Offset of the record where each row ends (see `RowScan`). */
+  /** Offset of each row's last cell record, -1 for a row with ROW records only (see `RowScan`). */
   private lastAt: ReadonlyMap<number, number> = new Map()
   /** Rows the scan placed, ascending; `order[nextRow]` is the next one to emit. */
   private order: Uint32Array = new Uint32Array(0)
   private nextRow = 0
-  /** Offset of the record where `order[nextRow]` ends (Infinity when none is left). */
+  /** `lastAt` of `order[nextRow]` (Infinity when none is left). */
   private nextAt = Infinity
-  /** Hidden flags from ROW records. */
-  private readonly hidden = new Set<number>()
-  /** Rows declared by ROW records (each once, however many ROW records it has). */
-  private readonly declared = new Set<number>()
+  /** Rows declared by ROW records, and those they hide (from the `RowScan`). */
+  private declared: ReadonlySet<number> = new Set()
+  private hidden: ReadonlySet<number> = new Set()
   /** Rows the scan didn't place, in row order (set by `end`); `left[leftAt]` is the next one. */
   private left: Uint32Array | undefined
   private leftAt = 0
@@ -257,9 +265,11 @@ export class Rows {
     this.context = context
   }
 
-  /** Where each row ends, from the `RowScan`. */
-  start(lastAt: ReadonlyMap<number, number>): void {
+  /** Where each row's cells end and the rows ROW records declare and hide, from the `RowScan`. */
+  start(lastAt: ReadonlyMap<number, number>, declared: ReadonlySet<number> = new Set(), hidden: ReadonlySet<number> = new Set()): void {
     this.lastAt = lastAt
+    this.declared = declared
+    this.hidden = hidden
     this.order = Uint32Array.from(lastAt.keys()).sort()
     this.nextRow = 0
     this.nextAt = this.order.length > 0 ? lastAt.get(this.order[0]!)! : Infinity
@@ -314,8 +324,8 @@ export class Rows {
   }
 
   /**
-   * After the record at `offset`: emits, in row order, the rows that end
-   * at or before it (not one still waiting for its STRING),
+   * After the record at `offset`: emits, in row order, the rows whose last
+   * cell record is at or before it (not one still waiting for its STRING),
    * until `effort` reaches `budget` (see `behind`).
    */
   complete(offset: number): SpreadsheetError | undefined {
@@ -335,11 +345,6 @@ export class Rows {
   /** Whether rows complete at `offset` are left for `complete` (it stopped at the budget). */
   behind(offset: number): boolean {
     return this.nextRow < this.order.length && this.nextAt <= offset && this.pendingString?.row !== this.order[this.nextRow]
-  }
-
-  row(index: number, hidden: boolean): void {
-    if (hidden) this.hidden.add(index)
-    this.declared.add(index)
   }
 
   cell(row: number, cell: Cell.Cell): SpreadsheetError | undefined {
@@ -382,10 +387,8 @@ export class Rows {
    * call it again in the next batch).
    */
   end(): SpreadsheetError | boolean {
-    // rows the scan didn't place (none when both passes agree), in row order:
-    // the rows still open and the declared rows it has no entry for
-    this.left ??= Uint32Array.from(new Set([...this.open.keys(), ...[...this.declared].filter((index) => !this.lastAt.has(index))])).sort()
-    const left = this.left
+    // rows the scan didn't place (none when both passes agree), in row order
+    const left = this.left ??= Uint32Array.from(this.open.keys()).sort()
     // progress: leftAt increases up to left.length
     while (this.leftAt < left.length) {
       if (this.effort >= this.budget) return false
@@ -448,8 +451,8 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
     case ROW: {
       const row = f.u16(0)
       const grbit = f.u16(12)
+      // the `RowScan` already took the declared row and its hidden flag
       if (row === undefined || grbit === undefined) return truncated()
-      rows.row(row, (grbit & 0x20) !== 0)
       return false
     }
     case LABELSST: {
@@ -580,7 +583,7 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
         if (done) return yield* Cause.done()
         if (!scan.done) {
           scan.step(BATCH_RECORDS)
-          if (scan.done) rows.start(scan.lastAt)
+          if (scan.done) rows.start(scan.lastAt, scan.declared, scan.hidden)
           continue
         }
         rows.budget = rows.effort + BATCH_CELLS
