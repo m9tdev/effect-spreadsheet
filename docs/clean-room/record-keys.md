@@ -114,8 +114,10 @@ How `records.ts` uses it:
   dropped"), so the caller never calls `key` for them. Recommended: run explicit
   names through the same de-duplication, so `["x", "x"]` doesn't lose data.
   No test pins this either way.
-- For each data cell that becomes a field, use `key(cell.column)`. For `defval`
-  fills, iterate `named` only.
+- For each data cell that becomes a field, use `key(cell.column)`. An Empty
+  cell (formatted, no value) is not a data cell: don't call `key` for it, or
+  it would use up an `__EMPTY…` key for a column that holds no data. For
+  `defval` fills, iterate `named` only.
 
 ## 4. Rules
 
