@@ -33,7 +33,7 @@ import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { ColumnSpan, Range, Row, SheetDetails } from "../../Workbook.ts"
-import { BOF_BIFF5_8, type BiffRecord, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
+import { BOF_BIFF5_8, type BiffRecord, CONTINUE, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { serialToDate } from "../xlsx/numFmt.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { decodeRk, ERROR_CODES, Fields, readString } from "./fields.ts"
@@ -426,9 +426,10 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
   const truncated = () => malformed(part, `truncated record 0x${record.type.toString(16)}`, record.offset)
   const tooLong = () => new LimitExceeded({ limit: "maxStringLength", max: context.limits.maxStringLength, actual: context.limits.maxStringLength + 1 })
   // a formula's string result comes right after it, or after its SHRFMLA, ARRAY or TABLE
+  // (any of them maybe continued by CONTINUE records, which are part of it)
   if (
     rows.pendingString !== undefined && record.type !== STRING && record.type !== SHRFMLA && record.type !== ARRAY &&
-    record.type !== TABLE
+    record.type !== TABLE && record.type !== CONTINUE
   ) {
     const pending = rows.pendingString
     rows.pendingString = undefined

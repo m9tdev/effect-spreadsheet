@@ -129,6 +129,19 @@ describe("xls sheet: formula string results", () => {
     expect(await cellsOf([rstring])).toEqual([[0, 2, "Text", "rich"]])
   })
 
+  it("a FORMULA, SHRFMLA or ARRAY continued by a CONTINUE record still takes the STRING after it", async () => {
+    // the formula's own bytes split across a CONTINUE: the CONTINUE is part of it, not a record in between
+    const data = Array.from(X.formula(0, 0, 0, { kind: 0 }).subarray(4))
+    expect(await cellsOf([X.record(0x0006, data.slice(0, -1)), X.record(CONTINUE, data.slice(-1)), X.string("res")])).toEqual([[0, 0, "Text", "res"]])
+    for (const type of [SHRFMLA, ARRAY]) {
+      const split = [X.record(type, new Array(10).fill(0)), X.record(CONTINUE, new Array(4).fill(0))]
+      expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), ...split, X.string("shared"), X.number(1, 0, 0, 2)]), type.toString(16)).toEqual([
+        [0, 0, "Text", "shared"],
+        [1, 0, "Number", 2]
+      ])
+    }
+  })
+
   it("FORMULA with the BIFF4 record number 0x0406 reads like FORMULA", async () => {
     expect(await cellsOf([
       formula406(0, 0, X.f64(3)),
