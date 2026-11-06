@@ -145,6 +145,30 @@ describe("toRecords", () => {
     ])
   })
 
+  it("an Empty cell is not data: it takes no __EMPTY key and gets no defval outside header-named columns", () => {
+    // header `a,,c`; row 1 has an Empty cell in the unnamed column 1 and in
+    // the named column 2; row 2 has data in column 3, past the header.
+    const rows: Array<Row> = [
+      { index: 0, hidden: false, cells: [Cell.text(0, "a"), Cell.text(2, "c")] },
+      { index: 1, hidden: false, cells: [Cell.text(0, "1"), Cell.empty(1), Cell.empty(2)] },
+      { index: 2, hidden: false, cells: [Cell.text(0, "2"), Cell.text(3, "x")] }
+    ]
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [{ a: "1" }, { a: "2", __EMPTY: "x" }])
+    assert.deepStrictEqual(recs(rows, { header: "first-row", defval: null }), [
+      { a: "1", c: null },
+      { a: "2", c: null, __EMPTY: "x" }
+    ])
+    // An explicit "" entry is a blank header name too.
+    assert.deepStrictEqual(recs(rows.slice(1), { header: ["a", "", "c", "d"], defval: 0 }), [
+      { a: "1", c: 0, d: 0 },
+      { a: "2", c: 0, d: "x" }
+    ])
+    // A row of only Empty cells under unnamed columns is blank.
+    const blank: Array<Row> = [rows[0]!, { index: 1, hidden: false, cells: [Cell.empty(1), Cell.empty(5)] }]
+    assert.deepStrictEqual(recs(blank, { header: "first-row", defval: null }), [])
+    assert.deepStrictEqual(recs(blank, { header: "first-row", blankRows: true }), [{}])
+  })
+
   it.effect("cells count against maxCellsPerSheet, defval fills against maxRecordFields", () =>
     Effect.gen(function*() {
       const rows = yield* csvRows("a,b,c\n1\n2\n3\n")
