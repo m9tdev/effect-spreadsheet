@@ -152,16 +152,18 @@ export class SegmentReader {
     let wide = highByte
     let left = count
     const parts: Array<string> = []
-    // progress: each iteration consumes at least one character, or a
-    // boundary option byte followed by at least one character, or fails
+    // progress: each iteration consumes at least one character, or
+    // boundary option bytes followed by at least one character, or fails
     while (left > 0) {
       if (this.failed || !this.settle()) {
         this.failed = true
         return undefined
       }
       // characters continued in a new segment (also right after the
-      // string's header ended a segment) start with an option byte
-      if (this.atBoundary()) {
+      // string's header ended a segment) start with an option byte; a
+      // segment may hold only that byte, so the next one starts with its
+      // own. progress: each pass reads one byte (or fails)
+      while (this.atBoundary()) {
         const option = this.u8()
         if (option === undefined || !this.settle()) {
           this.failed = true

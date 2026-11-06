@@ -190,6 +190,33 @@ describe("biff segments", () => {
     expect(readRichString(new SegmentReader(cjk), 100)).toBe("日本語!")
   })
 
+  it("a segment holding only an option byte is followed by the next segment's option byte, not a character", () => {
+    // 8-bit: "ab" | [00] | [00 "c"], then another string
+    const narrow = new SegmentReader([
+      new Uint8Array([3, 0, 0, 0x61, 0x62]),
+      new Uint8Array([0]),
+      new Uint8Array([0, 0x63, 3, 0, 0, 0x78, 0x79, 0x7A])
+    ])
+    expect(readRichString(narrow, 100)).toBe("abc")
+    expect(readRichString(narrow, 100)).toBe("xyz")
+    expect(narrow.remaining()).toBe(0)
+    // 16-bit: "a" | [01] | [01 "b" "c"]
+    const wide = new SegmentReader([new Uint8Array([3, 0, 0, 0x61]), new Uint8Array([1]), new Uint8Array([1, 0x62, 0, 0x63, 0])])
+    expect(readRichString(wide, 100)).toBe("abc")
+    // several in a row, right after the header, widths switching: the last option byte wins
+    const many = new SegmentReader([
+      new Uint8Array([2, 0, 0]),
+      new Uint8Array([1]),
+      new Uint8Array([0]),
+      new Uint8Array([1]),
+      new Uint8Array([1, 0xE5, 0x65, 0x2C, 0x67])
+    ])
+    expect(readRichString(many, 100)).toBe("日本")
+    // option bytes and then nothing left: truncated
+    expect(readRichString(new SegmentReader([new Uint8Array([2, 0, 0, 0x61]), new Uint8Array([0]), new Uint8Array([0])]), 100))
+      .toBeUndefined()
+  })
+
   it("8-bit characters are code units: 0x80-0x9F are C1 controls, not windows-1252", () => {
     const r = new SegmentReader([new Uint8Array([3, 0, 0, 0x80, 0x93, 0x9F])])
     expect(readRichString(r, 100)).toBe("\u0080\u0093\u009F")
