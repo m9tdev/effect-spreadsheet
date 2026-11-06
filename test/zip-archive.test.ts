@@ -263,6 +263,35 @@ describe("zip archive: hostile input", () => {
     expect(archive.inflatedBytes()).toBe(5 * MiB)
   })
 
+  it("after one entry goes over the budget, entries already read still read; new bytes still fail", async () => {
+    const zip = await zeroEntries(3)
+    const archive = openOk(zip, { ...limits, inflateFloorBytes: 2 * MiB })
+    const [a, b, c] = archive.entries
+    const readExit = (entry: ZipEntry | undefined, l?: SpreadsheetLimits.Limits) => Effect.runPromise(Effect.exit(Stream.runCollect(archive.read(entry!, l))))
+    expect(Exit.isSuccess(await readExit(a))).toBe(true)
+    expect(Exit.isSuccess(await readExit(b))).toBe(true)
+    const over = { _tag: "LimitExceeded", limit: "maxInflateRatio", max: 200 }
+    expect(failureOf(await readExit(c))).toMatchObject(over)
+    // a and b spend nothing new: they still read
+    expect(Exit.isSuccess(await readExit(a))).toBe(true)
+    expect(Exit.isSuccess(await readExit(b))).toBe(true)
+    // c fails again once it passes what it already inflated
+    expect(failureOf(await readExit(c))).toMatchObject(over)
+    // limits given to one read set its budget against the same total
+    expect(Exit.isSuccess(await readExit(c, { ...limits, inflateFloorBytes: 3 * MiB }))).toBe(true)
+    expect(failureOf(await readExit(a, { ...limits, inflateFloorBytes: 0, maxInflateRatio: 1 }))).toBeUndefined()
+    expect(archive.inflatedBytes()).toBeLessThanOrEqual(6 * MiB + 2 * CHUNK)
+  })
+
+  it("the chunk that goes over the budget isn't charged, so reading the entry again fails again", async () => {
+    // stored: read in three 64 KiB slices; the third one crosses 150 KiB
+    const zip = await buildZip([{ name: "s.bin", data: pseudoRandom(3 * 64 * 1024), method: "store" }])
+    const archive = openOk(zip, { ...limits, maxDecompressedBytes: 150 * 1024 })
+    const over = { _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 150 * 1024, actual: 3 * 64 * 1024 }
+    expect(await errorOf(archive, "s.bin")).toMatchObject(over)
+    expect(await errorOf(archive, "s.bin")).toMatchObject(over)
+  })
+
   it("the committed 666:1 blank-row workbook passes with the default limits", async () => {
     const bytes = new Uint8Array(readFileSync("test/corpus/generated/many_empty_rows_implicit.xlsx"))
     const archive = openOk(bytes)

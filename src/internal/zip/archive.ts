@@ -11,7 +11,10 @@
  *   `maxInflateRatio` × archive size), capped at `maxDecompressedBytes`.
  *   Reading an entry again doesn't spend the budget again (each entry
  *   counts up to the most it has inflated), so a sheet can be streamed
- *   twice; many entries, however small each one is, can't add up past it.
+ *   twice, even after another entry went over the budget; many entries,
+ *   however small each one is, can't add up past it. A read may be given
+ *   other limits than the archive's: its budget comes from them, checked
+ *   against the same archive-wide total.
  *   The CRC-32 is checked at the end. Decompression only runs as far as
  *   the stream is read.
  *
@@ -42,8 +45,11 @@ export interface Archive {
   readonly entries: ReadonlyArray<ZipEntry>
   /** The entry with this name (case-insensitive, a leading `/` ignored), if any. */
   readonly find: (name: string) => ZipEntry | undefined
-  /** The entry's uncompressed bytes, chunk by chunk. Re-runnable. */
-  readonly read: (entry: ZipEntry) => Stream.Stream<Uint8Array, SpreadsheetError>
+  /**
+   * The entry's uncompressed bytes, chunk by chunk. Re-runnable. `limits`
+   * (default: the archive's) set this read's inflate budget.
+   */
+  readonly read: (entry: ZipEntry, limits?: Limits) => Stream.Stream<Uint8Array, SpreadsheetError>
   /** The whole entry; fails up front if its declared size is over `maxBytes`. */
   readonly readAll: (entry: ZipEntry, maxBytes?: number) => Effect.Effect<Uint8Array, SpreadsheetError>
   /** Bytes inflated (or copied, for stored entries) so far, over all reads: a work counter. */
@@ -130,25 +136,31 @@ export const open = (
   /** Bytes counted against the budget: per entry, the most it has inflated so far. */
   let charged = 0
   const highWater = new Map<ZipEntry, number>()
-  const budget = inflateBudget(bytes.length, limits)
-  const ratioBound = budget < limits.maxDecompressedBytes
 
-  /** Counts `n` more output bytes of `entry` (`soFar` after them); an error if a limit is crossed. */
-  const account = (entry: ZipEntry, soFar: number, n: number): SpreadsheetError | undefined => {
+  /**
+   * Counts `n` more output bytes of `entry` (`soFar` after them) under
+   * `limits`; an error if a limit is crossed. Only bytes past the entry's
+   * high-water mark are charged, so re-reads of what was already inflated
+   * pass. A chunk that would take the total over the budget is rejected
+   * without being charged or raising the high-water mark, so a re-read
+   * fails at the same point again.
+   */
+  const account = (entry: ZipEntry, soFar: number, n: number, limits: Limits): SpreadsheetError | undefined => {
     inflated += n
     if (soFar > entry.uncompressedSize) {
       return malformed(`entry inflates past its declared size of ${entry.uncompressedSize} bytes`, entry.name)
     }
     const before = highWater.get(entry) ?? 0
-    if (soFar > before) {
-      charged += soFar - before
-      highWater.set(entry, soFar)
+    if (soFar <= before) return undefined
+    const total = charged + (soFar - before)
+    const budget = inflateBudget(bytes.length, limits)
+    if (total > budget) {
+      return budget < limits.maxDecompressedBytes
+        ? new LimitExceeded({ limit: "maxInflateRatio", max: limits.maxInflateRatio, actual: Math.ceil(total / Math.max(1, bytes.length)) })
+        : new LimitExceeded({ limit: "maxDecompressedBytes", max: limits.maxDecompressedBytes, actual: total })
     }
-    if (charged > budget) {
-      return ratioBound
-        ? new LimitExceeded({ limit: "maxInflateRatio", max: limits.maxInflateRatio, actual: Math.ceil(charged / Math.max(1, bytes.length)) })
-        : new LimitExceeded({ limit: "maxDecompressedBytes", max: limits.maxDecompressedBytes, actual: charged })
-    }
+    charged = total
+    highWater.set(entry, soFar)
     return undefined
   }
 
@@ -160,7 +172,7 @@ export const open = (
     return undefined
   }
 
-  const read = (entry: ZipEntry): Stream.Stream<Uint8Array, SpreadsheetError> => {
+  const read = (entry: ZipEntry, readLimits: Limits = limits): Stream.Stream<Uint8Array, SpreadsheetError> => {
     if ((entry.flags & 0x1) !== 0) return Stream.fail(new Encrypted({ format: "zip" }))
     if (entry.method !== STORED && entry.method !== DEFLATE) {
       return Stream.fail(
@@ -209,7 +221,7 @@ export const open = (
             }
             if (chunk.length === 0) continue // the decompressor advanced its input
             size += chunk.length
-            const error = account(entry, size, chunk.length)
+            const error = account(entry, size, chunk.length, readLimits)
             if (error !== undefined) {
               done = true
               inflater?.cancel()

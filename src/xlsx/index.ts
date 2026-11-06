@@ -148,7 +148,7 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
         const part = sheetPart(sheet)
         if (part === undefined) return Stream.empty
         if ("_tag" in part) return Stream.fail(part)
-        return sheetRows(archive.read(part), {
+        return sheetRows(archive.read(part, effective), {
           part: part.name,
           strings,
           styles,
@@ -160,7 +160,7 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
         const part = sheetPart(sheet)
         if (part === undefined) return Effect.succeed({ hiddenColumns: [], merges: [] })
         if ("_tag" in part) return Effect.fail(part)
-        return sheetDetails(archive.read(part), part.name, effective)
+        return sheetDetails(archive.read(part, effective), part.name, effective)
       }
     })
   })

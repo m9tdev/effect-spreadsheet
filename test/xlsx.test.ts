@@ -407,3 +407,45 @@ describe("xlsx: hostile and broken files", () => {
     expect(failureOf(await readExit(bytes))).toMatchObject({ _tag: "Encrypted" })
   })
 })
+
+describe("xlsx: inflate budget across reads of one workbook", () => {
+  // "Big" inflates to about 140 KB; "Small" to a few hundred bytes
+  const bigData = Array.from({ length: 2000 }, (_, r) => `<row r="${r + 1}"><c r="A${r + 1}"><v>${r}</v></c><c r="B${r + 1}"><v>12345</v></c></row>`).join("")
+  const book = () => xlsx({ sheets: [{ name: "Small", data: `<row r="1"><c r="A1"><v>1</v></c></row>` }, { name: "Big", data: bigData }] })
+  const rowsExit = (wb: Workbook.Workbook, sheet: string, limits?: LimitOverrides) =>
+    Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, sheet, limits === undefined ? undefined : { limits }))))
+  const detailsExit = (wb: Workbook.Workbook, sheet: string, limits?: LimitOverrides) =>
+    Effect.runPromise(Effect.exit(Workbook.sheetDetails(wb, sheet, limits === undefined ? undefined : { limits })))
+
+  it("a sheet already read can be read again after another sheet went over the budget", async () => {
+    const wb = await Effect.runPromise(Xlsx.read(await book(), { limits: { maxDecompressedBytes: 4000 } }))
+    expect(Exit.isSuccess(await rowsExit(wb, "Small"))).toBe(true)
+    expect(failureOf(await rowsExit(wb, "Big"))).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 4000 })
+    // re-reading Small spends nothing new
+    expect(Exit.isSuccess(await rowsExit(wb, "Small"))).toBe(true)
+    expect(Exit.isSuccess(await detailsExit(wb, "Small"))).toBe(true)
+    // Big still can't go past the budget
+    expect(failureOf(await rowsExit(wb, "Big"))).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 4000 })
+  })
+
+  it("inflate limits given to rows and sheetDetails apply, lower or higher than at read time", async () => {
+    const bytes = await book()
+    // lower: the workbook was read with the defaults
+    const wb = await Effect.runPromise(Xlsx.read(bytes))
+    const low = { maxDecompressedBytes: 20_000 }
+    expect(Exit.isSuccess(await rowsExit(wb, "Small", low))).toBe(true)
+    expect(failureOf(await rowsExit(wb, "Big", low))).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 20_000 })
+    expect(failureOf(await detailsExit(wb, "Big", low))).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 20_000 })
+    const ratio = { maxInflateRatio: 1, inflateFloorBytes: 0 }
+    expect(failureOf(await rowsExit(wb, "Big", ratio))).toMatchObject({ _tag: "LimitExceeded", limit: "maxInflateRatio", max: 1 })
+    // without overrides the read-time limits apply
+    const all = await rowsExit(wb, "Big")
+    expect(Exit.isSuccess(all) && all.value.length).toBe(2000)
+    // higher: the workbook was read with a budget too small for Big
+    const tight = await Effect.runPromise(Xlsx.read(bytes, { limits: { maxDecompressedBytes: 4000 } }))
+    expect(failureOf(await detailsExit(tight, "Big"))).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 4000 })
+    const raised = await rowsExit(tight, "Big", { maxDecompressedBytes: Infinity })
+    expect(Exit.isSuccess(raised) && raised.value.length).toBe(2000)
+    expect(Exit.isSuccess(await detailsExit(tight, "Big", { maxDecompressedBytes: Infinity }))).toBe(true)
+  })
+})
