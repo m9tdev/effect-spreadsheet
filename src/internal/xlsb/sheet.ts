@@ -97,18 +97,23 @@ const BRT_FRT_END = 0x0024
  * blocks (BrtFRTBegin ... BrtFRTEnd, e.g. a record 0x0001 that isn't a
  * blank cell), so only records outside them count; and row and cell
  * records count only inside the sheet data. The depth is bounded by the
- * records read (each BrtFRTBegin is a record).
+ * records read (each BrtFRTBegin is a record). A block still open at the
+ * end of the part would hide every record after its BrtFRTBegin, so it is
+ * malformed (`end`).
  */
 class Scope {
   /** Open future-record blocks. */
   private frt = 0
+  /** Offset of the outermost open block's BrtFRTBegin. */
+  private frtOffset = 0
   /** Inside BrtBeginSheetData ... BrtEndSheetData. */
   sheetData = false
 
-  /** Takes `type` into account; true if it is a record of the sheet itself (outside future-record blocks). */
-  step(type: number): boolean {
+  /** Takes `record` into account; true if it is a record of the sheet itself (outside future-record blocks). */
+  step(record: Biff12Record): boolean {
+    const type = record.type
     if (type === BRT_FRT_BEGIN) {
-      this.frt++
+      if (this.frt++ === 0) this.frtOffset = record.offset
       return false
     }
     if (this.frt > 0) {
@@ -122,6 +127,11 @@ class Scope {
       return was
     }
     return this.sheetData || (type !== BRT_ROW_HDR && !(type <= BRT_SHORT_ISST || type === BRT_CELL_RSTRING))
+  }
+
+  /** The end of the part: MalformedFile if a future-record block is still open. */
+  end(part: string): SpreadsheetError | undefined {
+    return this.frt > 0 ? malformed("future-record block not closed", part, this.frtOffset) : undefined
   }
 }
 
@@ -157,15 +167,15 @@ export class SheetRows {
   handle = (record: Biff12Record): SpreadsheetError | undefined => {
     work.records++
     const type = record.type
-    if (!this.scope.step(type)) return undefined
+    if (!this.scope.step(record)) return undefined
     if (type === BRT_ROW_HDR) return this.openRow(record)
     if (type === BRT_END_SHEET_DATA) return this.closeRow()
     if (type <= BRT_SHORT_ISST || type === BRT_CELL_RSTRING) return this.cell(record)
     return undefined
   }
 
-  /** The end of the part: the open row, if any, is complete. */
-  end = (): SpreadsheetError | undefined => this.closeRow()
+  /** The end of the part: the open row, if any, is complete (MalformedFile if a future-record block is still open). */
+  end = (): SpreadsheetError | undefined => this.scope.end(this.context.part) ?? this.closeRow()
 
   private openRow(record: Biff12Record): SpreadsheetError | undefined {
     const error = this.closeRow()
@@ -373,7 +383,7 @@ export const sheetDetails = (
     const scope = new Scope()
     const handle = (record: Biff12Record): SpreadsheetError | undefined => {
       work.records++
-      if (!scope.step(record.type)) return undefined
+      if (!scope.step(record)) return undefined
       switch (record.type) {
         case BRT_WS_DIM: {
           const r = range(new Fields(record.data), 0)
@@ -406,9 +416,13 @@ export const sheetDetails = (
           return undefined
       }
     }
-    return Effect.map(readRecords(sliced(bytes), handle, limits, part), (): SheetDetails => ({
-      hiddenColumns: mergeSpans(hidden),
-      merges,
-      ...(dimension === undefined ? {} : { dimension })
-    }))
+    return Effect.flatMap(readRecords(sliced(bytes), handle, limits, part), () => {
+      const error = scope.end(part)
+      if (error !== undefined) return Effect.fail(error)
+      return Effect.succeed<SheetDetails>({
+        hiddenColumns: mergeSpans(hidden),
+        merges,
+        ...(dimension === undefined ? {} : { dimension })
+      })
+    })
   })

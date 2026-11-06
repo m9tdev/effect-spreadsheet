@@ -211,6 +211,28 @@ describe("xlsb reader", () => {
     expect(details[0]).toEqual({ hiddenColumns: [], merges: [] })
   })
 
+  it("a future-record block left open at the end of the sheet is MalformedFile, for rows and for details", async () => {
+    const begin = B.record(0x23, B.u32(0))
+    // the block opens after row 0 and swallows row 1, the end of the sheet data and the merge
+    const part = B.concat([
+      B.beginSheet(),
+      B.beginSheetData(),
+      B.rowHdr(0),
+      B.rk(0, B.rkInt(1)),
+      begin,
+      B.rowHdr(1, true),
+      B.rk(0, B.rkInt(2)),
+      B.endSheetData(),
+      B.mergeCell(0, 1, 0, 1),
+      B.endSheet()
+    ])
+    const at = B.concat([B.beginSheet(), B.beginSheetData(), B.rowHdr(0), B.rk(0, B.rkInt(1))]).length
+    const wb = await Effect.runPromise(Xlsb.read(await B.xlsb({ sheets: [{ name: "S", part }] })))
+    const expected = { _tag: "MalformedFile", reason: "future-record block not closed", part: "xl/worksheets/sheet1.bin", offset: at }
+    expect(failureOf(await Effect.runPromiseExit(Stream.runCollect(Workbook.rows(wb, 0))))).toMatchObject(expected)
+    expect(failureOf(await Effect.runPromiseExit(Workbook.sheetDetails(wb, 0)))).toMatchObject(expected)
+  })
+
   it("stored (uncompressed) parts read the same as deflated ones", async () => {
     const book = one([B.rowHdr(2, true), B.isst(1, 0)], { strings: ["x"], method: "store" })
     const { sheets } = await readOk(book)
