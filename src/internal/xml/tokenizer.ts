@@ -239,7 +239,8 @@ export class XmlTokenizer {
   }
 
   private flushText(): void {
-    if (this.textLength === 0) return
+    // after a failure (e.g. this text went over maxStringLength) nothing more reaches the handler
+    if (this.failure !== undefined || this.textLength === 0) return
     const raw = this.text.length === 1 ? this.text[0]! : this.text.join("")
     this.text = []
     this.textLength = 0

@@ -324,6 +324,18 @@ describe("xml tokenizer: rejected input", () => {
     expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 5000 })
   })
 
+  it("text longer than maxStringLength stops before the handler sees it, in one piece or across pieces", () => {
+    const small = { ...limits, maxStringLength: 10 }
+    const whole = one(`<a>${"x".repeat(50)}</a>`, small)
+    expect(whole.error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 50 })
+    expect(whole.events).toEqual([["open", "a", []]])
+    const split = tokenize([`<a>${"y".repeat(8)}`, `${"y".repeat(8)}<b/></a>`], small)
+    expect(split.error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 16 })
+    expect(split.events).toEqual([["open", "a", []]])
+    // a text of exactly maxStringLength is still delivered
+    expect(one(`<a>${"z".repeat(10)}</a>`, small)).toMatchObject({ error: undefined, events: [["open", "a", []], ["text", "z".repeat(10)], ["close", "a"]] })
+  })
+
   it("an attribute flood stops at maxXmlAttributes", () => {
     const attrs = Array.from({ length: 1000 }, (_, i) => `a${i}="${i}"`).join(" ")
     const { error } = one(`<x ${attrs}/>`)
