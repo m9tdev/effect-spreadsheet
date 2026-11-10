@@ -161,6 +161,18 @@ describe("Spreadsheet.read dispatch", () => {
       }
     }))
 
+  it.effect("a compound file without a workbook stream goes to the XLS reader, other formats get the dispatch's reason", () =>
+    Effect.gen(function*() {
+      const cases = [
+        [CFB, "cfb", "compound file without a Workbook or Book stream"],
+        [enc("%PDF-1.4"), "pdf", "PDF is not a spreadsheet"]
+      ] as const
+      for (const [bytes, format, reason] of cases) {
+        const error = yield* Effect.flip(Spreadsheet.read(bytes))
+        assert.deepStrictEqual(error._tag === "UnsupportedFormat" && [error.format, error.reason], [format, reason])
+      }
+    }))
+
   it.effect("xlsb goes to the XLSB reader", () =>
     Effect.gen(function*() {
       // a package with an empty workbook part: the XLSB reader's error, not UnsupportedFormat
