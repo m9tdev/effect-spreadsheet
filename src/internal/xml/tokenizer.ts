@@ -39,6 +39,7 @@
  *
  * @internal
  */
+import { absurd } from "effect/Function"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 
 /** Attributes of a start tag: `[qualified name, decoded value]` pairs, in document order. */
@@ -62,28 +63,46 @@ export interface XmlLimits {
   readonly maxStringLength: number
 }
 
-const Kind = {
-  Unknown: 0,
-  Start: 1,
-  End: 2,
-  Pi: 3,
-  Comment: 4,
-  Cdata: 5
-} as const
-type Kind = typeof Kind[keyof typeof Kind]
+/** Constructs that end with a multi-character terminator. */
+type Delimiter = "Pi" | "Comment" | "Cdata"
 
 /** Length of the opener ("?", "!--", "![CDATA[") that a terminator may not overlap. */
-const OPENER: Record<number, number> = {
-  [Kind.Pi]: 1,
-  [Kind.Comment]: 3,
-  [Kind.Cdata]: 8
+const OPENER: Record<Delimiter, number> = { Pi: 1, Comment: 3, Cdata: 8 }
+
+const TERMINATOR: Record<Delimiter, string> = { Pi: "?>", Comment: "-->", Cdata: "]]>" }
+
+/**
+ * Markup (anything that begins with `<`) other than a start or end tag
+ * complete within one piece, which the fast path handles directly. `parts`
+ * collects everything after the `<` (`length` characters in all), across
+ * pieces.
+ * - `Undecided`: the first characters don't tell the construct yet (`<!-`
+ *   could become a comment or a DTD).
+ * - `Tag`: a start or end tag; `quote` is the quote character of the
+ *   attribute value a start tag is inside of, or 0.
+ * - `Delimited`: a processing instruction, comment or CDATA section; `tail`
+ *   holds its last characters past the opener, for a terminator split
+ *   across pieces.
+ */
+type Markup = Undecided | Tag | Delimited
+type Undecided = { readonly _tag: "Undecided"; readonly parts: Array<string>; length: number }
+type Tag = { readonly _tag: "Tag"; readonly start: boolean; readonly parts: Array<string>; length: number; quote: number }
+type Delimited = {
+  readonly _tag: "Delimited"
+  readonly kind: Delimiter
+  readonly parts: Array<string>
+  length: number
+  tail: string
 }
 
-const TERMINATOR: Record<number, string> = {
-  [Kind.Pi]: "?>",
-  [Kind.Comment]: "-->",
-  [Kind.Cdata]: "]]>"
-}
+/** Where the tokenizer is between pieces: in text, or inside markup. */
+type Mode = { readonly _tag: "Text" } | Markup
+
+/** Shared, so that text costs no allocation. */
+const TEXT: Mode = { _tag: "Text" }
+
+/** Prolog: before the root element; Root: inside it; Epilog: after it closed. */
+type Phase = "Prolog" | "Root" | "Epilog"
 
 /** Extra room for markup beyond `maxStringLength` (tag name, attribute names, quotes). */
 const MARKUP_SLACK = 64 * 1024
@@ -134,21 +153,13 @@ export class XmlTokenizer {
   private readonly limits: XmlLimits
   private readonly part: string | undefined
 
-  private inMarkup = false
-  private kind: Kind = Kind.Unknown
-  private markup: Array<string> = []
-  private markupLength = 0
-  /** In a start tag: the quote character we're inside of, or 0. */
-  private quote = 0
-  /** For multi-character terminators: the last characters of the markup so far. */
-  private tail = ""
+  private mode: Mode = TEXT
 
   private text: Array<string> = []
   private textLength = 0
 
   private readonly stack: Array<string> = []
-  private rootSeen = false
-  private rootClosed = false
+  private phase: Phase = "Prolog"
   /** Characters fed before the current piece. */
   private consumed = 0
   /** Offset of the current markup's '<' (for errors). */
@@ -183,7 +194,8 @@ export class XmlTokenizer {
     let i = 0
     // progress: every branch moves i forward by at least 1, or fails
     while (i < n && this.failure === undefined) {
-      if (!this.inMarkup) {
+      const mode = this.mode
+      if (mode._tag === "Text") {
         const lt = chunk.indexOf("<", i)
         const end = lt < 0 ? n : lt
         this.work += end - i + 1
@@ -200,17 +212,12 @@ export class XmlTokenizer {
           if (whole > lt) {
             i = whole // the tag was complete in this piece and is handled
           } else {
-            this.inMarkup = true
-            this.kind = Kind.Unknown
-            this.markup = []
-            this.markupLength = 0
-            this.quote = 0
-            this.tail = ""
+            this.mode = { _tag: "Undecided", parts: [], length: 0 }
             i = lt + 1
           }
         }
       } else {
-        i = this.scanMarkup(chunk, i)
+        i = this.scanMarkup(mode, chunk, i)
       }
     }
     this.consumed += n
@@ -220,13 +227,13 @@ export class XmlTokenizer {
   /** Ends the input. Returns the error, if the document is incomplete or invalid. */
   end(): SpreadsheetError | undefined {
     if (this.failure !== undefined) return this.failure
-    if (this.inMarkup) return (this.failure = this.malformed("truncated inside a tag", this.consumed))
+    if (this.mode._tag !== "Text") return (this.failure = this.malformed("truncated inside a tag", this.consumed))
     this.flushText()
     if (this.failure !== undefined) return this.failure
     if (this.stack.length > 0) {
       return (this.failure = this.malformed(`truncated: ${this.stack.length} element(s) not closed`, this.consumed))
     }
-    if (!this.rootSeen) return (this.failure = this.malformed("no root element", this.consumed))
+    if (this.phase === "Prolog") return (this.failure = this.malformed("no root element", this.consumed))
     return undefined
   }
 
@@ -266,11 +273,11 @@ export class XmlTokenizer {
     if (result !== undefined) this.fail(result)
   }
 
-  private addMarkup(s: string): void {
-    this.markup.push(s)
-    this.markupLength += s.length
-    if (this.markupLength > this.limits.maxStringLength + MARKUP_SLACK) {
-      this.fail(new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: this.markupLength }))
+  private addMarkup(mode: Markup, s: string): void {
+    mode.parts.push(s)
+    mode.length += s.length
+    if (mode.length > this.limits.maxStringLength + MARKUP_SLACK) {
+      this.fail(new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: mode.length }))
     }
   }
 
@@ -304,116 +311,147 @@ export class XmlTokenizer {
       return j + 1
     }
     const markup = chunk.slice(lt + 1, j)
-    this.kind = start ? Kind.Start : Kind.End
     if (start) this.startTag(markup)
     else this.endTag(markup)
     return j + 1
   }
 
   /** Scans markup from `chunk[i]`; returns the next position (> i, or i on failure). */
-  private scanMarkup(chunk: string, i: number): number {
+  private scanMarkup(mode: Markup, chunk: string, i: number): number {
+    switch (mode._tag) {
+      case "Undecided":
+        return this.scanUndecided(mode, chunk, i)
+      case "Tag":
+        return this.scanTag(mode, chunk, i)
+      case "Delimited":
+        return this.scanDelimited(mode, chunk, i)
+      default:
+        return absurd(mode)
+    }
+  }
+
+  /**
+   * Decides the construct from its first characters; they may arrive one
+   * piece at a time, so look at what we have so far.
+   */
+  private scanUndecided(mode: Undecided, chunk: string, i: number): number {
     const n = chunk.length
-    if (this.kind === Kind.Unknown) {
-      // Decide the construct from its first characters; they may arrive
-      // one piece at a time, so look at what we have so far.
-      const head = (this.markup.join("") + chunk.slice(i, i + 9))
-      const c = head.charCodeAt(0)
-      let kind: Kind = Kind.Unknown
-      let need = 1
-      if (c === 0x2F) kind = Kind.End
-      else if (c === 0x3F) kind = Kind.Pi
-      else if (c === 0x21) {
-        if (head.startsWith("!--")) kind = Kind.Comment
-        else if (head.startsWith("![CDATA[")) kind = Kind.Cdata
-        else if (head.startsWith("!DOCTYPE")) {
-          this.fail(this.malformed("DTDs (<!DOCTYPE>) are not supported", this.markupStart))
-          return i + 1
-        } else if ("!--".startsWith(head) || "![CDATA[".startsWith(head) || "!DOCTYPE".startsWith(head)) {
-          need = head.length + 1
-        } else {
-          this.fail(this.malformed("unsupported declaration", this.markupStart))
-          return i + 1
-        }
-      } else kind = Kind.Start
-      if (kind === Kind.Unknown) {
-        // not decidable yet: take the rest of this piece (it's short) and wait
-        const take = Math.min(n, i + Math.max(1, need - this.markupLength))
-        this.work += take - i
-        this.addMarkup(chunk.slice(i, take))
-        return take
-      }
-      this.kind = kind
+    const head = (mode.parts.join("") + chunk.slice(i, i + 9))
+    const c = head.charCodeAt(0)
+    if (c === 0x2F) return this.scanTag(this.decide(mode, "End"), chunk, i)
+    if (c === 0x3F) return this.scanDelimited(this.decide(mode, "Pi"), chunk, i)
+    if (c !== 0x21) return this.scanTag(this.decide(mode, "Start"), chunk, i)
+    if (head.startsWith("!--")) return this.scanDelimited(this.decide(mode, "Comment"), chunk, i)
+    if (head.startsWith("![CDATA[")) return this.scanDelimited(this.decide(mode, "Cdata"), chunk, i)
+    if (head.startsWith("!DOCTYPE")) {
+      this.fail(this.malformed("DTDs (<!DOCTYPE>) are not supported", this.markupStart))
+      return i + 1
     }
-    if (this.kind === Kind.Start || this.kind === Kind.End) {
-      // find '>' outside quotes (quotes only matter in start tags)
-      let j = i
-      const start = this.kind === Kind.Start
-      // progress: j increases up to n
-      for (; j < n; j++) {
-        const c = chunk.charCodeAt(j)
-        if (this.quote !== 0) {
-          if (c === this.quote) this.quote = 0
-        } else if (c === 0x3E) break
-        else if (start && (c === 0x22 || c === 0x27)) this.quote = c
-      }
-      this.work += j - i + 1
-      this.addMarkup(chunk.slice(i, j))
-      if (j === n) return n
-      this.finishMarkup()
-      return j + 1
+    if (!("!--".startsWith(head) || "![CDATA[".startsWith(head) || "!DOCTYPE".startsWith(head))) {
+      this.fail(this.malformed("unsupported declaration", this.markupStart))
+      return i + 1
     }
-    // PI, comment, CDATA: a multi-character terminator, possibly split
-    // across pieces. It may not reuse characters of the opener ("<!-->" is
-    // not a comment), so only markup positions past the opener count, and
-    // the same holds whatever the splitting.
-    const terminator = TERMINATOR[this.kind]!
-    const opener = OPENER[this.kind]!
+    // not decidable yet: take the rest of this piece (it's short) and wait
+    const take = Math.min(n, i + Math.max(1, head.length + 1 - mode.length))
+    this.work += take - i
+    this.addMarkup(mode, chunk.slice(i, take))
+    return take
+  }
+
+  /** The transition out of `Undecided`: the decided mode takes over the characters collected so far. */
+  private decide(mode: Undecided, kind: "Start" | "End"): Tag
+  private decide(mode: Undecided, kind: Delimiter): Delimited
+  private decide(mode: Undecided, kind: "Start" | "End" | Delimiter): Tag | Delimited {
+    const next: Tag | Delimited = kind === "Start" || kind === "End"
+      ? { _tag: "Tag", start: kind === "Start", parts: mode.parts, length: mode.length, quote: 0 }
+      : { _tag: "Delimited", kind, parts: mode.parts, length: mode.length, tail: "" }
+    this.mode = next
+    return next
+  }
+
+  /** A start or end tag: finds '>' outside quotes (quotes only matter in start tags). */
+  private scanTag(mode: Tag, chunk: string, i: number): number {
+    const n = chunk.length
+    const start = mode.start
+    let quote = mode.quote
+    let j = i
+    // progress: j increases up to n
+    for (; j < n; j++) {
+      const c = chunk.charCodeAt(j)
+      if (quote !== 0) {
+        if (c === quote) quote = 0
+      } else if (c === 0x3E) break
+      else if (start && (c === 0x22 || c === 0x27)) quote = c
+    }
+    mode.quote = quote
+    this.work += j - i + 1
+    this.addMarkup(mode, chunk.slice(i, j))
+    if (j === n) return n
+    this.finishMarkup(mode)
+    return j + 1
+  }
+
+  /**
+   * PI, comment, CDATA: a multi-character terminator, possibly split across
+   * pieces. It may not reuse characters of the opener ("<!-->" is not a
+   * comment), so only markup positions past the opener count, and the same
+   * holds whatever the splitting.
+   */
+  private scanDelimited(mode: Delimited, chunk: string, i: number): number {
+    const n = chunk.length
+    const terminator = TERMINATOR[mode.kind]
+    const opener = OPENER[mode.kind]
     let endInChunk = -1
-    if (this.tail.length > 0) {
+    if (mode.tail.length > 0) {
       // a terminator that starts in the tail ends within the next few characters
-      const joint = this.tail + chunk.slice(i, i + terminator.length - 1)
+      const joint = mode.tail + chunk.slice(i, i + terminator.length - 1)
       const k = joint.indexOf(terminator)
       this.work += joint.length
-      if (k >= 0) endInChunk = i + k + terminator.length - this.tail.length
+      if (k >= 0) endInChunk = i + k + terminator.length - mode.tail.length
     }
     if (endInChunk < 0) {
-      const from = i + Math.max(0, opener - this.markupLength)
+      const from = i + Math.max(0, opener - mode.length)
       const at = from <= n ? chunk.indexOf(terminator, from) : -1
       if (at < 0) {
         this.work += n - i
-        this.addMarkup(chunk.slice(i))
+        this.addMarkup(mode, chunk.slice(i))
         // keep the last characters past the opener, for a terminator split
         // across pieces
-        const keep = Math.min(terminator.length - 1, Math.max(0, this.markupLength - opener))
-        const last = (this.tail + chunk.slice(Math.max(i, n - keep))).slice(-keep)
-        this.tail = keep === 0 ? "" : last
+        const keep = Math.min(terminator.length - 1, Math.max(0, mode.length - opener))
+        const last = (mode.tail + chunk.slice(Math.max(i, n - keep))).slice(-keep)
+        mode.tail = keep === 0 ? "" : last
         return n
       }
       endInChunk = at + terminator.length
       this.work += endInChunk - i
     }
-    this.addMarkup(chunk.slice(i, endInChunk))
-    this.finishMarkup()
+    this.addMarkup(mode, chunk.slice(i, endInChunk))
+    this.finishMarkup(mode)
     return endInChunk
   }
 
-  private finishMarkup(): void {
+  /** The transition back to `Text`: handles the completed construct. */
+  private finishMarkup(mode: Tag | Delimited): void {
     if (this.failure !== undefined) return
-    const markup = this.markup.length === 1 ? this.markup[0]! : this.markup.join("")
-    this.markup = []
-    this.markupLength = 0
-    this.inMarkup = false
-    this.tail = ""
+    this.mode = TEXT
+    const markup = mode.parts.length === 1 ? mode.parts[0]! : mode.parts.join("")
     this.work += markup.length
-    switch (this.kind) {
-      case Kind.Start:
-        return this.startTag(markup)
-      case Kind.End:
-        return this.endTag(markup)
-      case Kind.Pi:
-      case Kind.Comment:
+    switch (mode._tag) {
+      case "Tag":
+        return mode.start ? this.startTag(markup) : this.endTag(markup)
+      case "Delimited":
+        return this.finishDelimited(mode.kind, markup)
+      default:
+        return absurd(mode)
+    }
+  }
+
+  private finishDelimited(kind: Delimiter, markup: string): void {
+    switch (kind) {
+      case "Pi":
+      case "Comment":
         return
-      case Kind.Cdata: {
+      case "Cdata": {
         if (this.stack.length === 0) {
           this.fail(this.malformed("CDATA outside the root element", this.markupStart))
           return
@@ -427,6 +465,8 @@ export class XmlTokenizer {
         if (content.length > 0) this.emit(this.handler.text(normalizeLineEnds(content)))
         return
       }
+      default:
+        return absurd(kind)
     }
   }
 
@@ -447,7 +487,7 @@ export class XmlTokenizer {
       this.fail(this.malformed(`bad element name ${JSON.stringify(qname.slice(0, 40))}`, this.markupStart))
       return
     }
-    if (this.rootClosed) {
+    if (this.phase === "Epilog") {
       this.fail(this.malformed("more than one root element", this.markupStart))
       return
     }
@@ -514,7 +554,7 @@ export class XmlTokenizer {
       this.fail(new LimitExceeded({ limit: "maxXmlDepth", max: this.limits.maxXmlDepth, actual: this.stack.length + 1 }))
       return
     }
-    this.rootSeen = true
+    this.phase = "Root"
     this.stack.push(qname)
     const name = localName(qname)
     this.emit(this.handler.open(name, attributes))
@@ -537,7 +577,7 @@ export class XmlTokenizer {
 
   private closeElement(qname: string): void {
     this.stack.pop()
-    if (this.stack.length === 0) this.rootClosed = true
+    if (this.stack.length === 0) this.phase = "Epilog"
     this.emit(this.handler.close(localName(qname)))
   }
 

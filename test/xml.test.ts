@@ -231,6 +231,82 @@ describe("xml tokenizer: split invariance and cost", () => {
 
 })
 
+describe("xml tokenizer: markup continued across pieces", () => {
+  /** Checks that `pieces` give the same events and error as the joined document in one piece. */
+  const sameAsWhole = (pieces: ReadonlyArray<string>) => {
+    const split = tokenize(pieces)
+    const whole = one(pieces.join(""))
+    expect([split.events, errorKey(split.error)], JSON.stringify(pieces)).toEqual([whole.events, errorKey(whole.error)])
+    return split
+  }
+
+  it("the construct after '<' can stay undecided for several pieces", () => {
+    const comment = sameAsWhole(["<r>", "<", "!", "-", "-x--><a/>", "</r>"])
+    expect(comment.error).toBeUndefined()
+    expect(comment.events).toEqual([["open", "r", []], ["open", "a", []], ["close", "a"], ["close", "r"]])
+    const cdata = sameAsWhole(["<r>", "<!", "[CDA", "TA[x]]><a/>", "</r>"])
+    expect(cdata.error).toBeUndefined()
+    expect(cdata.events).toEqual([["open", "r", []], ["text", "x"], ["open", "a", []], ["close", "a"], ["close", "r"]])
+  })
+
+  it("input that ends inside any kind of markup is truncated, at the end offset", () => {
+    for (const doc of ["<a/><", "<a/><!-", "<a", "<a b='x", "<a></a", "<a/><?p", "<a/><!-- x", "<a><![CDATA[x]]"]) {
+      for (const pieces of [[doc], [...doc]]) {
+        expect(tokenize(pieces).error, JSON.stringify(pieces)).toMatchObject({
+          _tag: "MalformedFile",
+          reason: "truncated inside a tag",
+          offset: doc.length
+        })
+      }
+    }
+  })
+
+  it("a start tag's open quote carries across pieces; end tags ignore quotes", () => {
+    const quoted = sameAsWhole(['<a b="x>', 'y">', "</a>"])
+    expect(quoted.error).toBeUndefined()
+    expect(quoted.events).toEqual([["open", "a", [["b", "x>y"]]], ["close", "a"]])
+    const end = sameAsWhole(["<a>", "</a", '">'])
+    expect(end.error).toMatchObject({ _tag: "MalformedFile", reason: `end tag </a"> does not match <a>`, offset: 3 })
+  })
+
+  it("a terminator split across three pieces ends the comment, PI or CDATA", () => {
+    const cases: ReadonlyArray<readonly [ReadonlyArray<string>, ReadonlyArray<Event>]> = [
+      [["<a><!--", "-", "-", ">", "</a>"], [["open", "a", []], ["close", "a"]]],
+      [["<a><!-- x -", "-", ">", "</a>"], [["open", "a", []], ["close", "a"]]],
+      [["<a><?p ", "?", ">", "</a>"], [["open", "a", []], ["close", "a"]]],
+      [["<a><![CDATA[x]", "]", ">", "</a>"], [["open", "a", []], ["text", "x"], ["close", "a"]]]
+    ]
+    for (const [pieces, events] of cases) {
+      const result = sameAsWhole(pieces)
+      expect(result.error, JSON.stringify(pieces)).toBeUndefined()
+      expect(result.events, JSON.stringify(pieces)).toEqual(events)
+    }
+  })
+})
+
+describe("xml tokenizer: one root element", () => {
+  it("a second root after a self-closing or closed root is rejected", () => {
+    for (const doc of ["<a/><b/>", "<a></a><b/>", "<a/><a></a>"]) {
+      const whole = one(doc)
+      expect(whole.error, doc).toMatchObject({ _tag: "MalformedFile", reason: "more than one root element" })
+      for (let cut = 0; cut <= doc.length; cut++) {
+        expect(errorKey(tokenize([doc.slice(0, cut), doc.slice(cut)]).error), `${doc} cut at ${cut}`).toEqual(errorKey(whole.error))
+      }
+    }
+  })
+
+  it("a document with only a declaration, a PI and a comment has no root element", () => {
+    const doc = `<?xml version="1.0"?>\n<?p i?>\n<!-- c -->\n`
+    expect(one(doc).error).toMatchObject({ _tag: "MalformedFile", reason: "no root element", offset: doc.length })
+  })
+
+  it("whitespace, comments and PIs after the root are accepted", () => {
+    const { error, events } = one("<a/> \n\t<!-- c --><?p i?>\r\n")
+    expect(error).toBeUndefined()
+    expect(events).toEqual([["open", "a", []], ["close", "a"]])
+  })
+})
+
 describe("xml names", () => {
   it("accepts and rejects exactly what the original name regex did", () => {
     const NAME = /^[^\s<>/=!?"'&\-.\d][^\s<>/=!?"'&]*$/
