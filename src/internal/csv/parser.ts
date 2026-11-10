@@ -16,6 +16,7 @@
  *
  * @internal
  */
+import { absurd } from "effect/Function"
 import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
@@ -46,10 +47,100 @@ export interface ParserOptions {
   readonly limits: Limits
 }
 
+/**
+ * What `CsvParser.feed` does with a piece of text: collect text until the
+ * delimiter is known, tokenize it, or nothing more (after the final piece,
+ * or after an error, which every later call returns).
+ */
+type Phase =
+  | { readonly _tag: "Sniffing"; readonly pending: string }
+  | { readonly _tag: "Parsing"; readonly tokenizer: Tokenizer }
+  | { readonly _tag: "Done" }
+  | { readonly _tag: "Failed"; readonly error: SpreadsheetError }
+
 export class CsvParser {
-  private delimiter: number
-  private sniffing: boolean
-  private pending = ""
+  private phase: Phase
+  private readonly options: ParserOptions
+
+  constructor(options: ParserOptions) {
+    this.options = options
+    this.phase = options.delimiter === undefined
+      ? { _tag: "Sniffing", pending: "" }
+      : { _tag: "Parsing", tokenizer: new Tokenizer(options, options.delimiter.charCodeAt(0), 0) }
+  }
+
+  /** The error that stopped parsing, if any. Once set, it stays. */
+  get error(): SpreadsheetError | undefined {
+    return this.phase._tag === "Failed" ? this.phase.error : undefined
+  }
+
+  /**
+   * Feeds a piece of text; `final` marks the end of input. Returns the rows
+   * completed by this piece, or the error that stopped parsing. If the
+   * piece completed rows before the error, those rows are returned first;
+   * the error is then in `error` and returned by the next call. After the
+   * final piece, later calls return no rows.
+   */
+  feed(text: string, final: boolean): Array<Row> | SpreadsheetError {
+    const phase = this.phase
+    switch (phase._tag) {
+      case "Failed":
+        return phase.error
+      case "Done":
+        return []
+      case "Sniffing": {
+        const pending = phase.pending + text
+        if (pending.length < SNIFF_CHARS && !final) {
+          this.phase = { _tag: "Sniffing", pending }
+          return []
+        }
+        const tokenizer = this.sniff(pending)
+        this.phase = { _tag: "Parsing", tokenizer }
+        return this.step(tokenizer, final)
+      }
+      case "Parsing": {
+        phase.tokenizer.parse(text)
+        return this.step(phase.tokenizer, final)
+      }
+      default:
+        return absurd(phase)
+    }
+  }
+
+  /** Ends the input on `final`, takes the completed rows and moves to Done or Failed. */
+  private step(tokenizer: Tokenizer, final: boolean): Array<Row> | SpreadsheetError {
+    if (final && tokenizer.error === undefined) tokenizer.finish()
+    const rows = tokenizer.takeRows()
+    const error = tokenizer.error
+    if (error !== undefined) {
+      this.phase = { _tag: "Failed", error }
+      return rows.length === 0 ? error : rows
+    }
+    if (final) this.phase = { _tag: "Done" }
+    return rows
+  }
+
+  /**
+   * Decides the delimiter; consumes an Excel `sep=X` line if present.
+   * Returns a tokenizer that has parsed the collected text.
+   */
+  private sniff(text: string): Tokenizer {
+    const sep = /^sep=(.)(\r\n|\r|\n|$)/.exec(text)
+    const char = sep?.[1]
+    if (sep !== null && char !== undefined && char !== '"' && char !== "\r" && char !== "\n") {
+      const tokenizer = new Tokenizer(this.options, char.charCodeAt(0), sep[0].length)
+      tokenizer.parse(text.slice(sep[0].length))
+      return tokenizer
+    }
+    const tokenizer = new Tokenizer(this.options, guessDelimiter(text.slice(0, SNIFF_CHARS)), 0)
+    tokenizer.parse(text)
+    return tokenizer
+  }
+}
+
+/** Splits text into rows once the delimiter is known. */
+class Tokenizer {
+  private readonly delimiter: number
 
   private state: State = State.FieldStart
   private field = ""
@@ -68,56 +159,23 @@ export class CsvParser {
 
   private readonly options: ParserOptions
 
-  constructor(options: ParserOptions) {
+  /** `consumed`: characters before the first piece (a `sep=` line), for error offsets. */
+  constructor(options: ParserOptions, delimiter: number, consumed: number) {
     this.options = options
-    this.sniffing = options.delimiter === undefined
-    this.delimiter = options.delimiter === undefined ? 0x2C : options.delimiter.charCodeAt(0)
+    this.delimiter = delimiter
+    this.consumed = consumed
   }
 
-  /** The delimiter in use (after sniffing). */
-  get delimiterChar(): string {
-    return String.fromCharCode(this.delimiter)
-  }
-
-  /** The error that stopped parsing, if any. Once set, it stays. */
+  /** The error that stopped tokenizing, if any. Once set, it stays. */
   get error(): SpreadsheetError | undefined {
     return this.failure
   }
 
-  /**
-   * Feeds a piece of text; `final` marks the end of input. Returns the rows
-   * completed by this piece, or the error that stopped parsing. If the
-   * piece completed rows before the error, those rows are returned first;
-   * the error is then in `error` and returned by the next call.
-   */
-  feed(text: string, final: boolean): Array<Row> | SpreadsheetError {
-    if (this.failure !== undefined) return this.failure
-    if (this.sniffing) {
-      this.pending += text
-      if (this.pending.length < SNIFF_CHARS && !final) return []
-      this.sniffing = false
-      text = this.pending
-      this.pending = ""
-      text = this.sniff(text)
-    }
-    this.parse(text)
-    if (final && this.failure === undefined) this.finish()
-    if (this.failure !== undefined && this.out.length === 0) return this.failure
+  /** The rows completed since the last call. */
+  takeRows(): Array<Row> {
     const rows = this.out
     this.out = []
     return rows
-  }
-
-  /** Decides the delimiter; consumes an Excel `sep=X` line if present. */
-  private sniff(text: string): string {
-    const sep = /^sep=(.)(\r\n|\r|\n|$)/.exec(text)
-    if (sep !== null && sep[1] !== '"' && sep[1] !== "\r" && sep[1] !== "\n") {
-      this.delimiter = sep[1]!.charCodeAt(0)
-      this.consumed += sep[0].length
-      return text.slice(sep[0].length)
-    }
-    this.delimiter = guessDelimiter(text.slice(0, SNIFF_CHARS))
-    return text
   }
 
   private fail(error: SpreadsheetError): void {
@@ -178,7 +236,8 @@ export class CsvParser {
     }
   }
 
-  private parse(s: string): void {
+  /** Tokenizes a piece; stops at the first error. */
+  parse(s: string): void {
     const n = s.length
     const delim = this.delimiter
     let i = 0
@@ -266,7 +325,8 @@ export class CsvParser {
     this.consumed += n
   }
 
-  private finish(): void {
+  /** End of input: ends the last record, if one has started. */
+  finish(): void {
     if (this.state === State.Quoted) {
       if (this.options.strict) {
         this.fail(
