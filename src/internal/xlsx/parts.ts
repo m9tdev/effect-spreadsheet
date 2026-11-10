@@ -136,7 +136,12 @@ export interface WorkbookPart {
   readonly date1904: boolean
 }
 
-/** Reads the workbook part: sheets in order, defined names, the date system. */
+/**
+ * Reads the workbook part: sheets in order, defined names, the date system.
+ * A `<sheets>` inside `<sheets>`, or a `<definedName>` inside a defined
+ * name, is MalformedFile: it would end the sheet list early, or replace the
+ * open name.
+ */
 export const readWorkbookPart = (
   archive: Archive,
   entry: ZipEntry,
@@ -154,6 +159,7 @@ export const readWorkbookPart = (
           date1904 = isTrue(attr(attributes, "date1904"))
           return
         case "sheets":
+          if (inSheets) return malformed("<sheets> inside <sheets>", entry.name)
           inSheets = true
           return
         case "sheet": {
@@ -170,6 +176,7 @@ export const readWorkbookPart = (
           return
         }
         case "definedName": {
+          if (name !== undefined) return malformed("<definedName> inside a <definedName>", entry.name)
           if (definedNames.length >= limits.maxDefinedNames) {
             return new LimitExceeded({ limit: "maxDefinedNames", max: limits.maxDefinedNames, actual: definedNames.length + 1 })
           }
@@ -208,7 +215,9 @@ export const unescapeXstring = (s: string): string =>
 /**
  * Collects rich text the way `<si>` and `<is>` hold it: the `<t>` elements
  * (directly, or inside `<r>` runs), joined; phonetic runs (`<rPh>`) are
- * skipped. Feed it the events inside the container.
+ * skipped wherever they are, with the `<t>` elements inside them (also a
+ * run inside a `<t>`: the `<t>`'s text after it is kept). Feed it the
+ * events inside the container.
  */
 export class RichText {
   private parts: Array<string> = []
@@ -228,11 +237,12 @@ export class RichText {
 
   close(name: string): void {
     if (name === "rPh") this.inPhonetic--
-    else if (name === "t" && this.inT > 0) this.inT--
+    // a <t> inside a phonetic run wasn't counted by open
+    else if (name === "t" && this.inPhonetic === 0 && this.inT > 0) this.inT--
   }
 
   text(value: string): LimitExceeded | undefined {
-    if (this.inT === 0) return undefined
+    if (this.inT === 0 || this.inPhonetic > 0) return undefined
     this.parts.push(value)
     this.length += value.length
     return this.length > this.maxLength
@@ -251,7 +261,10 @@ export class RichText {
   }
 }
 
-/** Reads the shared-string table. */
+/**
+ * Reads the shared-string table. An `<si>` inside an `<si>` is
+ * MalformedFile: it would replace the open item's text.
+ */
 export const readSharedStrings = (
   archive: Archive,
   entry: ZipEntry,
@@ -263,6 +276,7 @@ export const readSharedStrings = (
   const handler: XmlHandler = {
     open: (name) => {
       if (name === "si") {
+        if (inItem) return malformed("<si> inside an <si>", entry.name)
         if (strings.length >= limits.maxSharedStrings) {
           return new LimitExceeded({ limit: "maxSharedStrings", max: limits.maxSharedStrings, actual: strings.length + 1 })
         }

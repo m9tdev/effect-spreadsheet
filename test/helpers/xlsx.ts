@@ -28,6 +28,8 @@ export interface TestWorkbook {
   readonly stylesExtra?: string
   readonly date1904?: boolean
   readonly definedNames?: string
+  /** Raw children of <workbook>, instead of the generated ones (sheets, defined names, date system). */
+  readonly workbookXml?: string
   /** Extra zip entries. */
   readonly extra?: ReadonlyArray<{ readonly name: string; readonly data: Uint8Array }>
   /** Entries to leave out of the zip (by name), for broken packages. */
@@ -47,7 +49,7 @@ export const xlsx = (book: TestWorkbook): Promise<Uint8Array> => {
   const sheetsXml = book.sheets
     .map((s, i) => `<sheet name="${escape(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"${s.state ? ` state="${s.state}"` : ""}/>`)
     .join("")
-  const workbook = `<?xml version="1.0"?><workbook ${NS}>${book.date1904 ? `<workbookPr date1904="1"/>` : ""}<sheets>${sheetsXml}</sheets>${book.definedNames ? `<definedNames>${book.definedNames}</definedNames>` : ""}</workbook>`
+  const workbook = `<?xml version="1.0"?><workbook ${NS}>${book.workbookXml ?? `${book.date1904 ? `<workbookPr date1904="1"/>` : ""}<sheets>${sheetsXml}</sheets>${book.definedNames ? `<definedNames>${book.definedNames}</definedNames>` : ""}`}</workbook>`
   const rels = book.sheets.map((s, i) =>
     `<Relationship Id="rId${i + 1}" Type="${REL}/${s.kind ?? "worksheet"}" Target="worksheets/sheet${i + 1}.xml"/>`
   )
