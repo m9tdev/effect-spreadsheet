@@ -200,7 +200,7 @@ export const BATCH_BYTES = 16 * BATCH_CELLS
 export const batches = { count: 0 }
 
 /** A record the walk reads with its CONTINUEs. */
-type Continued = "Sst" | "Supbook" | "ExternSheet" | "Name"
+type ContinuedKind = "Sst" | "Supbook" | "ExternSheet" | "Name"
 
 /**
  * What the walk works on: plain records; or the CONTINUEs of an SST,
@@ -208,7 +208,7 @@ type Continued = "Sst" | "Supbook" | "ExternSheet" | "Name"
  */
 type Pending =
   | { readonly _tag: "Records" }
-  | { readonly _tag: "Continues"; readonly of: Continued; readonly gathering: Gathering }
+  | { readonly _tag: "Continues"; readonly of: ContinuedKind; readonly gathering: Gathering }
   | { readonly _tag: "SstStrings"; readonly segments: SegmentReader; readonly unique: number }
   | {
     readonly _tag: "SupbookSheets"
@@ -218,6 +218,9 @@ type Pending =
   }
 
 const RECORDS: Pending = { _tag: "Records" }
+
+type ContinuesPending = Extract<Pending, { readonly _tag: "Continues" }>
+type StringsPending = Extract<Pending, { readonly _tag: "SstStrings" | "SupbookSheets" }>
 
 /**
  * The walk over the globals substream, from the first BOF to its EOF, in
@@ -279,7 +282,21 @@ class GlobalsWalk {
     // (each advances a reader), and adds it to units, or returns
     while (this.units < BATCH_RECORDS && this.bytes < BATCH_BYTES) {
       const pending = this.pending
-      const outcome = pending._tag === "Records" ? this.record() : this.resume(pending)
+      let outcome: "done" | SpreadsheetError | undefined
+      switch (pending._tag) {
+        case "Records":
+          outcome = this.record()
+          break
+        case "Continues":
+          outcome = this.continues(pending)
+          break
+        case "SstStrings":
+        case "SupbookSheets":
+          outcome = this.readStrings(pending)
+          break
+        default:
+          return absurd(pending)
+      }
       if (outcome !== undefined) return outcome
     }
     return "more"
@@ -301,13 +318,13 @@ class GlobalsWalk {
         return new Encrypted({ format: "xls" })
       // BIFF5 has no SST; its EXTERNSHEETs and NAMEs aren't read, so neither are its SUPBOOKs
       case SST:
-        return biff8 ? this.gather(record, "Sst") : undefined
+        return biff8 ? this.startContinues(record, "Sst") : undefined
       case SUPBOOK:
-        return biff8 ? this.gather(record, "Supbook") : undefined
+        return biff8 ? this.startContinues(record, "Supbook") : undefined
       case EXTERNSHEET:
-        return biff8 ? this.gather(record, "ExternSheet") : undefined
+        return biff8 ? this.startContinues(record, "ExternSheet") : undefined
       case NAME:
-        return biff8 ? this.gather(record, "Name") : undefined
+        return biff8 ? this.startContinues(record, "Name") : undefined
       case CODEPAGE: {
         const cp = f.u16(0)
         if (cp !== undefined) this.text = { ...this.text, decoder: textDecoder(codepageLabel(cp)) }
@@ -406,72 +423,87 @@ class GlobalsWalk {
   }
 
   /** Starts reading `record`'s CONTINUEs (the next steps go on with them). */
-  private gather(record: BiffRecord, of: Continued): undefined {
+  private startContinues(record: BiffRecord, of: ContinuedKind): undefined {
     const gathering = this.reader.startContinues(record, this.limits.maxDecompressedBytes, "maxDecompressedBytes")
     this.pending = { _tag: "Continues", of, gathering }
     return undefined
   }
 
   /**
-   * Goes on with a record that may be continued: reads its CONTINUEs, then
-   * an SST's or SUPBOOK's strings within the batch's budget, or reads an
-   * EXTERNSHEET or NAME whole.
+   * Goes on with a record that may be continued: reads its CONTINUEs within
+   * the batch's budget, then reads an EXTERNSHEET or NAME whole, or starts
+   * on an SST's or SUPBOOK's strings.
    */
-  private resume(pending: Exclude<Pending, { _tag: "Records" }>): SpreadsheetError | undefined {
+  private continues(pending: ContinuesPending): SpreadsheetError | undefined {
     const { reader, limits } = this
-    if (pending._tag === "Continues") {
-      const before = reader.records
-      const at = reader.offset
-      const step = reader.continues(pending.gathering, BATCH_RECORDS - this.units)
-      this.units += reader.records - before
-      this.bytes += reader.offset - at
-      if (step._tag === "More") return undefined
-      if (step._tag !== "Done") return step
-      const { record } = step
-      const segments = new SegmentReader(record.segments)
-      switch (pending.of) {
-        case "ExternSheet":
-          this.pending = RECORDS
-          return this.externSheet(segments)
-        case "Name":
-          this.pending = RECORDS
-          return this.name(segments)
-        case "Sst": {
-          segments.u32() // total count
-          const unique = segments.u32()
-          if (unique === undefined) return malformed("truncated SST", record.offset)
-          if (unique > limits.maxSharedStrings) {
-            return new LimitExceeded({ limit: "maxSharedStrings", max: limits.maxSharedStrings, actual: unique })
-          }
-          this.strings = []
-          this.pending = { _tag: "SstStrings", segments, unique }
-          return undefined
+    const before = reader.records
+    const at = reader.offset
+    const step = reader.continues(pending.gathering, BATCH_RECORDS - this.units)
+    this.units += reader.records - before
+    this.bytes += reader.offset - at
+    if (step._tag === "More") return undefined
+    if (step._tag !== "Done") return step
+    const { record } = step
+    const segments = new SegmentReader(record.segments)
+    switch (pending.of) {
+      case "ExternSheet":
+        this.pending = RECORDS
+        return this.externSheet(segments)
+      case "Name":
+        this.pending = RECORDS
+        return this.name(segments)
+      case "Sst": {
+        segments.u32() // total count
+        const unique = segments.u32()
+        if (unique === undefined) return malformed("truncated SST", record.offset)
+        if (unique > limits.maxSharedStrings) {
+          return new LimitExceeded({ limit: "maxSharedStrings", max: limits.maxSharedStrings, actual: unique })
         }
-        case "Supbook": {
-          // this workbook and add-ins are exactly ctab + marker (4 bytes); an
-          // external book's path can have a character count equal to a marker
-          const marker = record.data.length === 4 ? new Fields(record.data).u16(2) : undefined
-          if (marker === 0x0401 || marker === 0x3A01) {
-            this.books.push(marker === 0x0401 ? SELF : { kind: "addin" })
-            this.pending = RECORDS
-            return undefined
-          }
-          const ctab = segments.u16() ?? 0
-          const path = readRichString(segments, limits.maxStringLength) // the path's character count is the marker's place
-          if (path === null) return tooLong(limits)
-          this.units++
-          // without a path, no sheet names follow
-          this.pending = { _tag: "SupbookSheets", segments, ctab: path === undefined ? 0 : ctab, sheets: [] }
-          return undefined
-        }
-        default:
-          return absurd(pending.of)
+        this.strings = []
+        this.pending = { _tag: "SstStrings", segments, unique }
+        return undefined
       }
+      case "Supbook": {
+        // this workbook and add-ins are exactly ctab + marker (4 bytes); an
+        // external book's path can have a character count equal to a marker
+        const marker = record.data.length === 4 ? new Fields(record.data).u16(2) : undefined
+        if (marker === 0x0401 || marker === 0x3A01) {
+          this.books.push(marker === 0x0401 ? SELF : { kind: "addin" })
+          this.pending = RECORDS
+          return undefined
+        }
+        const ctab = segments.u16() ?? 0
+        const path = readRichString(segments, limits.maxStringLength) // the path's character count is the marker's place
+        if (path === null) return tooLong(limits)
+        this.units++
+        // without a path, no sheet names follow
+        this.pending = { _tag: "SupbookSheets", segments, ctab: path === undefined ? 0 : ctab, sheets: [] }
+        return undefined
+      }
+      default:
+        return absurd(pending.of)
     }
+  }
+
+  /** Reads an SST's strings or a SUPBOOK's sheet names within the batch's budget. */
+  private readStrings(pending: StringsPending): SpreadsheetError | undefined {
+    const { limits } = this
     const { segments } = pending
+    let list: Array<string>
+    let count: number
+    switch (pending._tag) {
+      case "SstStrings":
+        list = this.strings
+        count = pending.unique
+        break
+      case "SupbookSheets":
+        list = pending.sheets
+        count = pending.ctab
+        break
+      default:
+        return absurd(pending)
+    }
     const left = segments.remaining()
-    const list = pending._tag === "SstStrings" ? this.strings : pending.sheets
-    const count = pending._tag === "SstStrings" ? pending.unique : pending.ctab
     let ended = false
     // progress: each string consumes at least 3 bytes, or the list ends; at most the batch's units
     while (this.units < BATCH_RECORDS && left - segments.remaining() < BATCH_BYTES - this.bytes) {
@@ -490,12 +522,17 @@ class GlobalsWalk {
     }
     this.bytes += left - segments.remaining()
     if (!ended && list.length < count) return undefined
-    if (pending._tag === "SupbookSheets") {
-      this.externalBooks++
-      this.books.push({ kind: "external", link: this.externalBooks, sheets: pending.sheets })
-    }
     this.pending = RECORDS
-    return undefined
+    switch (pending._tag) {
+      case "SstStrings":
+        return undefined
+      case "SupbookSheets":
+        this.externalBooks++
+        this.books.push({ kind: "external", link: this.externalBooks, sheets: pending.sheets })
+        return undefined
+      default:
+        return absurd(pending)
+    }
   }
 }
 

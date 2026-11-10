@@ -555,7 +555,7 @@ describe("xls globals: long work yields", () => {
     const empties = Array.from({ length: BATCH_RECORDS + 1 }, () => X.record(CONTINUE, []))
     const split = (whole: Uint8Array, cut: number) => {
       const data = Array.from(whole)
-      return [X.record(whole[0]! | (whole[1]! << 8), data.slice(4, 4 + cut)), ...empties, X.record(CONTINUE, data.slice(4 + cut))]
+      return [X.record(whole[0] | (whole[1] << 8), data.slice(4, 4 + cut)), ...empties, X.record(CONTINUE, data.slice(4 + cut))]
     }
     const sst = X.record(SST, [...X.u32(2), ...X.u32(2), ...X.xlString("first"), ...X.xlString("second")])
     const external = externalBook("\u0001far.xls", ["Away", "There"])
