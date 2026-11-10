@@ -108,6 +108,39 @@ describe("csv: delimiters", () => {
     assert.deepStrictEqual(await csvAoa('"a,b,c";d\n"e,f,g";h\n'), [["a,b,c", "d"], ["e,f,g", "h"]])
   })
 
+  it("sniffing: a literal quote inside an unquoted field doesn't hide lines", async () => {
+    // `5"` and `6"` are inch marks; read with `;` every line has exactly two `;`
+    const text = 'a;b;c,d\n5" f;e;g\nh;i;j,k\nl;6" m;n,o\n'
+    assert.deepStrictEqual(await csvAoa(text), await csvAoa(text, { delimiter: ";" }))
+    assert.deepStrictEqual((await csvAoa(text))[1], ['5" f', "e", "g"])
+  })
+
+  it("sniffing: a quote after a closing quote is literal", async () => {
+    // `"x"y"z` is the field `xy"z`: its third quote doesn't open a quoted part
+    const text = '"x"y"z;1;2,3\na;b;c,d\ne;f;g"h,i\nj;k;l,m\n'
+    assert.deepStrictEqual(await csvAoa(text), await csvAoa(text, { delimiter: ";" }))
+    assert.deepStrictEqual((await csvAoa(text))[0], ['xy"z', "1", "2,3"])
+  })
+
+  it("sniffing: an empty quoted field `\"\"` is closed, so a later quote in it is literal", async () => {
+    const text = '"" 5" x;a;b,c\nd;e;f,g\nh;i" j;k,l\nm;n;o,p\n'
+    assert.deepStrictEqual(await csvAoa(text), await csvAoa(text, { delimiter: ";" }))
+    assert.deepStrictEqual((await csvAoa(text))[0], [' 5" x', "a", "b,c"])
+  })
+
+  it("sniffing: a quote right after any candidate opens a quoted field", async () => {
+    for (const d of [",", "\t", ";", "|"]) {
+      const o = d === "," ? ";" : ","
+      // read with `d`, every line has two `d` and one `o` outside quotes; the
+      // first line's quoted field hides a third `d`, and `5"` and `6"` are
+      // literal quotes
+      const text = `a${d}"p${d}q"${d}b${o}c\n5" f${d}e${d}g${o}h\ni${d}j${d}k${o}l\nm${d}6" n${d}o${o}p\n`
+      const rows = await csvAoa(text)
+      assert.deepStrictEqual([d, rows], [d, await csvAoa(text, { delimiter: d })])
+      assert.deepStrictEqual([d, rows[0]], [d, ["a", `p${d}q`, `b${o}c`]])
+    }
+  })
+
   it("sniffing ignores a line cut off at the end of the 16 Ki sample", async () => {
     // 297-char lines with 1 `,` and 2 `;`: the sample ends 49 chars into a
     // line holding only the `,`, which would make `;` look inconsistent.

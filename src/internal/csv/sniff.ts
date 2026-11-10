@@ -3,17 +3,32 @@
  *
  * @internal
  */
+import { absurd } from "effect/Function"
 
 /** Characters of text looked at to guess the delimiter. */
 export const SNIFF_CHARS = 16 * 1024
 
 /** Candidates, in tie-break order: comma, tab, semicolon, pipe. */
 const CANDIDATES = [0x2C, 0x09, 0x3B, 0x7C] as const
+type Candidate = typeof CANDIDATES[number]
+
+const QUOTE = 0x22
+const LF = 0x0A
+const CR = 0x0D
 
 const MAX_LINES = 64
 
 /**
- * Guesses the delimiter of `sample`. Quotes are skipped.
+ * Where the scan is within a field. Quotes follow the parser's rules: a `"`
+ * opens a quoted field only at the start of a field, and is literal anywhere
+ * else. With the delimiter still unknown, a field starts at the start of a
+ * line and after any candidate.
+ */
+type Mode = "FieldStart" | "Unquoted" | "Quoted" | "QuoteInQuoted"
+
+/**
+ * Guesses the delimiter of `sample`. Candidates inside quoted fields are
+ * skipped.
  *
  * 1. A candidate that occurs the same non-zero number of times on every
  *    line (at least 2 non-blank lines) wins; among several, the one with
@@ -27,28 +42,45 @@ export const guessDelimiter = (sample: string): number => {
   const lineCounts: Array<Array<number>> = []
   let current = [0, 0, 0, 0]
   let lineHasText = false
-  let inQuotes = false
+  let mode: Mode = "FieldStart"
   const n = sample.length
   // progress: i increases up to n; lines are capped at MAX_LINES
   for (let i = 0; i < n && lineCounts.length < MAX_LINES; i++) {
     const c = sample.charCodeAt(i)
-    if (c === 0x22) {
-      inQuotes = !inQuotes
+    if (mode === "Quoted") {
+      // line breaks and candidates are part of the field
+      if (c === QUOTE) mode = "QuoteInQuoted"
       lineHasText = true
-    } else if (!inQuotes && (c === 0x0A || c === 0x0D)) {
+      continue
+    }
+    if (c === LF || c === CR) {
       if (lineHasText) lineCounts.push(current)
       current = [0, 0, 0, 0]
       lineHasText = false
-    } else {
-      lineHasText = true
-      if (!inQuotes) {
-        for (let t = 0; t < k; t++) {
-          if (c === CANDIDATES[t]) {
-            current[t]!++
-            totals[t]!++
-          }
-        }
-      }
+      mode = "FieldStart"
+      continue
+    }
+    lineHasText = true
+    const t = CANDIDATES.indexOf(c as Candidate)
+    if (t >= 0) {
+      current[t]!++
+      totals[t]!++
+      mode = "FieldStart"
+      continue
+    }
+    switch (mode) {
+      case "FieldStart":
+        mode = c === QUOTE ? "Quoted" : "Unquoted"
+        break
+      case "Unquoted":
+        break
+      case "QuoteInQuoted":
+        // `""` is a literal quote; anything else follows the closing quote
+        // and is literal (the parser's lenient reading)
+        mode = c === QUOTE ? "Quoted" : "Unquoted"
+        break
+      default:
+        absurd(mode)
     }
   }
   // A last line without a line break counts only if the sample is the whole
