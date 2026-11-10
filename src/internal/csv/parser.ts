@@ -17,6 +17,7 @@
  * @internal
  */
 import * as Cell from "../../Cell.ts"
+import { absurd } from "effect/Function"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
@@ -26,17 +27,37 @@ const QUOTE = 0x22
 const LF = 0x0A
 const CR = 0x0D
 
+/**
+ * Where the tokenizer is within a record. A record exists once it has
+ * consumed a character, so RecordStart and AfterCR are the only states in
+ * which end of input adds no row.
+ */
 const State = {
-  /** At the start of a field. */
-  FieldStart: 0,
+  /** At the start of a record, nothing consumed yet. */
+  RecordStart: 0,
+  /** At the start of a record that follows a CR: an LF here ends nothing and is skipped. */
+  AfterCR: 1,
+  /** At the start of a field after a delimiter. */
+  FieldStart: 2,
   /** Inside an unquoted field. */
-  Unquoted: 1,
+  Unquoted: 3,
   /** Inside a quoted field. */
-  Quoted: 2,
+  Quoted: 4,
   /** Just saw a `"` inside a quoted field: `""`, the closing quote, or junk follows. */
-  QuoteInQuoted: 3
+  QuoteInQuoted: 5
 } as const
 type State = typeof State[keyof typeof State]
+
+/**
+ * What `feed` does with a piece of text: collect text until the delimiter is
+ * known, parse it, or nothing more (after the final piece, or after an
+ * error, which every later call returns).
+ */
+type Phase =
+  | { readonly _tag: "Sniffing"; readonly pending: string }
+  | { readonly _tag: "Parsing"; readonly delimiter: number }
+  | { readonly _tag: "Done" }
+  | { readonly _tag: "Failed"; readonly error: SpreadsheetError }
 
 export interface ParserOptions {
   /** Delimiter character, or undefined to sniff it. */
@@ -47,16 +68,10 @@ export interface ParserOptions {
 }
 
 export class CsvParser {
-  private delimiter: number
-  private sniffing: boolean
-  private pending = ""
+  private phase: Phase
 
-  private state: State = State.FieldStart
+  private state: State = State.RecordStart
   private field = ""
-  /** The current record has consumed at least one character. */
-  private recordStarted = false
-  /** The previous piece ended with a CR record terminator. */
-  private skipLF = false
   private column = 0
   private cells: Array<Cell.Cell> = []
   private rowIndex = 0
@@ -64,64 +79,82 @@ export class CsvParser {
   /** Characters consumed before the current piece (for error offsets). */
   private consumed = 0
   private out: Array<Row> = []
-  private failure: SpreadsheetError | undefined
 
   private readonly options: ParserOptions
 
   constructor(options: ParserOptions) {
     this.options = options
-    this.sniffing = options.delimiter === undefined
-    this.delimiter = options.delimiter === undefined ? 0x2C : options.delimiter.charCodeAt(0)
-  }
-
-  /** The delimiter in use (after sniffing). */
-  get delimiterChar(): string {
-    return String.fromCharCode(this.delimiter)
+    this.phase = options.delimiter === undefined
+      ? { _tag: "Sniffing", pending: "" }
+      : { _tag: "Parsing", delimiter: options.delimiter.charCodeAt(0) }
   }
 
   /** The error that stopped parsing, if any. Once set, it stays. */
   get error(): SpreadsheetError | undefined {
-    return this.failure
+    return this.phase._tag === "Failed" ? this.phase.error : undefined
   }
 
   /**
    * Feeds a piece of text; `final` marks the end of input. Returns the rows
    * completed by this piece, or the error that stopped parsing. If the
    * piece completed rows before the error, those rows are returned first;
-   * the error is then in `error` and returned by the next call.
+   * the error is then in `error` and returned by the next call. After the
+   * final piece, later calls return no rows.
    */
   feed(text: string, final: boolean): Array<Row> | SpreadsheetError {
-    if (this.failure !== undefined) return this.failure
-    if (this.sniffing) {
-      this.pending += text
-      if (this.pending.length < SNIFF_CHARS && !final) return []
-      this.sniffing = false
-      text = this.pending
-      this.pending = ""
-      text = this.sniff(text)
+    const phase = this.phase
+    switch (phase._tag) {
+      case "Failed":
+        return phase.error
+      case "Done":
+        return []
+      case "Sniffing": {
+        const pending = phase.pending + text
+        if (pending.length < SNIFF_CHARS && !final) {
+          this.phase = { _tag: "Sniffing", pending }
+          return []
+        }
+        const { delimiter, rest } = this.sniff(pending)
+        this.phase = { _tag: "Parsing", delimiter }
+        return this.step(rest, delimiter, final)
+      }
+      case "Parsing":
+        return this.step(text, phase.delimiter, final)
+      default:
+        return absurd(phase)
     }
-    this.parse(text)
-    if (final && this.failure === undefined) this.finish()
-    if (this.failure !== undefined && this.out.length === 0) return this.failure
+  }
+
+  /** Parses a piece once the delimiter is known; ends the input on `final`. */
+  private step(text: string, delimiter: number, final: boolean): Array<Row> | SpreadsheetError {
+    this.parse(text, delimiter)
+    if (final && this.phase._tag === "Parsing") {
+      this.finish()
+      if (this.phase._tag === "Parsing") this.phase = { _tag: "Done" }
+    }
+    const error = this.error
+    if (error !== undefined && this.out.length === 0) return error
     const rows = this.out
     this.out = []
     return rows
   }
 
-  /** Decides the delimiter; consumes an Excel `sep=X` line if present. */
-  private sniff(text: string): string {
+  /**
+   * Decides the delimiter; consumes an Excel `sep=X` line if present.
+   * Returns the delimiter and the text left to parse.
+   */
+  private sniff(text: string): { readonly delimiter: number; readonly rest: string } {
     const sep = /^sep=(.)(\r\n|\r|\n|$)/.exec(text)
     if (sep !== null && sep[1] !== '"' && sep[1] !== "\r" && sep[1] !== "\n") {
-      this.delimiter = sep[1]!.charCodeAt(0)
       this.consumed += sep[0].length
-      return text.slice(sep[0].length)
+      return { delimiter: sep[1]!.charCodeAt(0), rest: text.slice(sep[0].length) }
     }
-    this.delimiter = guessDelimiter(text.slice(0, SNIFF_CHARS))
-    return text
+    return { delimiter: guessDelimiter(text.slice(0, SNIFF_CHARS)), rest: text }
   }
 
+  /** Stops parsing with `error`; the first error wins. */
   private fail(error: SpreadsheetError): void {
-    if (this.failure === undefined) this.failure = error
+    if (this.phase._tag !== "Failed") this.phase = { _tag: "Failed", error }
   }
 
   private appendField(s: string, from: number, to: number): void {
@@ -144,7 +177,6 @@ export class CsvParser {
     this.column = column + 1
     const value = this.field
     this.field = ""
-    this.state = State.FieldStart
     // An empty field emits no cell; every emitted cell counts.
     if (value.length === 0) return
     const maxCells = this.options.limits.maxCellsPerSheet
@@ -166,43 +198,46 @@ export class CsvParser {
     this.rowIndex = index + 1
     this.cells = []
     this.column = 0
-    this.recordStarted = false
   }
 
-  /** Ends the field at a delimiter or line break `c` found at `s[j]`. */
-  private terminate(c: number): void {
+  /**
+   * Ends the field at the delimiter or line break `c`: the next field starts
+   * after a delimiter, a new record after a line break.
+   */
+  private terminate(c: number, delim: number): void {
     this.endField()
-    if (c !== this.delimiter) {
-      if (this.failure === undefined) this.endRecord()
-      if (c === CR) this.skipLF = true
+    if (c === delim) {
+      this.state = State.FieldStart
+    } else {
+      if (this.phase._tag !== "Failed") this.endRecord()
+      this.state = c === CR ? State.AfterCR : State.RecordStart
     }
   }
 
-  private parse(s: string): void {
+  private parse(s: string, delim: number): void {
     const n = s.length
-    const delim = this.delimiter
     let i = 0
     // progress: every branch below moves `i` forward by at least 1, or ends
-    // the loop (failure). `i` never decreases.
-    while (i < n && this.failure === undefined) {
-      if (this.skipLF) {
-        this.skipLF = false
-        if (s.charCodeAt(i) === LF) {
-          i++
-          continue // `i` advanced
+    // the loop (failure), except AfterCR without an LF, which leaves AfterCR
+    // for RecordStart, and RecordStart always moves `i`. `i` never decreases.
+    while (i < n && this.phase._tag === "Parsing") {
+      const state = this.state
+      switch (state) {
+        case State.AfterCR: {
+          // the record before ended with CR: an LF here is the rest of a CRLF
+          this.state = State.RecordStart
+          if (s.charCodeAt(i) === LF) i++
+          break
         }
-      }
-      switch (this.state) {
+        case State.RecordStart:
         case State.FieldStart:
         case State.Unquoted: {
-          if (this.state === State.FieldStart && s.charCodeAt(i) === QUOTE) {
+          if (state !== State.Unquoted && s.charCodeAt(i) === QUOTE) {
             this.state = State.Quoted
-            this.recordStarted = true
             i++
             break
           }
           this.state = State.Unquoted
-          this.recordStarted = true
           let j = i
           // progress: j increases up to n
           for (; j < n; j++) {
@@ -210,7 +245,7 @@ export class CsvParser {
             if (c === delim || c === LF || c === CR) break
           }
           this.appendField(s, i, j)
-          if (j < n) this.terminate(s.charCodeAt(j))
+          if (j < n) this.terminate(s.charCodeAt(j), delim)
           i = j + 1 // > i; when j === n this ends the loop
           break
         }
@@ -233,7 +268,7 @@ export class CsvParser {
             this.state = State.Quoted
             i++
           } else if (c === delim || c === LF || c === CR) {
-            this.terminate(c)
+            this.terminate(c, delim)
             i++
           } else if (this.options.strict) {
             this.fail(
@@ -256,33 +291,46 @@ export class CsvParser {
               if (d === delim || d === LF || d === CR) break
             }
             this.appendField(s, i, j)
-            if (j < n) this.terminate(s.charCodeAt(j))
+            if (j < n) this.terminate(s.charCodeAt(j), delim)
             i = j + 1
           }
           break
         }
+        default:
+          absurd(state)
       }
     }
     this.consumed += n
   }
 
+  /** End of input: ends the last record, if one has started. */
   private finish(): void {
-    if (this.state === State.Quoted) {
-      if (this.options.strict) {
-        this.fail(
-          new MalformedFile({
-            format: "csv",
-            offset: this.consumed,
-            reason: `unterminated quoted field in row ${this.rowIndex + 1}`
-          })
-        )
+    const state = this.state
+    switch (state) {
+      case State.RecordStart:
+      case State.AfterCR:
         return
-      }
+      case State.Quoted:
+        if (this.options.strict) {
+          this.fail(
+            new MalformedFile({
+              format: "csv",
+              offset: this.consumed,
+              reason: `unterminated quoted field in row ${this.rowIndex + 1}`
+            })
+          )
+          return
+        }
+        break
+      case State.FieldStart:
+      case State.Unquoted:
+      case State.QuoteInQuoted:
+        break
+      default:
+        absurd(state)
     }
-    if (this.recordStarted) {
-      this.endField()
-      if (this.failure === undefined) this.endRecord()
-    }
+    this.endField()
+    if (this.phase._tag !== "Failed") this.endRecord()
   }
 }
 
