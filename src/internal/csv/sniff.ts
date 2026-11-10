@@ -30,21 +30,27 @@ interface Reading {
   readonly lines: Array<number>
   /** Delimiters seen, including on a last line cut off by the sample's end. */
   readonly total: number
+  /**
+   * Quotes the parser would read leniently: inside an unquoted field, or
+   * followed by text after a closing quote.
+   */
+  readonly strays: number
 }
 
 /**
  * Reads `sample` as the parser would with delimiter `delim`, counting the
- * delimiters outside quoted fields on each line.
+ * delimiters outside quoted fields on each line, and the stray quotes.
  */
 const read = (sample: string, delim: number): Reading => {
   const lines: Array<number> = []
   let total = 0
+  let strays = 0
   let current = 0
   let lineHasText = false
   let mode: Mode = "FieldStart"
   const n = sample.length
   // progress: i increases up to n (the skips below only move it forward);
-  // lines are capped at MAX_LINES
+  // lines are capped at MAX_LINES (for each candidate's reading)
   for (let i = 0; i < n && lines.length < MAX_LINES; i++) {
     if (mode === "Quoted") {
       // line breaks and delimiters are part of the field: skip to its next
@@ -75,11 +81,17 @@ const read = (sample: string, delim: number): Reading => {
         mode = c === QUOTE ? "Quoted" : "Unquoted"
         break
       case "Unquoted":
+        if (c === QUOTE) strays++
         break
       case "QuoteInQuoted":
         // `""` is a literal quote; anything else follows the closing quote
         // and is literal (the parser's lenient reading)
-        mode = c === QUOTE ? "Quoted" : "Unquoted"
+        if (c === QUOTE) {
+          mode = "Quoted"
+        } else {
+          mode = "Unquoted"
+          strays++
+        }
         break
       default:
         absurd(mode)
@@ -89,6 +101,7 @@ const read = (sample: string, delim: number): Reading => {
       while (i + 1 < n) {
         const d = sample.charCodeAt(i + 1)
         if (d === delim || d === LF || d === CR) break
+        if (d === QUOTE) strays++
         i++
       }
     }
@@ -96,13 +109,18 @@ const read = (sample: string, delim: number): Reading => {
   // A last line without a line break counts only if the sample is the whole
   // text (it could be cut otherwise).
   if (lineHasText && n < SNIFF_CHARS && lines.length < MAX_LINES) lines.push(current)
-  return { lines, total }
+  return { lines, total, strays }
 }
 
 /**
  * Guesses the delimiter of `sample`. Each candidate is tried as the
  * delimiter, splitting lines and fields as the parser would with it, so
  * quoted fields hide that candidate and line breaks inside them.
+ *
+ * If some candidate occurs and reads without stray quotes, only such
+ * candidates are considered: read with another candidate, the quoted fields
+ * of the real delimiter become text with stray quotes, and the candidates
+ * inside them get counted. Then:
  *
  * 1. A candidate that occurs the same non-zero number of times on every
  *    line (at least 2 non-blank lines) wins; among several, the one with
@@ -112,10 +130,13 @@ const read = (sample: string, delim: number): Reading => {
  */
 export const guessDelimiter = (sample: string): number => {
   const readings = CANDIDATES.map((delim) => read(sample, delim))
+  const someClean = readings.some((r) => r.total > 0 && r.strays === 0)
+  const eligible = (r: Reading) => !someClean || r.strays === 0
   let best = -1
   let bestPerLine = 0
-  readings.forEach(({ lines }, t) => {
-    if (lines.length < 2) return
+  readings.forEach((r, t) => {
+    const { lines } = r
+    if (lines.length < 2 || !eligible(r)) return
     const first = lines[0]!
     if (first > bestPerLine && lines.every((count) => count === first)) {
       best = t
@@ -124,10 +145,10 @@ export const guessDelimiter = (sample: string): number => {
   })
   if (best >= 0) return CANDIDATES[best]!
   let bestTotal = 0
-  readings.forEach(({ total }, t) => {
-    if (total > bestTotal) {
+  readings.forEach((r, t) => {
+    if (r.total > bestTotal && eligible(r)) {
       best = t
-      bestTotal = total
+      bestTotal = r.total
     }
   })
   return best >= 0 ? CANDIDATES[best]! : 0x2C

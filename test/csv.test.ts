@@ -151,6 +151,25 @@ describe("csv: delimiters", () => {
     assert.deepStrictEqual(rows, [['w;"v', 'w,"v', 'w;"v'], ['w,"v', 'w;"v', 'w;"v']])
   })
 
+  it("sniffing: a candidate inside the quoted fields of another doesn't win", async () => {
+    // read with `,`, these quoted fields hold `,`; read with `;`, they are
+    // clean quoted fields, while `,` would leave stray quotes around
+    assert.deepStrictEqual(await csvAoa('"Name, first";"Name, last"\n"a, b";"c, d"\n'), [["Name, first", "Name, last"], ["a, b", "c, d"]])
+    assert.deepStrictEqual(await csvAoa('1;"a, b, c"\n2;"d, e, f"\n'), [["1", "a, b, c"], ["2", "d, e, f"]])
+  })
+
+  it("sniffing: a quoted field running past the 16 Ki sample doesn't lend its contents to another candidate", async () => {
+    // a `,` header, then a quoted HTML field with `;` in its styles that runs
+    // past the sample: read with `;`, it is unquoted text full of `;`
+    const header = Array.from({ length: 10 }, (_, i) => `c${i}`).join(",")
+    const html = '""<div style=""margin: 1px; padding: 2px;"">x</div>""'.repeat(400)
+    const text = `${header}\nk,,1,Name,,"${html}",z\nk,,2,Name,,"",z\n`
+    expect(html.length).toBeGreaterThan(16 * 1024)
+    const rows = await csvAoa(text)
+    assert.deepStrictEqual(rows, await csvAoa(text, { delimiter: "," }))
+    assert.strictEqual(rows[0]!.length, 10)
+  })
+
   it("sniffing ignores a line cut off at the end of the 16 Ki sample", async () => {
     // 297-char lines with 1 `,` and 2 `;`: the sample ends 49 chars into a
     // line holding only the `,`, which would make `;` look inconsistent.
