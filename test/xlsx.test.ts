@@ -287,6 +287,66 @@ describe("xlsx: row order", () => {
   })
 })
 
+describe("xlsx: an element nested in one of its own kind", () => {
+  const sheet = (data: string): TestWorkbook => ({ sheets: [{ name: "S", data }] })
+  const malformedIn = (reason: string, part: string) => ({ _tag: "MalformedFile", format: "xlsx", reason, part })
+  /** A package with two worksheets whose workbook part holds `body`. */
+  const withWorkbook = async (body: string) => readExit(await xlsx({ sheets: [{ name: "A" }, { name: "B" }], workbookXml: body }))
+
+  it("a <row> inside a row is MalformedFile, not a row replacing the open one", async () => {
+    expect(await errorOf(sheet(`<row r="1"><c r="A1"><v>1</v></c><row r="2"><c r="A2"><v>2</v></c></row></row><row r="3"><c r="A3"><v>3</v></c></row>`)))
+      .toMatchObject(malformedIn("<row> inside a <row>", "xl/worksheets/sheet1.xml"))
+    // also below another element of the row, and in a row without r
+    expect(await errorOf(sheet(`<row><c><v>1</v></c><x><row/></x></row>`))).toMatchObject(malformedIn("<row> inside a <row>", "xl/worksheets/sheet1.xml"))
+    // the rows before it still come out first
+    const bytes = await xlsx(sheet(`<row r="1"><c r="A1"><v>1</v></c></row><row r="2"><row r="3"/></row>`))
+    const wb = await Effect.runPromise(Xlsx.read(bytes))
+    const seen: Array<number> = []
+    const exit = await Effect.runPromiseExit(Stream.runForEach(Workbook.rows(wb, 0), (row) => Effect.sync(() => seen.push(row.index))))
+    expect(seen).toEqual([0])
+    expect(failureOf(exit)).toMatchObject({ _tag: "MalformedFile" })
+  })
+
+  it("a <sheetData> inside the sheet data is MalformedFile, not the end of the sheet data", async () => {
+    expect(await errorOf(sheet(`<sheetData></sheetData><row r="1"><c r="A1"><v>1</v></c></row>`)))
+      .toMatchObject(malformedIn("<sheetData> inside a <sheetData>", "xl/worksheets/sheet1.xml"))
+    expect(await errorOf(sheet(`<row r="1"><sheetData/></row>`))).toMatchObject(malformedIn("<sheetData> inside a <sheetData>", "xl/worksheets/sheet1.xml"))
+  })
+
+  it("an <si> inside a shared string is MalformedFile, not a string replacing the open one", async () => {
+    const error = await errorOf({
+      sharedStringsXml: `<sst xmlns="x"><si><t>a</t><si><t>b</t></si></si><si><t>c</t></si></sst>`,
+      sheets: [{ name: "S", data: `<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>` }]
+    })
+    expect(error).toMatchObject(malformedIn("<si> inside an <si>", "xl/sharedStrings.xml"))
+  })
+
+  it("a <sheets> inside <sheets> is MalformedFile, not the end of the sheet list", async () => {
+    const exit = await withWorkbook(`<sheets><sheets></sheets><sheet name="A" sheetId="1" r:id="rId1"/><sheet name="B" sheetId="2" r:id="rId2"/></sheets>`)
+    expect(failureOf(exit)).toMatchObject(malformedIn("<sheets> inside <sheets>", "xl/workbook.xml"))
+    // after a sheet: not a workbook with only the sheets before it
+    const after = await withWorkbook(`<sheets><sheet name="A" sheetId="1" r:id="rId1"/><sheets/><sheet name="B" sheetId="2" r:id="rId2"/></sheets>`)
+    expect(failureOf(after)).toMatchObject(malformedIn("<sheets> inside <sheets>", "xl/workbook.xml"))
+    // the same list without the nested element reads both sheets
+    const ok = await withWorkbook(`<sheets><sheet name="A" sheetId="1" r:id="rId1"/><sheet name="B" sheetId="2" r:id="rId2"/></sheets>`)
+    expect(Exit.isSuccess(ok) && ok.value.wb.sheets.map((s) => s.name)).toEqual(["A", "B"])
+  })
+
+  it("a <definedName> inside a defined name is MalformedFile, not a name replacing the open one", async () => {
+    expect(await errorOf({ sheets: [{ name: "S" }], definedNames: `<definedName name="A">x<definedName name="B">y</definedName>z</definedName>` }))
+      .toMatchObject(malformedIn("<definedName> inside a <definedName>", "xl/workbook.xml"))
+  })
+
+  it("a phonetic run inside a <t> is skipped, and the <t>'s text after it is kept", async () => {
+    // the <t> inside the phonetic run neither adds its text nor ends the outer <t>
+    const { sheets } = await readOk({
+      sharedStringsXml: `<sst xmlns="x"><si><t>a<rPh sb="0" eb="1"><t>b</t></rPh>c</t></si><si><t>d</t></si></sst>`,
+      sheets: [{ name: "S", data: `<row><c t="s"><v>0</v></c><c t="s"><v>1</v></c><c t="inlineStr"><is><t>e<rPh><t>f</t></rPh>g</t></is></c></row>` }]
+    })
+    expect(sheets[0]![0]!.cells.map(Cell.value)).toEqual(["ac", "d", "eg"])
+  })
+})
+
 describe("xlsx: rows completed before an error", () => {
   const sheet = (data: string): TestWorkbook => ({ sheets: [{ name: "S", data }] })
   /** The rows a consumer sees before the stream ends or fails, and the error. */

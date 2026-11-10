@@ -12,6 +12,9 @@
  *   previous row's, or a cell whose reference names another row than its
  *   own, is MalformedFile. Rows are streamed, so a row already emitted
  *   can't be merged with a later one.
+ * - A `<row>` inside a row, or a `<sheetData>` inside the sheet data, is
+ *   MalformedFile: it can't be read without dropping the open row's cells
+ *   or the rows after it.
  * - Cells: `<c r>` gives the column, else the previous cell's + 1. A row
  *   whose cells are out of order is sorted, keeping the last of duplicates.
  *   An unsorted row is compacted that way as soon as it holds more than
@@ -151,11 +154,17 @@ export class SheetRows implements XmlHandler {
       return undefined
     }
     if (name === "sheetData") {
+      // a nested one would end the sheet data at its end tag, hiding the rows after it
+      if (this.inSheetData) return malformed("<sheetData> inside a <sheetData>", this.context.part)
       this.inSheetData = true
       return undefined
     }
     if (!this.inSheetData) return undefined
-    if (name === "row") return this.openRow(attributes)
+    if (name === "row") {
+      // a nested one would replace the open row, dropping its cells
+      if (this.rowIndex !== undefined) return malformed("<row> inside a <row>", this.context.part)
+      return this.openRow(attributes)
+    }
     if (name === "c" && this.rowIndex !== undefined) return this.openCell(attributes)
     return undefined
   }
