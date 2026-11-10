@@ -126,8 +126,9 @@ export class CsvParser {
    */
   private sniff(text: string): Tokenizer {
     const sep = /^sep=(.)(\r\n|\r|\n|$)/.exec(text)
-    if (sep !== null && sep[1] !== '"' && sep[1] !== "\r" && sep[1] !== "\n") {
-      const tokenizer = new Tokenizer(this.options, sep[1]!.charCodeAt(0), sep[0].length)
+    const char = sep?.[1]
+    if (sep !== null && char !== undefined && char !== '"' && char !== "\r" && char !== "\n") {
+      const tokenizer = new Tokenizer(this.options, char.charCodeAt(0), sep[0].length)
       tokenizer.parse(text.slice(sep[0].length))
       return tokenizer
     }
