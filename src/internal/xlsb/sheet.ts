@@ -28,11 +28,15 @@
  *   as soon as it holds more than 2 x `maxColumns` cells (as in XLSX), so
  *   the cells held stay under that whatever the file repeats.
  * - Nothing is sized by BrtWsDim; cost follows the records present.
+ * - On an error (malformed input, a limit), the rows completed before it
+ *   come out first, then the stream fails with it (as in XLSX). So the rows
+ *   seen before the error don't depend on where the slices fall.
  *
  * @internal
  */
 import { Cause, Effect, Pull, Stream } from "effect"
 import type * as Arr from "effect/Array"
+import { absurd } from "effect/Function"
 import * as Cell from "../../Cell.ts"
 import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
@@ -42,7 +46,7 @@ import { type Biff12Record, readRecords, RecordSplitter } from "../biff12/record
 import { decodeRk, ERROR_CODES } from "../xls/fields.ts"
 import { mergeSpans } from "../xlsx/details.ts"
 import { serialToDate } from "../xlsx/numFmt.ts"
-import { compact } from "../xlsx/sheet.ts"
+import { compact, DONE, type PullState, READING } from "../xlsx/sheet.ts"
 import type { CellStyles } from "./parts.ts"
 import { sliced } from "./slices.ts"
 import { malformed, tooLong } from "./workbook.ts"
@@ -326,17 +330,29 @@ export const sheetRows = (
       const rows = new SheetRows(context)
       const splitter = new RecordSplitter(context.part, context.limits.maxRecordBytes)
       const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
-      let done = false
+      let state: PullState = READING
       const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
         // progress: each iteration pulls one upstream piece (consumed), or
-        // ends the input (done is set), or ends the stream
+        // ends the input (Done), or ends the stream (Failing goes to Done)
         while (true) {
-          if (done) return yield* Cause.done()
+          switch (state._tag) {
+            case "Reading":
+              break
+            case "Failing": {
+              const error = state.error
+              state = DONE
+              return yield* Effect.fail(error)
+            }
+            case "Done":
+              return yield* Cause.done()
+            default:
+              return absurd(state)
+          }
           yield* Effect.yieldNow
           const chunk = yield* pullUpstream
           let error: SpreadsheetError | undefined
           if (chunk === undefined) {
-            done = true
+            state = DONE
             error = splitter.end() ?? rows.end()
           } else {
             // progress: one piece per iteration
@@ -345,10 +361,8 @@ export const sheetRows = (
               if (error !== undefined) break
             }
           }
-          if (error !== undefined) {
-            done = true
-            return yield* Effect.fail(error)
-          }
+          // the rows completed before the error come out first; the error on the next pull
+          if (error !== undefined) state = { _tag: "Failing", error }
           if (rows.out.length > 0) {
             const out = rows.out
             rows.out = []
