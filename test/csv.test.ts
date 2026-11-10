@@ -141,6 +141,16 @@ describe("csv: delimiters", () => {
     }
   })
 
+  it("sniffing: a quote opens a quoted field only after the candidate being tried", async () => {
+    // Read with `|`, every field starts with `w`, so all quotes are literal and
+    // each line has two `|`. Read with `;`, a quote after `;` opens a quoted
+    // field that runs across the line break.
+    const text = 'w;"v|w,"v|w;"v\nw,"v|w;"v|w;"v\n'
+    const rows = await csvAoa(text)
+    assert.deepStrictEqual(rows, await csvAoa(text, { delimiter: "|" }))
+    assert.deepStrictEqual(rows, [['w;"v', 'w,"v', 'w;"v'], ['w,"v', 'w;"v', 'w;"v']])
+  })
+
   it("sniffing ignores a line cut off at the end of the 16 Ki sample", async () => {
     // 297-char lines with 1 `,` and 2 `;`: the sample ends 49 chars into a
     // line holding only the `,`, which would make `;` look inconsistent.
