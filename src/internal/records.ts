@@ -5,6 +5,7 @@
  */
 import * as Cell from "../Cell.ts"
 import { Cause, Effect, Pull, Stream } from "effect"
+import { absurd } from "effect/Function"
 import type * as Arr from "effect/Array"
 import { LimitExceeded } from "../SpreadsheetError.ts"
 import type { LimitOverrides, Limits } from "../SpreadsheetLimits.ts"
@@ -54,6 +55,59 @@ const headerName = (cell: Cell.Cell): string | undefined => {
   return v instanceof Date ? v.toISOString() : typeof v === "boolean" ? (v ? "TRUE" : "FALSE") : String(v)
 }
 
+/** The columns an explicit `header: [...]` keeps: below `length` and not in `dropped`. */
+interface ExplicitColumns {
+  readonly length: number
+  /** Columns given no name (a hole, `undefined`, `null`). */
+  readonly dropped: ReadonlySet<number>
+}
+
+/** The header is known: records are named by `namer`. */
+interface Ready {
+  readonly _tag: "Ready"
+  readonly namer: RecordKeys.RecordKeys
+  /** Set only for an explicit `header: [...]`. */
+  readonly explicit: ExplicitColumns | undefined
+}
+
+/**
+ * Where a builder is in its run. `header: "first-row"` starts in
+ * `AwaitFirstRow`, a row index in `AwaitRow`, an explicit array in `Ready`.
+ * Both waiting phases move to `Ready` once and stay there.
+ */
+type Phase =
+  | { readonly _tag: "AwaitFirstRow" }
+  | { readonly _tag: "AwaitRow"; readonly at: number }
+  | Ready
+
+/** The phase a run starts in, decided once from `options.header`. */
+const initial = (header: RecordsOptions<unknown>["header"]): Phase => {
+  if (header === "first-row") return { _tag: "AwaitFirstRow" }
+  // Any other string is compared with row indexes as given, like a number.
+  if (typeof header === "number" || typeof header === "string") return { _tag: "AwaitRow", at: header }
+  const names = header as ReadonlyArray<string | null | undefined>
+  // An index loop, not `map`: `map` keeps holes, and a hole, `undefined`
+  // or `null` drops that column. Strings (also "") are names; explicit
+  // names go through the same de-duplication: ["x", "x"] -> x, x_1.
+  // progress: column increases by one up to names.length
+  const entries: Array<RecordKeys.HeaderEntry> = []
+  const dropped = new Set<number>()
+  for (let column = 0; column < names.length; column++) {
+    const name = names[column]
+    if (typeof name === "string") entries.push([column, name])
+    else dropped.add(column)
+  }
+  return { _tag: "Ready", namer: RecordKeys.make(entries), explicit: { length: names.length, dropped } }
+}
+
+/** `Ready` with names from the header row's cells (only the cells present), or none without a row. */
+const ready = (row: Row | undefined): Ready => {
+  const entries: Array<RecordKeys.HeaderEntry> = []
+  // progress: one header cell per iteration
+  if (row !== undefined) for (const cell of row.cells) entries.push([cell.column, headerName(cell)])
+  return { _tag: "Ready", namer: RecordKeys.make(entries), explicit: undefined }
+}
+
 /**
  * Stateful converter: feed rows in order, get records. Keys come from
  * `recordKeys` (one namer per run): repeated header names get `_1`, `_2`,
@@ -64,12 +118,7 @@ const headerName = (cell: Cell.Cell): string | undefined => {
  * and `defval` fills against `maxRecordFields`.
  */
 export class RecordBuilder {
-  /** The key namer, once the header is known. */
-  private namer: RecordKeys.RecordKeys | undefined
-  /** With an explicit `header: [...]`, columns at or past its length are dropped. */
-  private readonly explicitLength: number | undefined
-  /** Explicit-header columns given no name (a hole, `undefined`, `null`): dropped. */
-  private readonly dropped = new Set<number>()
+  private phase: Phase
   private cells = 0
   private fills = 0
   /** Keys written so far (cells and fills); callers diff it to size batches. */
@@ -83,33 +132,7 @@ export class RecordBuilder {
     this.options = options
     this.maxCells = limits.maxCellsPerSheet
     this.maxFills = limits.maxRecordFields
-    const header = options.header
-    if (typeof header !== "string" && typeof header !== "number") {
-      const names = header as ReadonlyArray<string | null | undefined>
-      this.explicitLength = names.length
-      // An index loop, not `map`: `map` keeps holes, and a hole, `undefined`
-      // or `null` drops that column. Strings (also "") are names; explicit
-      // names go through the same de-duplication: ["x", "x"] -> x, x_1.
-      // progress: column increases by one up to names.length
-      const entries: Array<RecordKeys.HeaderEntry> = []
-      for (let column = 0; column < names.length; column++) {
-        const name = names[column]
-        if (typeof name === "string") entries.push([column, name])
-        else this.dropped.add(column)
-      }
-      this.namer = RecordKeys.make(entries)
-    } else {
-      this.explicitLength = undefined
-    }
-  }
-
-  /** Builds the namer from the header row's cells (only the cells present). */
-  private setHeader(row: Row | undefined): RecordKeys.RecordKeys {
-    const entries: Array<RecordKeys.HeaderEntry> = []
-    // progress: one header cell per iteration
-    if (row !== undefined) for (const cell of row.cells) entries.push([cell.column, headerName(cell)])
-    this.namer = RecordKeys.make(entries)
-    return this.namer
+    this.phase = initial(options.header)
   }
 
   private countCells(n: number): LimitExceeded | undefined {
@@ -133,22 +156,33 @@ export class RecordBuilder {
    * skipped, or blank; or the limit error.
    */
   push(row: Row): Record<string, unknown> | undefined | LimitExceeded {
-    let namer = this.namer
-    if (namer === undefined) {
-      const header = this.options.header
-      if (header === "first-row") {
-        this.setHeader(row)
+    const phase = this.phase
+    switch (phase._tag) {
+      case "Ready":
+        return this.record(row, phase)
+      case "AwaitFirstRow":
+        this.phase = ready(row)
         return undefined
+      case "AwaitRow": {
+        if (row.index < phase.at) return undefined
+        if (row.index === phase.at) {
+          this.phase = ready(row)
+          return undefined
+        }
+        // The header row isn't in the data (rows can be sparse): no names,
+        // and this row is data.
+        const next = ready(undefined)
+        this.phase = next
+        return this.record(row, next)
       }
-      const at = header as number
-      if (row.index < at) return undefined
-      if (row.index === at) {
-        this.setHeader(row)
-        return undefined
-      }
-      // The header row isn't in the data (rows can be sparse): no names.
-      namer = this.setHeader(undefined)
+      default:
+        return absurd(phase)
     }
+  }
+
+  /** The record for a data row, once the header is known. */
+  private record(row: Row, phase: Ready): Record<string, unknown> | undefined | LimitExceeded {
+    const namer = phase.namer
     const record: Record<string, unknown> = {}
     let empty = true
     const defval = this.options.defval
@@ -169,10 +203,10 @@ export class RecordBuilder {
     }
     const over = this.countCells(row.cells.length)
     if (over !== undefined) return over
-    const limit = this.explicitLength
+    const explicit = phase.explicit
     // progress: one cell per iteration
     for (const cell of row.cells) {
-      if (limit !== undefined && (cell.column >= limit || this.dropped.has(cell.column))) continue
+      if (explicit !== undefined && (cell.column >= explicit.length || explicit.dropped.has(cell.column))) continue
       const v = Cell.value(cell)
       // An Empty cell is not data: a header-named column already holds its
       // defval fill, and an unnamed column gets no key until data appears.

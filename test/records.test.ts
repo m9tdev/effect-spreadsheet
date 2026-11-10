@@ -319,3 +319,52 @@ describe("toRecords", () => {
       assert.deepStrictEqual(Array.from(again), Array.from(records))
     }))
 })
+
+describe("toRecords header phase", () => {
+  const row = (index: number, ...values: Array<string>): Row => ({
+    index,
+    hidden: false,
+    cells: values.map((v, column) => Cell.text(column, v))
+  })
+
+  it("first-row: the first row is the header even when it has no cells; the next row is data", () => {
+    const rows: Array<Row> = [{ index: 0, hidden: false, cells: [] }, row(1, "a", "b"), row(2, "c")]
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [{ __EMPTY: "a", __EMPTY_1: "b" }, { __EMPTY: "c" }])
+  })
+
+  it("first-row: the first row present is the header, whatever its index", () => {
+    const rows: Array<Row> = [row(4, "k"), row(9, "v")]
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [{ k: "v" }])
+  })
+
+  it("row index: rows before it are skipped, the row is the header, later rows are data", () => {
+    const rows: Array<Row> = [row(0, "title"), row(1, "note"), row(2, "k"), row(3, "v")]
+    assert.deepStrictEqual(recs(rows, { header: 2 }), [{ k: "v" }])
+  })
+
+  it("row index absent: the first row past it is data, and so are the rows after", () => {
+    const rows: Array<Row> = [row(0, "skipped"), row(5, "a"), row(6, "b", "c")]
+    assert.deepStrictEqual(recs(rows, { header: 2 }), [{ __EMPTY: "a" }, { __EMPTY: "b", __EMPTY_1: "c" }])
+  })
+
+  it("row index past the last row: no records", () => {
+    const rows: Array<Row> = [row(0, "a"), row(1, "b")]
+    assert.deepStrictEqual(recs(rows, { header: 7 }), [])
+  })
+
+  it("once the header is known, a later row with the header's index is data", () => {
+    // Indexes are not checked to increase; a repeated index is just another row.
+    assert.deepStrictEqual(recs([row(1, "k"), row(2, "v"), row(1, "w")], { header: 1 }), [{ k: "v" }, { k: "w" }])
+    // The header row was absent, so names were settled without it.
+    assert.deepStrictEqual(recs([row(3, "a"), row(1, "b")], { header: 1 }), [{ __EMPTY: "a" }, { __EMPTY: "b" }])
+  })
+
+  it("explicit array: names are known before any row; every row is data", () => {
+    const sparse: Array<string> = new Array(3)
+    sparse[0] = "x"
+    sparse[2] = "z"
+    const rows: Array<Row> = [row(0, "1", "2", "3", "4"), row(1, "5")]
+    assert.deepStrictEqual(recs(rows, { header: sparse }), [{ x: "1", z: "3" }, { x: "5" }])
+    assert.deepStrictEqual(recs(rows, { header: [] }), [])
+  })
+})
