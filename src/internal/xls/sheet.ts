@@ -416,6 +416,18 @@ const numberCell = (globals: Globals, column: number, xf: number, value: number)
 /** Handles one record of the substream; `true` at its EOF. */
 const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: SheetContext): SpreadsheetError | boolean => {
   const { globals, part } = context
+  // a formula's string result comes right after it, or after its SHRFMLA, ARRAY or TABLE
+  // (any of them maybe continued by CONTINUE records, which are part of it). Any other
+  // record ends the wait, an embedded substream's BOF too, so this comes before skipping it
+  if (
+    rows.pendingString !== undefined && record.type !== STRING && record.type !== SHRFMLA && record.type !== ARRAY &&
+    record.type !== TABLE && record.type !== CONTINUE
+  ) {
+    const pending = rows.pendingString
+    rows.pendingString = undefined
+    const error = rows.cell(pending.row, Cell.text(pending.column, "", pending.meta))
+    if (error !== undefined) return error
+  }
   // embedded substreams (chart objects) sit between BOF and EOF inside the sheet: skipped
   if (record.type === BOF_BIFF5_8) {
     rows.nested++
@@ -428,17 +440,6 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
   const f = new Fields(record.data)
   const truncated = () => malformed(part, `truncated record 0x${record.type.toString(16)}`, record.offset)
   const tooLong = () => new LimitExceeded({ limit: "maxStringLength", max: context.limits.maxStringLength, actual: context.limits.maxStringLength + 1 })
-  // a formula's string result comes right after it, or after its SHRFMLA, ARRAY or TABLE
-  // (any of them maybe continued by CONTINUE records, which are part of it)
-  if (
-    rows.pendingString !== undefined && record.type !== STRING && record.type !== SHRFMLA && record.type !== ARRAY &&
-    record.type !== TABLE && record.type !== CONTINUE
-  ) {
-    const pending = rows.pendingString
-    rows.pendingString = undefined
-    const error = rows.cell(pending.row, Cell.text(pending.column, "", pending.meta))
-    if (error !== undefined) return error
-  }
   const rc = (): readonly [number, number, number] | undefined => {
     const row = f.u16(0)
     const col = f.u16(2)
