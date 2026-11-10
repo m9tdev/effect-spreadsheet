@@ -287,6 +287,46 @@ describe("xlsx: row order", () => {
   })
 })
 
+describe("xlsx: rows completed before an error", () => {
+  const sheet = (data: string): TestWorkbook => ({ sheets: [{ name: "S", data }] })
+  /** The rows a consumer sees before the stream ends or fails, and the error. */
+  const untilError = async (bytes: Uint8Array, limits?: LimitOverrides) => {
+    const wb = await Effect.runPromise(Xlsx.read(bytes))
+    const seen: Array<Workbook.Row> = []
+    const exit = await Effect.runPromiseExit(Stream.runForEach(Workbook.rows(wb, 0, { limits }), (row) => Effect.sync(() => seen.push(row))))
+    return { indexes: seen.map((row) => row.index), error: failureOf(exit) }
+  }
+  const row = (r: number, cells = `<c r="A${r}"><v>${r}</v></c>`) => `<row r="${r}">${cells}</row>`
+  const tenRows = Array.from({ length: 10 }, (_, k) => row(k + 1)).join("")
+
+  it("come out before the error when they share its piece", async () => {
+    const bad = await untilError(await xlsx(sheet(tenRows + row(4))))
+    expect(bad.indexes).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    expect(bad.error).toMatchObject({ _tag: "MalformedFile", reason: "row 4 after row 10" })
+    const limited = await untilError(await xlsx(sheet(tenRows)), { maxRows: 5 })
+    expect(limited.indexes).toEqual([0, 1, 2, 3, 4])
+    expect(limited.error).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows" })
+  })
+
+  it("don't depend on where the part is split into pieces", async () => {
+    // the same rows and bad row, in one piece, or with a row of 10 000
+    // cells (about 200 KB of XML) that puts rows 1-5 in an earlier piece
+    let filler = ""
+    for (let k = 0; k < 10_000; k++) filler += `<c><v>${k}</v></c>`
+    const small = await untilError(await xlsx(sheet(tenRows + row(4))))
+    const big = await untilError(await xlsx(sheet(Array.from({ length: 10 }, (_, k) => k === 5 ? row(6, filler) : row(k + 1)).join("") + row(4))))
+    expect(small.indexes).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    expect(small.error).toMatchObject({ _tag: "MalformedFile", reason: "row 4 after row 10" })
+    expect(big).toEqual(small)
+  })
+
+  it("can be taken without the error when it is in their piece", async () => {
+    const wb = await Effect.runPromise(Xlsx.read(await xlsx(sheet(tenRows + row(4)))))
+    const first = Array.from(await Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 3))))
+    expect(values(first)).toEqual([[0, false, [[0, "Number", 1]]], [1, false, [[0, "Number", 2]]], [2, false, [[0, "Number", 3]]]])
+  })
+})
+
 describe("xlsx: where a cell's value comes from", () => {
   const firstCells = async (data: string) => {
     const { sheets } = await readOk({ sharedStrings: ["sst0", "sst1"], sheets: [{ name: "S", data: `<row r="1">${data}</row>` }] })

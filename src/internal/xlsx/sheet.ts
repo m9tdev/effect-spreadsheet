@@ -28,11 +28,15 @@
  * - Nothing is sized by the declared `<dimension>`; cost follows the cells
  *   present. Limits: row and column indexes, rows and cells per sheet,
  *   string lengths, and the XML limits.
+ * - On an error (malformed input, a limit), the rows completed before it
+ *   come out first, then the stream fails with it. So the rows seen before
+ *   the error don't depend on where the input is split into pieces.
  *
  * @internal
  */
 import { Cause, Effect, Pull, Stream } from "effect"
 import type * as Arr from "effect/Array"
+import { absurd } from "effect/Function"
 import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
@@ -380,6 +384,19 @@ export class SheetRows implements XmlHandler {
   }
 }
 
+/**
+ * Where a sheet's row stream is: reading input; failing, with the rows
+ * completed before the error already emitted; or done (the input ended,
+ * or the error was raised). Shared with the XLSB reader.
+ */
+export type PullState =
+  | { readonly _tag: "Reading" }
+  | { readonly _tag: "Failing"; readonly error: SpreadsheetError }
+  | { readonly _tag: "Done" }
+
+export const READING: PullState = { _tag: "Reading" }
+export const DONE: PullState = { _tag: "Done" }
+
 /** Rows of a worksheet part, given its byte stream. Re-runnable when the input is. */
 export const sheetRows = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,
@@ -391,17 +408,29 @@ export const sheetRows = (
       const decoder = new XmlDecoder(context.part)
       const tokenizer = new XmlTokenizer(rows, context.limits, context.part)
       const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
-      let done = false
+      let state: PullState = READING
       const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
         // progress: each iteration pulls one upstream piece (consumed), or
-        // ends the input (done is set), or ends the stream
+        // ends the input (Done), or ends the stream (Failing goes to Done)
         while (true) {
-          if (done) return yield* Cause.done()
+          switch (state._tag) {
+            case "Reading":
+              break
+            case "Failing": {
+              const error = state.error
+              state = DONE
+              return yield* Effect.fail(error)
+            }
+            case "Done":
+              return yield* Cause.done()
+            default:
+              return absurd(state)
+          }
           yield* Effect.yieldNow
           const chunk = yield* pullUpstream
           let error: SpreadsheetError | undefined
           if (chunk === undefined) {
-            done = true
+            state = DONE
             const rest = decoder.end()
             error = typeof rest === "string" ? (tokenizer.feed(rest) ?? tokenizer.end()) : rest
           } else {
@@ -412,10 +441,8 @@ export const sheetRows = (
               if (error !== undefined) break
             }
           }
-          if (error !== undefined) {
-            done = true
-            return yield* Effect.fail(error)
-          }
+          // the rows completed before the error come out first; the error on the next pull
+          if (error !== undefined) state = { _tag: "Failing", error }
           if (rows.out.length > 0) {
             const out = rows.out
             rows.out = []

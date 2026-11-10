@@ -253,6 +253,45 @@ describe("xlsb reader", () => {
     expect(values(first)).toEqual([[0, false, [[0, "Number", 0]]], [1, false, [[0, "Number", 1]]]])
   })
 
+  describe("rows completed before an error", () => {
+    /** The rows a consumer sees before the stream ends or fails, and the error. */
+    const untilError = async (bytes: Uint8Array, limits?: LimitOverrides) => {
+      const wb = await Effect.runPromise(Xlsb.read(bytes))
+      const seen: Array<Workbook.Row> = []
+      const exit = await Effect.runPromiseExit(Stream.runForEach(Workbook.rows(wb, 0, { limits }), (row) => Effect.sync(() => seen.push(row))))
+      return { indexes: seen.map((row) => row.index), error: failureOf(exit) }
+    }
+    const tenRows = Array.from({ length: 10 }, (_, r) => [B.rowHdr(r), B.rk(0, B.rkInt(r))]).flat()
+
+    it("come out before the error when they share its slice", async () => {
+      const bad = await untilError(await B.xlsb(one([...tenRows, B.rowHdr(3)])))
+      expect(bad.indexes).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+      expect(bad.error).toMatchObject({ _tag: "MalformedFile", reason: "row 4 after row 10" })
+      const limited = await untilError(await B.xlsb(one(tenRows)), { maxRows: 5 })
+      expect(limited.indexes).toEqual([0, 1, 2, 3, 4])
+      expect(limited.error).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows" })
+    })
+
+    it("don't depend on where the part is split into slices", async () => {
+      // the same rows and bad row header, in one slice, or with a row of
+      // 7000 blank cells (about 70 KB) that puts rows 0-4 in an earlier slice
+      const filler = Array.from({ length: 7000 }, (_, k) => B.blank(k))
+      const rows = (r: number) => r === 5 ? [B.rowHdr(5), ...filler] : [B.rowHdr(r)]
+      const small = await untilError(await B.xlsb(one([...Array.from({ length: 10 }, (_, r) => B.rowHdr(r)), B.rowHdr(3)])))
+      const big = await untilError(await B.xlsb(one([...Array.from({ length: 10 }, (_, r) => rows(r)).flat(), B.rowHdr(3)])))
+      for (const read of [small, big]) {
+        expect(read.indexes).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+        expect(read.error).toMatchObject({ _tag: "MalformedFile", reason: "row 4 after row 10" })
+      }
+    })
+
+    it("can be taken without the error when it is in their slice", async () => {
+      const wb = await Effect.runPromise(Xlsb.read(await B.xlsb(one([...tenRows, B.rowHdr(3)]))))
+      const first = Array.from(await Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 3))))
+      expect(values(first)).toEqual([[0, false, [[0, "Number", 0]]], [1, false, [[0, "Number", 1]]], [2, false, [[0, "Number", 2]]]])
+    })
+  })
+
   it("stored (uncompressed) parts read the same as deflated ones", async () => {
     const book = one([B.rowHdr(2, true), B.isst(1, 0)], { strings: ["x"], method: "store" })
     const { sheets } = await readOk(book)
