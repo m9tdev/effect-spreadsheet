@@ -265,6 +265,20 @@ describe("xlsx: row order", () => {
     expect(await errorOf(sheet(`<row r="3"/><row><c><v>1</v></c><c r="B7"><v>2</v></c></row>`))).toMatchObject(malformedAt(`cell "B7" in row 4`))
   })
 
+  it("a row without r starts afresh: the previous row + 1, columns from A, not hidden", async () => {
+    const { sheets } = await readOk(sheet(
+      `<row r="2" hidden="1"><c r="C2"><v>1</v></c></row><row><c><v>2</v></c><c><v>3</v></c></row>` +
+        `<row r="6" hidden="1"><c r="D6"><v>4</v></c></row><row/><row><c r="A9"><v>5</v></c></row>`
+    ))
+    expect(values(sheets[0]!)).toEqual([
+      [1, true, [[2, "Number", 1]]],
+      [2, false, [[0, "Number", 2], [1, "Number", 3]]],
+      [5, true, [[3, "Number", 4]]],
+      [6, false, []],
+      [8, false, [[0, "Number", 5]]]
+    ])
+  })
+
   it("a cell whose reference names another row than its row is MalformedFile", async () => {
     expect(await errorOf(sheet(`<row r="1"><c r="A5"><v>1</v></c></row>`))).toMatchObject(malformedAt(`cell "A5" in row 1`))
     // a row without r takes its first cell's row; a later cell must agree
@@ -426,6 +440,10 @@ describe("xlsx: where a cell's value comes from", () => {
     expect(await firstCells(`<c r="A1"><v>1</v><extLst><ext uri="x"><v>9</v><f>Z</f></ext></extLst></c>`)).toEqual([[0, "Number", 1, undefined]])
     expect(await firstCells(`<c r="A1" t="inlineStr"><extLst><ext uri="x"><is><t>q</t></is></ext></extLst><is><t>x</t></is></c>`))
       .toEqual([[0, "Text", "x", undefined]])
+    // text around an element nested in the <v> or <f> is kept, the element's own text isn't
+    expect(await firstCells(`<c r="A1"><f>1<x>9</x>+1</f><v>1<x>9</x>2</v></c>`)).toEqual([[0, "Number", 12, "1+1"]])
+    // an inline string's text spans its runs
+    expect(await firstCells(`<c r="A1" t="inlineStr"><is><r><t>a</t></r><r><rPr/><t>b</t></r></is><v>9</v></c>`)).toEqual([[0, "Text", "ab", undefined]])
     // an element named is inside the inline string doesn't end it
     expect(await firstCells(`<c r="A1" t="inlineStr"><is><t>x</t><extLst><is/></extLst><t>y</t></is></c>`)).toEqual([[0, "Text", "xy", undefined]])
   })

@@ -73,11 +73,37 @@ interface PendingCell {
   /** The text of the first `<f>`. */
   formula: Array<string> | undefined
   formulaLength: number
-  /** Inside the first `<is>`. */
-  inline: boolean
   /** The first `<is>`'s text, unescaped. Used only by an inline string (or a cell without `t` and `<v>`). */
   inlineValue: string | undefined
+  /** The direct child the tokenizer is in, which says where text goes. */
+  child: CellChild
 }
+
+/**
+ * Which direct child of a cell is open: none (between its children, or in
+ * one that doesn't count: a repeated `<v>`/`<f>`/`<is>`, or another element),
+ * its first `<v>` (text goes to the value), its first `<f>` (to the formula),
+ * or its first `<is>` (to the inline string).
+ */
+type CellChild = "none" | "value" | "formula" | "inline"
+
+/** The open row's fields, whether its index is known yet or not. */
+interface RowFields {
+  readonly hidden: boolean
+  readonly cells: Array<Cell.Cell>
+  /** `cells` is in strictly increasing column order. */
+  sorted: boolean
+  lastColumn: number
+}
+
+/**
+ * The open row: numbered (by its `r`, or by its first cell), or unnumbered
+ * (a row without `r` before its first cell, which decides the index; a row
+ * without `r` or cells is the previous row + 1).
+ */
+type OpenRow =
+  | RowFields & { readonly _tag: "Numbered"; readonly index: number }
+  | RowFields & { readonly _tag: "Unnumbered"; readonly index: undefined }
 
 /**
  * Sorts a row's cells by column in place, keeping the last cell of each
@@ -104,18 +130,12 @@ export class SheetRows implements XmlHandler {
   private rowCount = 0
 
   private inSheetData = false
-  /** The open row's index; -1 until its first cell decides it (a row without `r`). */
-  private rowIndex: number | undefined
-  private rowHidden = false
-  private rowCells: Array<Cell.Cell> = []
-  /** `rowCells` is in strictly increasing column order. */
-  private rowSorted = true
-  private lastColumn = -1
+  /** The open row, if any (only inside the sheet data). */
+  private row: OpenRow | undefined
   private previousRow = -1
 
+  /** The open cell, if any (only inside a row). */
   private cell: PendingCell | undefined
-  /** Where cell text goes: the value, the formula, or the inline string. */
-  private target: "value" | "formula" | undefined
   /**
    * Elements open inside the cell: 0 between its own children. Only its
    * direct children give its value, and only its own end tag closes it, so
@@ -133,24 +153,15 @@ export class SheetRows implements XmlHandler {
   }
 
   open = (name: string, attributes: XmlAttributes): SpreadsheetError | undefined => {
-    if (this.cell !== undefined) {
+    const cell = this.cell
+    if (cell !== undefined) {
       const depth = this.depth++
-      if (this.cell.inline) {
+      if (cell.child === "inline") {
         this.rich.open(name)
         return undefined
       }
-      if (depth > 0) return undefined
-      // the first <v>, <f> and <is> count; a repeated one is skipped, not appended
-      if (name === "v") {
-        this.target = this.cell.value === undefined ? "value" : undefined
-        this.cell.value ??= []
-      } else if (name === "f") {
-        this.target = this.cell.formula === undefined ? "formula" : undefined
-        this.cell.formula ??= []
-      } else if (name === "is" && this.cell.inlineValue === undefined) {
-        this.cell.inline = true
-        this.rich.take()
-      }
+      // a direct child (between children, no child is open)
+      if (depth === 0) cell.child = this.openChild(cell, name)
       return undefined
     }
     if (name === "sheetData") {
@@ -162,10 +173,10 @@ export class SheetRows implements XmlHandler {
     if (!this.inSheetData) return undefined
     if (name === "row") {
       // a nested one would replace the open row, dropping its cells
-      if (this.rowIndex !== undefined) return malformed("<row> inside a <row>", this.context.part)
+      if (this.row !== undefined) return malformed("<row> inside a <row>", this.context.part)
       return this.openRow(attributes)
     }
-    if (name === "c" && this.rowIndex !== undefined) return this.openCell(attributes)
+    if (name === "c" && this.row !== undefined) return this.openCell(this.row, attributes)
     return undefined
   }
 
@@ -175,19 +186,16 @@ export class SheetRows implements XmlHandler {
       const depth = --this.depth
       // below 0: the cell's own </c>
       if (depth < 0) return this.closeCell(cell)
-      if (cell.inline) {
-        if (depth === 0) {
-          // </is>
-          cell.inline = false
-          cell.inlineValue = this.rich.take()
-        } else this.rich.close(name)
+      if (depth > 0) {
+        if (cell.child === "inline") this.rich.close(name)
         return undefined
       }
-      // the end of a direct child: <v>, <f> or another
-      if (depth === 0) this.target = undefined
+      // the end of a direct child: <v>, <f>, <is> or another
+      if (cell.child === "inline") cell.inlineValue = this.rich.take()
+      cell.child = "none"
       return undefined
     }
-    if (name === "row" && this.rowIndex !== undefined) return this.closeRow()
+    if (name === "row" && this.row !== undefined) return this.closeRow(this.row)
     if (name === "sheetData") this.inSheetData = false
     return undefined
   }
@@ -195,20 +203,54 @@ export class SheetRows implements XmlHandler {
   text = (value: string): SpreadsheetError | undefined => {
     const cell = this.cell
     if (cell === undefined) return undefined
-    if (cell.inline) return this.rich.text(value)
-    // text directly in the <v> or <f>, not in an element nested in it
-    if (this.depth !== 1) return undefined
-    const max = this.context.limits.maxStringLength
-    if (this.target === "value") {
-      cell.value!.push(value)
-      cell.valueLength += value.length
-      if (cell.valueLength > max) return new LimitExceeded({ limit: "maxStringLength", max, actual: cell.valueLength })
-    } else if (this.target === "formula") {
-      cell.formula!.push(value)
-      cell.formulaLength += value.length
-      if (cell.formulaLength > max) return new LimitExceeded({ limit: "maxStringLength", max, actual: cell.formulaLength })
+    switch (cell.child) {
+      case "none":
+        return undefined
+      case "inline":
+        return this.rich.text(value)
+      case "value": {
+        // text directly in the <v>, not in an element nested in it
+        if (this.depth !== 1) return undefined
+        cell.value!.push(value)
+        cell.valueLength += value.length
+        const max = this.context.limits.maxStringLength
+        if (cell.valueLength > max) return new LimitExceeded({ limit: "maxStringLength", max, actual: cell.valueLength })
+        return undefined
+      }
+      case "formula": {
+        // text directly in the <f>, not in an element nested in it
+        if (this.depth !== 1) return undefined
+        cell.formula!.push(value)
+        cell.formulaLength += value.length
+        const max = this.context.limits.maxStringLength
+        if (cell.formulaLength > max) return new LimitExceeded({ limit: "maxStringLength", max, actual: cell.formulaLength })
+        return undefined
+      }
+      default:
+        return absurd(cell.child)
     }
-    return undefined
+  }
+
+  /**
+   * The child a direct child element of the cell opens. Only the first
+   * `<v>`, `<f>` and `<is>` count; a repeated one is skipped, not appended.
+   */
+  private openChild(cell: PendingCell, name: string): CellChild {
+    if (name === "v") {
+      if (cell.value !== undefined) return "none"
+      cell.value = []
+      return "value"
+    }
+    if (name === "f") {
+      if (cell.formula !== undefined) return "none"
+      cell.formula = []
+      return "formula"
+    }
+    if (name === "is" && cell.inlineValue === undefined) {
+      this.rich.take()
+      return "inline"
+    }
+    return "none"
   }
 
   private openRow(attributes: XmlAttributes): SpreadsheetError | undefined {
@@ -223,21 +265,17 @@ export class SheetRows implements XmlHandler {
       if (index < 0) return malformed("row number 0", this.context.part)
       if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
       if (index <= this.previousRow) return this.backwards(index)
-      this.rowIndex = index
+      this.row = { _tag: "Numbered", index, hidden: isTrue(attr(attributes, "hidden")), cells: [], sorted: true, lastColumn: -1 }
     } else {
       // decided by the first cell's reference, or previous + 1, at the first cell / row end
-      this.rowIndex = -1
+      this.row = { _tag: "Unnumbered", index: undefined, hidden: isTrue(attr(attributes, "hidden")), cells: [], sorted: true, lastColumn: -1 }
     }
-    this.rowHidden = isTrue(attr(attributes, "hidden"))
-    this.rowCells = []
-    this.rowSorted = true
-    this.lastColumn = -1
     return undefined
   }
 
-  private openCell(attributes: XmlAttributes): SpreadsheetError | undefined {
+  private openCell(open: OpenRow, attributes: XmlAttributes): SpreadsheetError | undefined {
     const limits = this.context.limits
-    let column = this.lastColumn + 1
+    let column = open.lastColumn + 1
     let row: number | undefined
     const r = attr(attributes, "r")
     if (r !== undefined) {
@@ -248,19 +286,28 @@ export class SheetRows implements XmlHandler {
       column = ref.column
       row = ref.row
     }
-    if (this.rowIndex === -1) {
-      // a row without `r`: its first cell decides, by its reference or as the previous row + 1
-      const index = row ?? this.previousRow + 1
-      if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
-      if (index <= this.previousRow) return this.backwards(index)
-      this.rowIndex = index
-    } else if (row !== undefined && row !== this.rowIndex) {
-      return malformed(`cell ${JSON.stringify(r!.slice(0, 20))} in row ${this.rowIndex! + 1}`, this.context.part)
+    switch (open._tag) {
+      case "Unnumbered": {
+        // a row without `r`: its first cell decides, by its reference or as the previous row + 1
+        const index = row ?? this.previousRow + 1
+        if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
+        if (index <= this.previousRow) return this.backwards(index)
+        open = { _tag: "Numbered", index, hidden: open.hidden, cells: open.cells, sorted: open.sorted, lastColumn: open.lastColumn }
+        this.row = open
+        break
+      }
+      case "Numbered":
+        if (row !== undefined && row !== open.index) {
+          return malformed(`cell ${JSON.stringify(r!.slice(0, 20))} in row ${open.index + 1}`, this.context.part)
+        }
+        break
+      default:
+        return absurd(open)
     }
     if (column >= limits.maxColumns) {
       return new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: column + 1 })
     }
-    this.lastColumn = column
+    open.lastColumn = column
     const s = attr(attributes, "s")
     this.cell = {
       column,
@@ -270,37 +317,37 @@ export class SheetRows implements XmlHandler {
       valueLength: 0,
       formula: undefined,
       formulaLength: 0,
-      inline: false,
-      inlineValue: undefined
+      inlineValue: undefined,
+      child: "none"
     }
-    this.target = undefined
     this.depth = 0
     return undefined
   }
 
   private closeCell(pending: PendingCell): SpreadsheetError | undefined {
     this.cell = undefined
-    this.target = undefined
     this.depth = 0
+    // a cell is only open inside a row (opened by its first cell, if it had no `r`)
+    const open = this.row!
     const cell = this.toCell(pending)
     if (cell instanceof MalformedFile) return cell
     const max = this.context.limits.maxCellsPerSheet
     if (++this.cells > max) return new LimitExceeded({ limit: "maxCellsPerSheet", max, actual: this.cells })
-    const cells = this.rowCells
-    if (cells.length > 0 && cell.column <= cells[cells.length - 1]!.column) this.rowSorted = false
+    const cells = open.cells
+    if (cells.length > 0 && cell.column <= cells[cells.length - 1]!.column) open.sorted = false
     cells.push(cell)
     // repeated columns don't pile up: past 2 x maxColumns cells an unsorted
     // row is compacted (to at most maxColumns), so the work is amortized
-    if (!this.rowSorted && cells.length > 2 * this.context.limits.maxColumns) {
+    if (!open.sorted && cells.length > 2 * this.context.limits.maxColumns) {
       compact(cells)
-      this.rowSorted = true
+      open.sorted = true
     }
     return undefined
   }
 
   /** Cells held for the open row (for tests). */
   get heldCells(): number {
-    return this.rowCells.length
+    return this.row === undefined ? 0 : this.row.cells.length
   }
 
   private toCell(pending: PendingCell): Cell.Cell | MalformedFile {
@@ -376,19 +423,28 @@ export class SheetRows implements XmlHandler {
     return malformed(`row ${index + 1} after row ${this.previousRow + 1}`, this.context.part)
   }
 
-  private closeRow(): SpreadsheetError | undefined {
+  private closeRow(open: OpenRow): SpreadsheetError | undefined {
     const limits = this.context.limits
-    let index = this.rowIndex!
-    if (index === -1) index = this.previousRow + 1
+    let index: number
+    switch (open._tag) {
+      case "Numbered":
+        index = open.index
+        break
+      case "Unnumbered":
+        // a row without `r` or cells
+        index = this.previousRow + 1
+        break
+      default:
+        return absurd(open)
+    }
     if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
     if (++this.rowCount > limits.maxRows) {
       return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: this.rowCount })
     }
-    const cells = this.rowSorted ? this.rowCells : compact(this.rowCells)
-    this.out.push({ index, hidden: this.rowHidden, cells })
+    const cells = open.sorted ? open.cells : compact(open.cells)
+    this.out.push({ index, hidden: open.hidden, cells })
     this.previousRow = index
-    this.rowIndex = undefined
-    this.rowCells = []
+    this.row = undefined
     return undefined
   }
 }
