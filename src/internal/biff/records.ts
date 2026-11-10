@@ -94,8 +94,8 @@ export class RecordReader {
     const first = this.next()
     if (first === undefined || first instanceof MalformedFile) return first
     const gathering = this.startContinues(first, maxBytes, limit)
-    const done = this.continues(gathering, Infinity)
-    return done === true ? continued(gathering) : done === false ? undefined : done
+    // with no bound, gather reads up to the last CONTINUE: the record is whole
+    return this.gather(gathering, Infinity) ?? record(gathering)
   }
 
   /** Starts gathering the `CONTINUE`s after `first` (a record this reader just read), within `maxBytes` (named `limit`). */
@@ -109,14 +109,21 @@ export class RecordReader {
   /**
    * Reads at most `max` more of the `CONTINUE` records after `gathering`'s
    * record (see `nextWithContinues`), so that a long run of them can be
-   * read in bounded steps: true once the next record isn't a `CONTINUE`
-   * (then `continued` gives the record), false while some may be left.
+   * read in bounded steps: `Done` with the whole record once the next
+   * record isn't a `CONTINUE` (again on every later call, which reads
+   * nothing), `More` while some may be left.
    */
-  continues(gathering: Gathering, max: number): boolean | MalformedFile | LimitExceeded {
-    const g = gathering
+  continues(gathering: Gathering, max: number): Gathered | MalformedFile | LimitExceeded {
+    const failed = this.gather(gathering, max)
+    if (failed !== undefined) return failed
+    return this.peekType() === CONTINUE ? MORE : { _tag: "Done", record: record(gathering) }
+  }
+
+  /** Reads `CONTINUE`s into `g` until the next record isn't one, or `max` of them. */
+  private gather(g: Gathering, max: number): MalformedFile | LimitExceeded | undefined {
     // progress: each iteration consumes one CONTINUE record (offset grows by 4 + length), at most max
     for (let k = 0; k < max; k++) {
-      if (this.offset + 4 > this.end || this.view.getUint16(this.offset, true) !== CONTINUE) return true
+      if (this.offset + 4 > this.end || this.view.getUint16(this.offset, true) !== CONTINUE) return undefined
       const at = this.offset
       const length = this.view.getUint16(at + 2, true)
       const end = at + 4 + length
@@ -135,7 +142,7 @@ export class RecordReader {
       g.bounds[2 * g.count + 1] = end
       g.count++
     }
-    return this.offset + 4 > this.end || this.view.getUint16(this.offset, true) !== CONTINUE
+    return undefined
   }
 }
 
@@ -152,8 +159,18 @@ export interface Gathering {
   total: number
 }
 
-/** The record and its `CONTINUE`s gathered so far. */
-export const continued = (g: Gathering): ContinuedRecord => {
+/**
+ * Where a gathering stands after a step (`RecordReader.continues`): `More`
+ * while `CONTINUE`s may be left, or `Done` with the record and all of them.
+ */
+export type Gathered =
+  | { readonly _tag: "More" }
+  | { readonly _tag: "Done"; readonly record: ContinuedRecord }
+
+const MORE: Gathered = { _tag: "More" }
+
+/** The record and its `CONTINUE`s, once all are read. */
+const record = (g: Gathering): ContinuedRecord => {
   // a view of the used part, no copy (at most 2x the used size is kept)
   return { ...g.first, segments: { bytes: g.bytes, bounds: g.bounds.subarray(0, 2 * g.count), count: g.count } }
 }

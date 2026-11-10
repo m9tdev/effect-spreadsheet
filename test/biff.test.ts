@@ -130,6 +130,75 @@ describe("biff records", () => {
   })
 })
 
+describe("biff CONTINUE gathering in bounded steps", () => {
+  // an SST with three CONTINUEs (one of them empty), then an EOF
+  const stream = concat([record(0x00FC, [1]), record(CONTINUE, [2, 3]), record(CONTINUE, []), record(CONTINUE, [4]), record(0x000A, [])])
+  const start = (bytes: Uint8Array, maxBytes = 100) => {
+    const reader = new RecordReader(bytes, "Workbook")
+    const first = reader.next()
+    if (first === undefined || first instanceof MalformedFile) throw new Error("expected a record")
+    return { reader, gathering: reader.startContinues(first, maxBytes, "maxDecompressedBytes") }
+  }
+
+  it("a step that reaches its bound before the last CONTINUE is More; a later one is Done with every segment", () => {
+    const { gathering, reader } = start(stream)
+    expect(reader.continues(gathering, 1)).toEqual({ _tag: "More" })
+    expect(reader.continues(gathering, 1)).toEqual({ _tag: "More" })
+    const done = reader.continues(gathering, 1)
+    if (done._tag !== "Done") throw new Error(`expected Done, got ${done._tag}`)
+    expect(done.record.type).toBe(0x00FC)
+    expect(listSegments(done.record.segments)).toEqual([[1], [2, 3], [4]])
+    expect(reader.peekType()).toBe(0x000A)
+  })
+
+  it("the record from bounded steps equals the one nextWithContinues gives", () => {
+    const { gathering, reader } = start(stream)
+    let step = reader.continues(gathering, 1)
+    // progress: each More step consumes one CONTINUE, and there are three
+    while (step._tag === "More") step = reader.continues(gathering, 1)
+    if (step._tag !== "Done") throw new Error(`expected Done, got ${step._tag}`)
+    const whole = new RecordReader(stream, "Workbook").nextWithContinues(100, "maxDecompressedBytes")
+    if (whole === undefined || "_tag" in whole) throw new Error("expected a record")
+    expect({ ...step.record, segments: listSegments(step.record.segments) }).toEqual({ ...whole, segments: listSegments(whole.segments) })
+  })
+
+  it("a step after Done is Done again and reads nothing", () => {
+    const { gathering, reader } = start(stream)
+    expect(reader.continues(gathering, 10)._tag).toBe("Done")
+    const records = reader.records
+    const offset = reader.offset
+    const again = reader.continues(gathering, 10)
+    if (again._tag !== "Done") throw new Error(`expected Done, got ${again._tag}`)
+    expect(listSegments(again.record.segments)).toEqual([[1], [2, 3], [4]])
+    expect([reader.records, reader.offset]).toEqual([records, offset])
+  })
+
+  it("a step that goes past the byte limit is LimitExceeded, after some More steps", () => {
+    // 4 records' headers + 4 bytes = 20: the last CONTINUE goes over 19
+    const { gathering, reader } = start(stream, 19)
+    expect(reader.continues(gathering, 1)._tag).toBe("More")
+    expect(reader.continues(gathering, 1)._tag).toBe("More")
+    expect(reader.continues(gathering, 1)).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 19, actual: 20 })
+  })
+
+  it("an empty CONTINUE counts towards the limit but adds no segment", () => {
+    const empties = concat([record(0x00FC, [1]), record(CONTINUE, []), record(CONTINUE, [])])
+    // two empty CONTINUEs: 5 + 4 + 4 = 13 bytes
+    const fits = start(empties, 13)
+    const done = fits.reader.continues(fits.gathering, 10)
+    if (done._tag !== "Done") throw new Error(`expected Done, got ${done._tag}`)
+    expect(listSegments(done.record.segments)).toEqual([[1]])
+    const over = start(empties, 12)
+    expect(over.reader.continues(over.gathering, 10)).toMatchObject({ _tag: "LimitExceeded", max: 12, actual: 13 })
+  })
+
+  it("a CONTINUE that runs past the end of the stream is MalformedFile", () => {
+    const cut = concat([record(0x00FC, [1]), record(CONTINUE, [2, 3])]).subarray(0, 10)
+    const { gathering, reader } = start(cut)
+    expect(reader.continues(gathering, 10)).toMatchObject({ _tag: "MalformedFile" })
+  })
+})
+
 /** Encodes `text` as an SST entry split into segments at `cuts` (character positions), as Excel would. */
 const splitString = (text: string, wide: boolean, cuts: ReadonlyArray<number>, extra: { runs?: number; ext?: number } = {}) => {
   const header = [text.length & 0xFF, text.length >> 8, (wide ? 1 : 0) | (extra.runs ? 0x08 : 0) | (extra.ext ? 0x04 : 0)]

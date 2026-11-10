@@ -550,6 +550,33 @@ describe("xls globals: long work yields", () => {
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
   })
 
+  it("an SST, SUPBOOK, EXTERNSHEET and NAME each gathered across batches go on to their strings, sheet names or entries", async () => {
+    // each record split in two, with more empty CONTINUEs than a batch holds between the parts
+    const empties = Array.from({ length: BATCH_RECORDS + 1 }, () => X.record(CONTINUE, []))
+    const split = (whole: Uint8Array, cut: number) => {
+      const data = Array.from(whole)
+      return [X.record(whole[0] | (whole[1] << 8), data.slice(4, 4 + cut)), ...empties, X.record(CONTINUE, data.slice(4 + cut))]
+    }
+    const sst = X.record(SST, [...X.u32(2), ...X.u32(2), ...X.xlString("first"), ...X.xlString("second")])
+    const external = externalBook("\u0001far.xls", ["Away", "There"])
+    const externSheet = xtis([[0, 0, 0], [1, 1, 1]])
+    const name = X.name("Far", ref3d(0x3A, 1, 0, 0))
+    const run = await turns(
+      [
+        ...split(sst, 8 + X.xlString("first").length),
+        selfBook(1),
+        ...split(external, 2 + X.xlString("\u0001far.xls").length),
+        ...split(externSheet, 2 + 6),
+        ...split(name, name.length - 4 - 3),
+        X.name("Near", ref3d(0x3A, 0, 0, 0))
+      ],
+      [X.labelSst(0, 0, 0, 0), X.labelSst(1, 0, 0, 1)]
+    )
+    expect(run.batches).toBeGreaterThanOrEqual(4)
+    expect(await texts(run.value)).toEqual(["first", "second"])
+    expect(formulas(run.value)).toEqual({ Far: "[1]There!$A$1", Near: "S!$A$1" })
+  })
+
   it("many defined names are read and resolved with yields", async () => {
     const records = 8 * BATCH_RECORDS
     const run = await turns([X.externSheet([0]), ...Array.from({ length: records }, (_, k) => X.name(`N${k}`, X.ref3d(0, k % 65536, 0)))])
