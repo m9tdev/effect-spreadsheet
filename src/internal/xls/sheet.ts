@@ -28,7 +28,7 @@
  *
  * @internal
  */
-import { Cause, Effect, Stream } from "effect"
+import { absurd, Cause, Effect, Stream } from "effect"
 import type * as Arr from "effect/Array"
 import type * as Pull from "effect/Pull"
 import * as Cell from "../../Cell.ts"
@@ -207,6 +207,18 @@ const compact = (cells: Array<Cell.Cell>): Array<Cell.Cell> => {
   return cells
 }
 
+/**
+ * The wait for a formula's text result: none, or after a FORMULA whose
+ * string result comes in the next STRING record (MS-XLS: FORMULA, then
+ * maybe SHRFMLA, ARRAY or TABLE, then STRING, any of them maybe continued
+ * by CONTINUE records).
+ */
+export type FormulaWait =
+  | { readonly _tag: "Idle" }
+  | { readonly _tag: "AwaitingString"; readonly row: number; readonly column: number }
+
+const IDLE: FormulaWait = { _tag: "Idle" }
+
 interface OpenRow {
   cells: Array<Cell.Cell>
   /** Columns came in increasing order so far. */
@@ -256,13 +268,19 @@ export class Rows {
   budget = Infinity
   /** Depth of substreams nested in this one (embedded charts: BOF ... EOF). */
   nested = 0
-  /** A FORMULA whose text result comes in the next STRING record. */
-  pendingString: { column: number; row: number; meta: Cell.Meta | undefined } | undefined
+  /** Whether a FORMULA waits for its text result in the next STRING record (see `handle`). */
+  wait: FormulaWait = IDLE
 
   private readonly context: SheetContext
 
   constructor(context: SheetContext) {
     this.context = context
+  }
+
+  /** Whether row `index` waits for its formula's STRING. */
+  private waiting(index: number): boolean {
+    const wait = this.wait
+    return wait._tag === "AwaitingString" && wait.row === index
   }
 
   /** Where each row's cells end and the rows ROW records declare and hide, from the `RowScan`. */
@@ -333,7 +351,7 @@ export class Rows {
     while (this.nextRow < this.order.length && this.nextAt <= offset && this.effort < this.budget) {
       work.steps++
       const index = this.order[this.nextRow]!
-      if (this.pendingString?.row === index) return undefined
+      if (this.waiting(index)) return undefined
       this.nextRow++
       this.nextAt = this.nextRow < this.order.length ? this.lastAt.get(this.order[this.nextRow]!)! : Infinity
       const error = this.finishRow(index)
@@ -344,7 +362,7 @@ export class Rows {
 
   /** Whether rows complete at `offset` are left for `complete` (it stopped at the budget). */
   behind(offset: number): boolean {
-    return this.nextRow < this.order.length && this.nextAt <= offset && this.pendingString?.row !== this.order[this.nextRow]
+    return this.nextRow < this.order.length && this.nextAt <= offset && !this.waiting(this.order[this.nextRow]!)
   }
 
   cell(row: number, cell: Cell.Cell): SpreadsheetError | undefined {
@@ -418,15 +436,22 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
   const { globals, part } = context
   // a formula's string result comes right after it, or after its SHRFMLA, ARRAY or TABLE
   // (any of them maybe continued by CONTINUE records, which are part of it). Any other
-  // record ends the wait, an embedded substream's BOF too, so this comes before skipping it
-  if (
-    rows.pendingString !== undefined && record.type !== STRING && record.type !== SHRFMLA && record.type !== ARRAY &&
-    record.type !== TABLE && record.type !== CONTINUE
-  ) {
-    const pending = rows.pendingString
-    rows.pendingString = undefined
-    const error = rows.cell(pending.row, Cell.text(pending.column, "", pending.meta))
-    if (error !== undefined) return error
+  // record ends the wait, an embedded substream's BOF too, so this comes before skipping it.
+  // FORMULA starts the wait and STRING takes it (see their cases)
+  const wait = rows.wait
+  switch (wait._tag) {
+    case "Idle":
+      break
+    case "AwaitingString": {
+      const type = record.type
+      if (type === STRING || type === SHRFMLA || type === ARRAY || type === TABLE || type === CONTINUE) break
+      rows.wait = IDLE
+      const error = rows.cell(wait.row, Cell.text(wait.column, ""))
+      if (error !== undefined) return error
+      break
+    }
+    default:
+      return absurd(wait)
   }
   // embedded substreams (chart objects) sit between BOF and EOF inside the sheet: skipped
   if (record.type === BOF_BIFF5_8) {
@@ -531,7 +556,7 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
         const kind = f.u8(6)!
         const value = f.u8(8)!
         if (kind === 0) {
-          rows.pendingString = { row: at[0], column: at[1], meta: undefined }
+          rows.wait = { _tag: "AwaitingString", row: at[0], column: at[1] }
           return false
         }
         if (kind === 1) return rows.cell(at[0], Cell.boolean(at[1], value !== 0)) ?? false
@@ -542,9 +567,9 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
       return rows.cell(at[0], numberCell(globals, at[1], at[2], value)) ?? false
     }
     case STRING: {
-      const pending = rows.pendingString
-      if (pending === undefined) return false // a STRING without a formula: ignored
-      rows.pendingString = undefined
+      const pending = rows.wait
+      if (pending._tag === "Idle") return false // a STRING without a formula: ignored
+      rows.wait = IDLE
       // BIFF8: an XLUnicodeString, maybe continued (each CONTINUE restarts
       // with an option byte); BIFF5: a u16-count code-page string
       const read = "segments" in record
@@ -553,81 +578,113 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
       if (read === undefined) return truncated()
       if (read === null) return tooLong()
       const text = typeof read === "string" ? read : read.value
-      return rows.cell(pending.row, Cell.text(pending.column, text, pending.meta)) ?? false
+      return rows.cell(pending.row, Cell.text(pending.column, text)) ?? false
     }
     default:
       return false
   }
 }
 
+/**
+ * Where a rows reader is: its substream didn't open; its record headers
+ * are being scanned (`RowScan`); its records are being read (rows complete
+ * up to `handledAt`, the offset of the last record handled, may wait for
+ * budget); its EOF was handled and only rows are left to emit; or all is out.
+ */
+type Phase =
+  | { readonly _tag: "Failed"; readonly error: SpreadsheetError }
+  | { readonly _tag: "Scanning"; readonly reader: RecordReader; readonly scan: RowScan }
+  | { readonly _tag: "Reading"; readonly reader: RecordReader; handledAt: number }
+  | { readonly _tag: "Draining" }
+  | { readonly _tag: "Done" }
+
+const DRAINING: Phase = { _tag: "Draining" }
+const DONE: Phase = { _tag: "Done" }
+
 /** The rows of a worksheet substream. Re-runnable. */
 export const sheetRows = (context: SheetContext): Stream.Stream<Row, SpreadsheetError> =>
   Stream.fromPull(Effect.sync(() => {
     const opened = openSubstream(context)
-    const reader = opened instanceof RecordReader ? opened : undefined
-    const scan = reader === undefined ? undefined : new RowScan(context, reader.offset)
+    let phase: Phase = opened instanceof RecordReader
+      ? { _tag: "Scanning", reader: opened, scan: new RowScan(context, opened.offset) }
+      : { _tag: "Failed", error: opened }
     const rows = new Rows(context)
     const maxStringBytes = stringMaxBytes(context.limits)
-    let done = false
-    /** The EOF was handled: only rows are left to emit. */
-    let ended = false
-    /** Offset of the last record handled (rows complete up to it may wait for budget). */
-    let handledAt = -1
     const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
-      if (reader === undefined || scan === undefined) return yield* Effect.fail(opened as SpreadsheetError)
-      // progress: each iteration takes queued rows, or reads up to
-      // BATCH_RECORDS records (the scan's or the reader's offset grows with
-      // each), or ends the stream
+      // progress: each iteration takes queued rows, or scans up to
+      // BATCH_RECORDS record headers, or reads up to BATCH_RECORDS records
+      // (the scan's or the reader's offset grows with each), or emits rows
+      // (at least one, or the phase moves on), or ends the stream
       while (true) {
         yield* Effect.yieldNow
         if (rows.queued()) return rows.take()
-        if (done) return yield* Cause.done()
-        if (!scan.done) {
-          scan.step(BATCH_RECORDS)
-          if (scan.done) rows.start(scan.lastAt, scan.declared, scan.hidden)
-          continue
+        const current: Phase = phase
+        switch (current._tag) {
+          case "Failed":
+            return yield* Effect.fail(current.error)
+          case "Scanning": {
+            const { scan } = current
+            scan.step(BATCH_RECORDS)
+            if (scan.done) {
+              rows.start(scan.lastAt, scan.declared, scan.hidden)
+              phase = { _tag: "Reading", reader: current.reader, handledAt: -1 }
+            }
+            continue
+          }
+          case "Reading": {
+            const { reader } = current
+            rows.budget = rows.effort + BATCH_CELLS
+            // rows a budget left complete but not emitted come first: each
+            // call emits at least one, or none is left
+            const caught = rows.complete(current.handledAt)
+            if (caught !== undefined) return yield* Effect.fail(caught)
+            // progress: k up to BATCH_RECORDS; every next() advances the reader
+            for (let k = 0; k < BATCH_RECORDS && rows.effort < rows.budget && !rows.behind(current.handledAt); k++) {
+              work.steps++
+              const record = rows.nested === 0 && context.globals.biff8 && reader.peekType() === STRING
+                ? reader.nextWithContinues(maxStringBytes, "maxStringLength")
+                : reader.next()
+              if (record === undefined) return yield* Effect.fail(malformed(context.part, "the sheet has no EOF"))
+              if (record instanceof MalformedFile) return yield* Effect.fail(record)
+              if (record instanceof LimitExceeded) {
+                const max = context.limits.maxStringLength
+                return yield* Effect.fail(new LimitExceeded({ limit: "maxStringLength", max, actual: max + 1 }))
+              }
+              const result = handle(record, rows, context)
+              if (result === true) {
+                phase = DRAINING
+                break
+              }
+              if (result !== false) return yield* Effect.fail(result)
+              if (rows.held > caps.heldCells) {
+                return yield* Effect.fail(malformed(context.part, `rows split too far apart: over ${caps.heldCells} cells held for rows not complete`, record.offset))
+              }
+              current.handledAt = record.offset
+              const error = rows.complete(record.offset)
+              if (error !== undefined) return yield* Effect.fail(error)
+            }
+            if (rows.queued()) return rows.take()
+            continue
+          }
+          case "Draining": {
+            rows.budget = rows.effort + BATCH_CELLS
+            // rows a budget left complete but not emitted, then the rest: each
+            // call emits at least one, or none is left
+            const caught = rows.complete(Infinity)
+            if (caught !== undefined) return yield* Effect.fail(caught)
+            if (!rows.behind(Infinity)) {
+              const result = rows.end()
+              if (result === true) phase = DONE
+              else if (result !== false) return yield* Effect.fail(result)
+            }
+            if (rows.queued()) return rows.take()
+            continue
+          }
+          case "Done":
+            return yield* Cause.done()
+          default:
+            return absurd(current)
         }
-        rows.budget = rows.effort + BATCH_CELLS
-        // rows a budget left complete but not emitted come first (after the
-        // EOF, all the rest): each call emits at least one, or none is left
-        const due = ended ? Infinity : handledAt
-        const caught = rows.complete(due)
-        if (caught !== undefined) return yield* Effect.fail(caught)
-        if (ended) {
-          if (!rows.behind(Infinity)) {
-            const result = rows.end()
-            if (result === true) done = true
-            else if (result !== false) return yield* Effect.fail(result)
-          }
-          if (rows.queued()) return rows.take()
-          continue
-        }
-        // progress: k up to BATCH_RECORDS; every next() advances the reader
-        for (let k = 0; k < BATCH_RECORDS && rows.effort < rows.budget && !rows.behind(handledAt); k++) {
-          work.steps++
-          const record = rows.nested === 0 && context.globals.biff8 && reader.peekType() === STRING
-            ? reader.nextWithContinues(maxStringBytes, "maxStringLength")
-            : reader.next()
-          if (record === undefined) return yield* Effect.fail(malformed(context.part, "the sheet has no EOF"))
-          if (record instanceof MalformedFile) return yield* Effect.fail(record)
-          if (record instanceof LimitExceeded) {
-            const max = context.limits.maxStringLength
-            return yield* Effect.fail(new LimitExceeded({ limit: "maxStringLength", max, actual: max + 1 }))
-          }
-          const result = handle(record, rows, context)
-          if (result === true) {
-            ended = true
-            break
-          }
-          if (result !== false) return yield* Effect.fail(result)
-          if (rows.held > caps.heldCells) {
-            return yield* Effect.fail(malformed(context.part, `rows split too far apart: over ${caps.heldCells} cells held for rows not complete`, record.offset))
-          }
-          handledAt = record.offset
-          const error = rows.complete(record.offset)
-          if (error !== undefined) return yield* Effect.fail(error)
-        }
-        if (rows.queued()) return rows.take()
       }
     })
     return pull
