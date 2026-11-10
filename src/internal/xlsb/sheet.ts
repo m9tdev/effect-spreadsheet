@@ -141,6 +141,23 @@ class Scope {
   }
 }
 
+/**
+ * The row being collected: None before the first BrtRowHdr and after a row
+ * is emitted (by the next BrtRowHdr, BrtEndSheetData or the end of the
+ * part); Open from a BrtRowHdr on, holding that row's cells. `lastColumn`
+ * is the last cell's column (short cells follow it), -1 before the first.
+ */
+type OpenRow = {
+  readonly _tag: "Open"
+  readonly index: number
+  readonly hidden: boolean
+  readonly cells: Array<Cell.Cell>
+  sorted: boolean
+  lastColumn: number
+}
+type RowState = { readonly _tag: "None" } | OpenRow
+const NO_ROW: RowState = { _tag: "None" }
+
 const errorCode = (code: number): string => ERROR_CODES.get(code) ?? "#N/A"
 
 /** Collects rows from a worksheet's records. Exported for tests. */
@@ -149,15 +166,9 @@ export class SheetRows {
   out: Array<Row> = []
   private cells = 0
   private rowCount = 0
-  /** The open row's index; undefined before the first row and after the sheet data. */
-  private rowIndex: number | undefined
   /** The last row's index, -1 before the first row. */
   private previousRow = -1
-  private rowHidden = false
-  private rowCells: Array<Cell.Cell> = []
-  private rowSorted = true
-  /** The open row's last cell column (short cells follow it), -1 before its first. */
-  private lastColumn = -1
+  private row: RowState = NO_ROW
   private readonly context: SheetContext
 
   constructor(context: SheetContext) {
@@ -166,7 +177,7 @@ export class SheetRows {
 
   /** Cells held for the open row (for tests). */
   get heldCells(): number {
-    return this.rowCells.length
+    return this.row._tag === "Open" ? this.row.cells.length : 0
   }
 
   private readonly scope = new Scope()
@@ -197,33 +208,35 @@ export class SheetRows {
     if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
     if (index <= this.previousRow) return malformed(`row ${index + 1} after row ${this.previousRow + 1}`, this.context.part, record.offset)
     if (++this.rowCount > limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: this.rowCount })
-    this.rowIndex = index
     this.previousRow = index
-    this.rowHidden = (flags & ROW_HIDDEN) !== 0
-    this.rowCells = []
-    this.rowSorted = true
-    this.lastColumn = -1
+    this.row = { _tag: "Open", index, hidden: (flags & ROW_HIDDEN) !== 0, cells: [], sorted: true, lastColumn: -1 }
     return undefined
   }
 
   private closeRow(): undefined {
-    if (this.rowIndex === undefined) return undefined
-    const cells = this.rowSorted ? this.rowCells : compact(this.rowCells)
-    this.out.push({ index: this.rowIndex, hidden: this.rowHidden, cells })
-    this.rowIndex = undefined
-    this.rowCells = []
-    return undefined
+    const row = this.row
+    switch (row._tag) {
+      case "None":
+        return undefined
+      case "Open":
+        this.out.push({ index: row.index, hidden: row.hidden, cells: row.sorted ? row.cells : compact(row.cells) })
+        this.row = NO_ROW
+        return undefined
+      default:
+        return absurd(row)
+    }
   }
 
   private cell(record: Biff12Record): SpreadsheetError | undefined {
     const { part, limits } = this.context
-    if (this.rowIndex === undefined) return malformed(`cell record 0x${record.type.toString(16)} outside a row`, part, record.offset)
+    const row = this.row
+    if (row._tag !== "Open") return malformed(`cell record 0x${record.type.toString(16)} outside a row`, part, record.offset)
     const type = record.type
     const data = record.data
     const f = new Fields(data)
     const short = type >= BRT_SHORT_BLANK && type <= BRT_SHORT_ISST
     // Cell: column u32 and style u24 (+ flags byte); the short forms have no column
-    const column = short ? this.lastColumn + 1 : f.u32(0)
+    const column = short ? row.lastColumn + 1 : f.u32(0)
     const style = f.u32(short ? 0 : 4)
     const at = short ? 4 : 8
     const truncated = () => malformed(`truncated cell record 0x${type.toString(16)}`, part, record.offset)
@@ -293,15 +306,15 @@ export class SheetRows {
     if (++this.cells > limits.maxCellsPerSheet) {
       return new LimitExceeded({ limit: "maxCellsPerSheet", max: limits.maxCellsPerSheet, actual: this.cells })
     }
-    this.lastColumn = column
-    const cells = this.rowCells
-    if (cells.length > 0 && column <= cells[cells.length - 1]!.column) this.rowSorted = false
+    row.lastColumn = column
+    const cells = row.cells
+    if (cells.length > 0 && column <= cells[cells.length - 1]!.column) row.sorted = false
     cells.push(cell)
     // repeated columns don't pile up: past 2 x maxColumns cells an unsorted
     // row is compacted (to at most maxColumns), so the work is amortized
-    if (!this.rowSorted && cells.length > 2 * limits.maxColumns) {
+    if (!row.sorted && cells.length > 2 * limits.maxColumns) {
       compact(cells)
-      this.rowSorted = true
+      row.sorted = true
     }
     return undefined
   }
