@@ -173,6 +173,42 @@ describe("xlsb reader", () => {
     expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Number", 2]]]])
   })
 
+  describe("the open row", () => {
+    it("an unsorted row doesn't make the next row sorted: its cells come out in file order", async () => {
+      const { sheets } = await readOk(one([
+        B.rowHdr(0),
+        B.rk(2, B.rkInt(2)),
+        B.rk(0, B.rkInt(0)),
+        B.rowHdr(1),
+        B.rk(1, B.rkInt(11)),
+        B.shortRk(B.rkInt(12)),
+        B.rk(5, B.rkInt(15))
+      ]))
+      expect(values(sheets[0]!)).toEqual([
+        [0, false, [[0, "Number", 0], [2, "Number", 2]]],
+        [1, false, [[1, "Number", 11], [2, "Number", 12], [5, "Number", 15]]]
+      ])
+    })
+
+    it("a hidden row doesn't make the next row hidden", async () => {
+      const { sheets } = await readOk(one([B.rowHdr(0, true), B.rk(0, B.rkInt(1)), B.rowHdr(1), B.rk(0, B.rkInt(2))]))
+      expect(values(sheets[0]!)).toEqual([[0, true, [[0, "Number", 1]]], [1, false, [[0, "Number", 2]]]])
+    })
+
+    it("a row closed by the end of the sheet data stays closed when the sheet data starts again", async () => {
+      expect(await errorOf(one([B.rowHdr(0), B.rk(0, B.rkInt(1)), B.endSheetData(), B.beginSheetData(), B.blank(1)]))).toMatchObject({
+        _tag: "MalformedFile",
+        reason: "cell record 0x1 outside a row"
+      })
+    })
+
+    it("a row still open at the end of the part, with no end of the sheet data, is emitted once", async () => {
+      const part = B.concat([B.beginSheet(), B.beginSheetData(), B.rowHdr(0), B.rk(0, B.rkInt(1)), B.rowHdr(2), B.rk(1, B.rkInt(2))])
+      const { sheets } = await readOk({ sheets: [{ name: "S", part }] })
+      expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Number", 1]]], [2, false, [[1, "Number", 2]]]])
+    })
+  })
+
   it("a row repeating its columns holds at most 2 x maxColumns cells", () => {
     const limits = { ...SpreadsheetLimits.defaults, maxColumns: 8 }
     const rows = new SheetRows({ part: "t.bin", strings: undefined, styles: NO_STYLES, date1904: false, limits })
