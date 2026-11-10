@@ -85,7 +85,7 @@ const initial = (header: RecordsOptions<unknown>["header"]): Phase => {
   if (header === "first-row") return { _tag: "AwaitFirstRow" }
   // Any other string is compared with row indexes as given, like a number.
   if (typeof header === "number" || typeof header === "string") return { _tag: "AwaitRow", at: header }
-  const names = header as ReadonlyArray<string | null | undefined>
+  const names: ReadonlyArray<string | null | undefined> = header
   // An index loop, not `map`: `map` keeps holes, and a hole, `undefined`
   // or `null` drops that column. Strings (also "") are names; explicit
   // names go through the same de-duplication: ["x", "x"] -> x, x_1.
