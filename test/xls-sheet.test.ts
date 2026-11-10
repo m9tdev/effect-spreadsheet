@@ -92,6 +92,44 @@ describe("xls sheet: formula string results", () => {
     ])
   })
 
+  it("the wait for a formula's STRING, record by record: kept by SHRFMLA, ARRAY, TABLE and CONTINUE, taken by STRING, ended by any other record", async () => {
+    const around = (records: ReadonlyArray<Uint8Array>) => cellsOf([X.number(0, 0, 0, 1), ...records, X.number(1, 0, 0, 2)])
+    const filler = X.record(0x0225, X.u16(0))
+    // no wait: a STRING, a companion record or a CONTINUE gives no cell
+    for (const record of [X.string("x"), companion(SHRFMLA), companion(ARRAY), companion(TABLE), X.record(CONTINUE, [0, 0]), filler]) {
+      expect(await around([record])).toEqual([[0, 0, "Number", 1], [1, 0, "Number", 2]])
+    }
+    // waiting: what comes after the FORMULA, and the formula's text
+    const cases: ReadonlyArray<readonly [string, ReadonlyArray<Uint8Array>, string]> = [
+      ["STRING", [X.string("s")], "s"],
+      ["SHRFMLA, STRING", [companion(SHRFMLA), X.string("s")], "s"],
+      ["ARRAY, STRING", [companion(ARRAY), X.string("s")], "s"],
+      ["TABLE, STRING", [companion(TABLE), X.string("s")], "s"],
+      ["CONTINUE, STRING", [X.record(CONTINUE, [0, 0]), X.string("s")], "s"],
+      ["another record, STRING", [filler, X.string("s")], ""],
+      ["another record", [filler], ""],
+      ["an embedded substream, STRING", [X.bof(0x0020), X.eof(), X.string("s")], ""]
+    ]
+    for (const [name, records, text] of cases) {
+      expect(await around([X.formula(0, 1, 0, { kind: 0 }), ...records]), name).toEqual([
+        [0, 0, "Number", 1],
+        [0, 1, "Text", text],
+        [1, 0, "Number", 2]
+      ])
+    }
+  })
+
+  it("a FORMULA while another waits ends that wait, then waits itself; a wait open at the sheet's EOF gives \"\"", async () => {
+    expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), X.formula(0, 1, 0, { kind: 0 }), X.string("s")])).toEqual([
+      [0, 0, "Text", ""],
+      [0, 1, "Text", "s"]
+    ])
+    expect(await cellsOf([X.number(0, 0, 0, 1), X.formula(0, 1, 0, { kind: 0 })])).toEqual([
+      [0, 0, "Number", 1],
+      [0, 1, "Text", ""]
+    ])
+  })
+
   it("a STRING continued by CONTINUE records, plain and switching width at the boundary", async () => {
     // "abcdef": 3 compressed characters, then a CONTINUE with option byte 0 and 3 more
     const plain = [X.record(STRING, [...X.u16(6), 0, ...chars("abc")]), X.record(CONTINUE, [0, ...chars("def")])]
@@ -367,7 +405,7 @@ describe("xls sheet: emitting rows", () => {
     expect(rows.cell(0, Cell.number(0, 1))).toBeUndefined()
     expect(rows.complete(5)).toBeUndefined()
     // a FORMULA on a row the scan didn't place still waits for its STRING
-    rows.pendingString = { row: 1, column: 0, meta: undefined }
+    rows.wait = { _tag: "AwaitingString", row: 1, column: 0 }
     // the loop's bound is order.length: count the reads of `order`, so a
     // loop that only stops by luck fails here instead of hanging the worker
     const inner = (rows as unknown as { order: Uint32Array }).order
@@ -723,5 +761,56 @@ describe("xls sheet: each sheet reads its own substream once", () => {
     const wb = await Effect.runPromise(Xls.read(X.xls(one([X.number(0, 0, 0, 1), ...filler(10 * BATCH_RECORDS)]))))
     const run = await countYields(() => Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 1))))
     expect(run.yields).toBeGreaterThanOrEqual(9)
+  })
+})
+
+describe("xls sheet: the rows reader's phases", () => {
+  it("a substream that doesn't open fails every run of the rows, the same way", async () => {
+    const stream = layout([{ ...sheet("A", [X.number(0, 0, 0, 1)]), at: (_, offsets) => offsets[0]! + 4 }])
+    const wb = await Effect.runPromise(Xls.read(fromStream(stream)))
+    const rows = Workbook.rows(wb, 0)
+    for (let run = 0; run < 3; run++) {
+      expect(failureOf(await Effect.runPromise(Effect.exit(Stream.runCollect(rows))))).toMatchObject({
+        _tag: "MalformedFile",
+        reason: "the sheet doesn't start with a BOF"
+      })
+    }
+  })
+
+  it("the header scan runs over several pulls, and the first row comes only once it has read the whole sheet", async () => {
+    const wb = await Effect.runPromise(Xls.read(X.xls(one([X.number(0, 0, 0, 1), ...filler(3 * BATCH_RECORDS)]))))
+    const before = work.steps
+    const run = await countYields(() => Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 1))))
+    expect(Array.from(run.value).map((r) => r.index)).toEqual([0])
+    expect(run.yields).toBeGreaterThanOrEqual(3)
+    expect(work.steps - before).toBeGreaterThan(3 * BATCH_RECORDS)
+  })
+
+  it("rows left at the EOF beyond a batch's budget come out over several pulls, then the rows end", async () => {
+    // rows 1 on wait for row 0, whose only cell comes last: a formula
+    // waiting for a STRING that never comes. At the EOF row 0 gets "", and
+    // all rows are due at once, more than one batch's budget (each row
+    // costs its cells, being out of column order, plus one)
+    const count = 12_000
+    const records = [
+      ...Array.from({ length: count }, (_, k) => [X.number(k + 1, 5, 0, k), X.mulBlank(k + 1, 0, [0, 0, 0, 0])]).flat(),
+      X.formula(0, 0, 0, { kind: 0 })
+    ]
+    const { sheets } = await readOk(one(records))
+    const rows = sheets[0]!
+    expect(rows.length).toBe(count + 1)
+    expect(values(rows.slice(0, 2))).toEqual([
+      [0, false, [[0, "Text", ""]]],
+      [1, false, [[0, "Empty", undefined], [1, "Empty", undefined], [2, "Empty", undefined], [3, "Empty", undefined], [5, "Number", 0]]]
+    ])
+    expect(rows.map((r) => r.index)).toEqual(Array.from({ length: count + 1 }, (_, r) => r))
+  })
+
+  it("no record is read after the sheet's EOF", async () => {
+    // a record after the EOF that fails if read: a NUMBER too short for its cell
+    const stream = layout([sheet("A", [X.number(0, 0, 0, 1), X.eof(), X.record(0x0203, X.u16(0))], false)])
+    const wb = await Effect.runPromise(Xls.read(fromStream(stream)))
+    const rows = await rowsOf(wb, 0)
+    expect(Exit.isSuccess(rows) && Array.from(rows.value).map((r) => r.index)).toEqual([0])
   })
 })
