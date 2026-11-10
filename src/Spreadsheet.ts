@@ -4,7 +4,7 @@
  *
  * @since 0.1.0
  */
-import { Effect, Stream } from "effect"
+import { absurd, Effect, Stream } from "effect"
 import type * as Cell from "./Cell.ts"
 import * as Csv from "./csv/index.ts"
 import * as Xls from "./xls/index.ts"
@@ -57,8 +57,15 @@ export const detectFormat = (
     return typeof format === "string" ? Effect.succeed(format) : Effect.fail(format)
   })
 
-const unsupported: Partial<Record<Format, string>> = {
-  cfb: "OLE compound file without a workbook stream",
+/** The formats `read` hands to a reader; see the `switch` in `read`. */
+type Readable = "csv" | "xlsx" | "xlsb" | "xls" | "cfb"
+
+/**
+ * Why each format without a reader fails. Typed over every `Format` that
+ * isn't `Readable`, so a new `Format` doesn't compile until it either gets a
+ * reader in `read` or a reason here.
+ */
+const unsupported: Record<Exclude<Format, Readable>, string> = {
   ods: "ODS reading is not implemented",
   spreadsheetml: "SpreadsheetML 2003 reading is not implemented yet",
   sylk: "SYLK reading is not implemented",
@@ -98,8 +105,19 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
       case "xls":
       case "cfb": // an encrypted OOXML package (Encrypted), or no workbook stream
         return Xls.read(bytes, { limits: options?.limits })
+      case "ods":
+      case "spreadsheetml":
+      case "sylk":
+      case "zip":
+      case "html":
+      case "xml":
+      case "pdf":
+      case "image":
+      case "rtf":
+      case "unknown":
+        return Effect.fail(new UnsupportedFormat({ format, reason: unsupported[format] }))
       default:
-        return Effect.fail(new UnsupportedFormat({ format, reason: unsupported[format] ?? "not supported" }))
+        return absurd(format)
     }
   })
 
