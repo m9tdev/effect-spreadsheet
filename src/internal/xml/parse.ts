@@ -9,10 +9,17 @@ import { Effect, Stream } from "effect"
 import { MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import { type XmlHandler, type XmlLimits, XmlTokenizer } from "./tokenizer.ts"
 
+/**
+ * The decoder's phase. Sniffing holds the first 0-1 bytes until there are
+ * enough to see a UTF-16 byte-order mark; Decoding has picked the encoding.
+ */
+type DecoderState =
+  | { readonly _tag: "Sniffing"; readonly head: Uint8Array }
+  | { readonly _tag: "Decoding"; readonly decoder: TextDecoder }
+
 /** Decodes a part's bytes incrementally; picks the encoding from the first bytes. */
 export class XmlDecoder {
-  private decoder: TextDecoder | undefined
-  private head: Uint8Array | undefined
+  private state: DecoderState = { _tag: "Sniffing", head: new Uint8Array(0) }
   private readonly part: string | undefined
 
   constructor(part?: string) {
@@ -27,28 +34,32 @@ export class XmlDecoder {
     })
   }
 
-  private start(head: Uint8Array): void {
+  /** Sniffing -> Decoding: picks the encoding from `head`; the new decoder, which has not read `head` yet. */
+  private begin(head: Uint8Array): TextDecoder {
     const utf16 = head.length >= 2 && ((head[0] === 0xFF && head[1] === 0xFE) || (head[0] === 0xFE && head[1] === 0xFF))
     const label = !utf16 ? "utf-8" : head[0] === 0xFF ? "utf-16le" : "utf-16be"
     // ignoreBOM: false drops the byte-order mark itself
-    this.decoder = new TextDecoder(label, { fatal: true, ignoreBOM: false })
+    const decoder = new TextDecoder(label, { fatal: true, ignoreBOM: false })
+    this.state = { _tag: "Decoding", decoder }
+    return decoder
   }
 
   /** Decodes the next bytes; the text available so far, or an error. */
   push(bytes: Uint8Array): string | MalformedFile {
-    let input = bytes
-    if (this.decoder === undefined) {
-      // need 2 bytes to see a UTF-16 byte-order mark
-      input = this.head === undefined ? bytes : concat(this.head, bytes)
-      if (input.length < 2) {
-        this.head = input
-        return ""
-      }
-      this.head = undefined
-      this.start(input)
-    }
     try {
-      return this.decoder!.decode(input, { stream: true })
+      switch (this.state._tag) {
+        case "Sniffing": {
+          // need 2 bytes to see a UTF-16 byte-order mark
+          const head = this.state.head.length === 0 ? bytes : concat(this.state.head, bytes)
+          if (head.length < 2) {
+            this.state = { _tag: "Sniffing", head }
+            return ""
+          }
+          return this.begin(head).decode(head, { stream: true })
+        }
+        case "Decoding":
+          return this.state.decoder.decode(bytes, { stream: true })
+      }
     } catch {
       return this.malformed()
     }
@@ -56,11 +67,16 @@ export class XmlDecoder {
 
   /** Flushes at the end; an incomplete trailing character is an error. */
   end(): string | MalformedFile {
-    if (this.decoder === undefined) this.start(this.head ?? new Uint8Array(0))
     try {
-      const rest = this.head === undefined ? "" : this.decoder!.decode(this.head, { stream: true })
-      this.head = undefined
-      return rest + this.decoder!.decode()
+      switch (this.state._tag) {
+        case "Sniffing": {
+          const head = this.state.head
+          const decoder = this.begin(head)
+          return decoder.decode(head, { stream: true }) + decoder.decode()
+        }
+        case "Decoding":
+          return this.state.decoder.decode()
+      }
     } catch {
       return this.malformed()
     }

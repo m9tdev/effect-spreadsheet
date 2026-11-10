@@ -446,3 +446,60 @@ describe("xml bytes", () => {
     expect(parts).toBeGreaterThan(50)
   })
 })
+
+describe("xml decoder: encoding sniff", () => {
+  const decodeAll = (pieces: ReadonlyArray<ReadonlyArray<number>>): string | SpreadsheetError => {
+    const decoder = new XmlDecoder("part.xml")
+    let text = ""
+    for (const piece of pieces) {
+      const out = decoder.push(new Uint8Array(piece))
+      if (typeof out !== "string") return out
+      text += out
+    }
+    const rest = decoder.end()
+    return typeof rest === "string" ? text + rest : rest
+  }
+  const utf16 = (s: string, littleEndian: boolean): Array<number> =>
+    [...s].flatMap((ch) => {
+      const units: Array<number> = []
+      for (let i = 0; i < ch.length; i++) {
+        const lo = ch.charCodeAt(i) & 0xFF
+        const hi = ch.charCodeAt(i) >> 8
+        units.push(...(littleEndian ? [lo, hi] : [hi, lo]))
+      }
+      return units
+    })
+
+  it("a UTF-16 byte-order mark split one byte at a time picks the encoding (LE and BE)", () => {
+    for (const [mark, littleEndian] of [[[0xFF, 0xFE], true], [[0xFE, 0xFF], false]] as const) {
+      const body = utf16("<a>é😀</a>", littleEndian)
+      expect(decodeAll([[mark[0]], [mark[1]], body])).toBe("<a>é😀</a>")
+      // the held byte joins the next piece
+      expect(decodeAll([[mark[0]], [mark[1], ...body]])).toBe("<a>é😀</a>")
+    }
+  })
+
+  it("a UTF-8 byte-order mark split 1|2 is dropped", () => {
+    expect(decodeAll([[0xEF], [0xBB, 0xBF], [0x3C, 0x61, 0x2F, 0x3E]])).toBe("<a/>")
+  })
+
+  it("empty input decodes to an empty string, with or without empty pieces", () => {
+    expect(decodeAll([])).toBe("")
+    expect(decodeAll([[], []])).toBe("")
+  })
+
+  it("a single byte then the end is decoded at the end: ASCII is text, an invalid byte is MalformedFile", () => {
+    expect(decodeAll([[0x3C]])).toBe("<")
+    expect(decodeAll([[0xFF]])).toMatchObject({ _tag: "MalformedFile", reason: "invalid text encoding", part: "part.xml" })
+    // a lone first byte of a UTF-16 mark is not a mark
+    expect(decodeAll([[0xFE]])).toMatchObject({ _tag: "MalformedFile" })
+  })
+
+  it("held bytes are not decoded until the encoding is known", () => {
+    const decoder = new XmlDecoder()
+    expect(decoder.push(new Uint8Array([0x3C]))).toBe("")
+    expect(decoder.push(new Uint8Array([0x61]))).toBe("<a")
+    expect(decoder.push(new Uint8Array([0x3E]))).toBe(">")
+    expect(decoder.end()).toBe("")
+  })
+})
