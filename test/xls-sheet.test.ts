@@ -79,6 +79,19 @@ describe("xls sheet: formula string results", () => {
     ])
   })
 
+  it("an embedded substream (BOF ... EOF) between FORMULA and STRING ends the wait, like any other record", async () => {
+    // the STRING after the embedded chart isn't the formula's result
+    expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), X.bof(0x0020), X.eof(), X.string("late"), X.number(1, 0, 0, 2)])).toEqual([
+      [0, 0, "Text", ""],
+      [1, 0, "Number", 2]
+    ])
+    // nor is a STRING inside it, or the one after it
+    expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), X.bof(0x0020), X.string("chart"), X.eof(), X.string("late"), X.number(1, 0, 0, 2)])).toEqual([
+      [0, 0, "Text", ""],
+      [1, 0, "Number", 2]
+    ])
+  })
+
   it("a STRING continued by CONTINUE records, plain and switching width at the boundary", async () => {
     // "abcdef": 3 compressed characters, then a CONTINUE with option byte 0 and 3 more
     const plain = [X.record(STRING, [...X.u16(6), 0, ...chars("abc")]), X.record(CONTINUE, [0, ...chars("def")])]
