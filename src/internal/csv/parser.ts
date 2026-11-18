@@ -90,11 +90,13 @@ export class CsvParser {
         return []
       case "Sniffing": {
         const pending = phase.pending + text
-        if (pending.length < SNIFF_CHARS && !final) {
+        // collect one character past the sample, so that a sample that is
+        // the whole text is known to be whole even before the final piece
+        if (pending.length <= SNIFF_CHARS && !final) {
           this.phase = { _tag: "Sniffing", pending }
           return []
         }
-        const tokenizer = this.sniff(pending)
+        const tokenizer = this.sniff(pending, final && pending.length <= SNIFF_CHARS)
         this.phase = { _tag: "Parsing", tokenizer }
         return this.step(tokenizer, final)
       }
@@ -122,9 +124,10 @@ export class CsvParser {
 
   /**
    * Decides the delimiter; consumes an Excel `sep=X` line if present.
-   * Returns a tokenizer that has parsed the collected text.
+   * `complete` says that `text` is the whole input. Returns a tokenizer that
+   * has parsed the collected text.
    */
-  private sniff(text: string): Tokenizer {
+  private sniff(text: string, complete: boolean): Tokenizer {
     const sep = /^sep=(.)(\r\n|\r|\n|$)/.exec(text)
     const char = sep?.[1]
     if (sep !== null && char !== undefined && char !== '"' && char !== "\r" && char !== "\n") {
@@ -132,7 +135,7 @@ export class CsvParser {
       tokenizer.parse(text.slice(sep[0].length))
       return tokenizer
     }
-    const tokenizer = new Tokenizer(this.options, guessDelimiter(text.slice(0, SNIFF_CHARS)), 0)
+    const tokenizer = new Tokenizer(this.options, guessDelimiter(text.slice(0, SNIFF_CHARS), complete), 0)
     tokenizer.parse(text)
     return tokenizer
   }

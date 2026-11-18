@@ -160,13 +160,27 @@ describe("csv parser: lifecycle", () => {
     assert.deepStrictEqual(aoa(rowsOf(p.feed("", true))), [["a", "b"], ["c", "d"]])
   })
 
-  it("sniffing starts once 16 Ki chars are collected", () => {
-    const text = "a;b\n".repeat(SNIFF_CHARS / 4)
+  it("sniffing starts once more than 16 Ki chars are collected", () => {
+    const text = "a;b\n".repeat(SNIFF_CHARS / 4) + "c"
     const p = parser()
     assert.deepStrictEqual(p.feed(text.slice(0, -1), false), [])
     const rows = rowsOf(p.feed(text.slice(-1), false))
     assert.strictEqual(rows.length, SNIFF_CHARS / 4)
     assert.deepStrictEqual(aoa(rows)[0], ["a", "b"])
+  })
+
+  it("a text of exactly 16 Ki chars is sniffed whole, its unterminated last line included", () => {
+    // `;` is consistent only without the last line, which holds only `,`
+    const text = ("a;b\nc;d\n" + "x,".repeat(SNIFF_CHARS)).slice(0, SNIFF_CHARS)
+    const cellsPerRow = (rows: Array<Row>) => aoa(rows).map((row) => row.length)
+    // the trailing `,` ends the last field, which adds no cell
+    const expected = [1, 1, SNIFF_CHARS / 2 - 4]
+    // in one final piece
+    assert.deepStrictEqual(cellsPerRow(rowsOf(parser().feed(text, true))), expected)
+    // or with the end of input in a later, empty piece, as the reader does
+    const p = parser()
+    assert.deepStrictEqual(p.feed(text, false), [])
+    assert.deepStrictEqual(cellsPerRow(rowsOf(p.feed("", true))), expected)
   })
 
   it("after an error, every feed returns that same error", () => {
