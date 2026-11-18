@@ -7,7 +7,7 @@ import * as Cell from "../Cell.ts"
 import { Cause, Effect, Pull, Stream } from "effect"
 import { absurd } from "effect/Function"
 import type * as Arr from "effect/Array"
-import { LimitExceeded } from "../SpreadsheetError.ts"
+import { InvalidOption, LimitExceeded } from "../SpreadsheetError.ts"
 import type { LimitOverrides, Limits } from "../SpreadsheetLimits.ts"
 import type { Row } from "../Workbook.ts"
 import * as RecordKeys from "./recordKeys.ts"
@@ -15,14 +15,19 @@ import * as RecordKeys from "./recordKeys.ts"
 export interface RecordsOptions<D = never> {
   /**
    * - `"first-row"`: the first row is the header.
-   * - a number: the row with that `index` is the header; earlier rows are skipped.
+   * - a number: the row with that `index` (an integer, 0 or more) is the
+   *   header; earlier rows are skipped.
    * - an array: column `i` is named `header[i]` (repeats made unique the same
    *   way); columns past its end, and columns whose entry is a hole,
    *   `undefined` or `null`, are dropped. An entry `""` is treated like a
    *   blank header cell: the column gets an `__EMPTY…` key when data appears
    *   in it, and no `defval` fill.
+   *
+   * Any other value (another string, a fraction, a negative number, `NaN`,
+   * an entry that is not a string, `null` or `undefined`) fails with
+   * `InvalidOption` before any row is read.
    */
-  readonly header: "first-row" | number | ReadonlyArray<string>
+  readonly header: "first-row" | number | ReadonlyArray<string | null | undefined>
   /** Value for header-named columns the row has no value in. Default: no key. */
   readonly defval?: D
   /** Keep rows without any value (as `{}`, or filled with `defval`). Default `false`. */
@@ -80,12 +85,44 @@ type Phase =
   | { readonly _tag: "AwaitRow"; readonly at: number }
   | Ready
 
-/** The phase a run starts in, decided once from `options.header`. */
+const invalidHeader = (reason: string): InvalidOption => new InvalidOption({ option: "header", reason })
+
+/**
+ * Checks `options.header` at runtime, since the type can be bypassed (plain
+ * JavaScript, casts): only the values {@link RecordsOptions.header} documents
+ * pass.
+ */
+export const validateHeader = (header: unknown): InvalidOption | undefined => {
+  if (header === "first-row") return undefined
+  if (typeof header === "number") {
+    return Number.isSafeInteger(header) && header >= 0
+      ? undefined
+      : invalidHeader(`${header} is not a row index (an integer, 0 or more)`)
+  }
+  if (typeof header === "string") {
+    return invalidHeader(`${JSON.stringify(header)} must be "first-row", a row index or an array of names`)
+  }
+  if (!Array.isArray(header)) {
+    const got = header === null ? "null" : typeof header
+    return invalidHeader(`must be "first-row", a row index or an array of names, not ${got}`)
+  }
+  const names: ReadonlyArray<unknown> = header
+  // An index loop, so holes are seen as undefined. progress: column
+  // increases by one up to names.length
+  for (let column = 0; column < names.length; column++) {
+    const name = names[column]
+    if (typeof name !== "string" && name !== null && name !== undefined) {
+      return invalidHeader(`entry ${column} must be a string, null or undefined, not ${typeof name}`)
+    }
+  }
+  return undefined
+}
+
+/** The phase a run starts in, decided once from a valid `options.header`. */
 const initial = (header: RecordsOptions<unknown>["header"]): Phase => {
   if (header === "first-row") return { _tag: "AwaitFirstRow" }
-  // Any other string is compared with row indexes as given, like a number.
-  if (typeof header === "number" || typeof header === "string") return { _tag: "AwaitRow", at: header }
-  const names: ReadonlyArray<string | null | undefined> = header
+  if (typeof header === "number") return { _tag: "AwaitRow", at: header }
+  const names = header
   // An index loop, not `map`: `map` keeps holes, and a hole, `undefined`
   // or `null` drops that column. Strings (also "") are names; explicit
   // names go through the same de-duplication: ["x", "x"] -> x, x_1.
@@ -226,14 +263,17 @@ export const BATCH_KEYS = 64 * 1024
  * Rows -> records as a stream. Records come out in batches of about
  * {@link BATCH_KEYS} keys with a yield before each, so a wide header times
  * many rows can't block the event loop. When a limit is hit, the records
- * already built are emitted first, then the stream fails.
+ * already built are emitted first, then the stream fails. An invalid
+ * `header` fails the stream before `rows` is pulled.
  */
 export const recordsStream = <E, R>(
   rows: Stream.Stream<Row, E, R>,
   options: RecordsOptions<unknown>,
   limits: Limits
-): Stream.Stream<Record<string, unknown>, E | LimitExceeded, R> =>
-  Stream.transformPull(rows, (upstream) =>
+): Stream.Stream<Record<string, unknown>, E | LimitExceeded | InvalidOption, R> => {
+  const invalid = validateHeader(options.header)
+  if (invalid !== undefined) return Stream.fail(invalid)
+  return Stream.transformPull(rows, (upstream) =>
     Effect.sync(() => {
       const builder = new RecordBuilder(options, limits)
       const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
@@ -279,3 +319,4 @@ export const recordsStream = <E, R>(
       )
       return pull
     }))
+}
