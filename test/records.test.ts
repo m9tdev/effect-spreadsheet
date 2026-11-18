@@ -1,6 +1,7 @@
 import { assert, describe, expect, expectTypeOf, it } from "@effect/vitest"
 import type { InvalidOption, LimitExceeded } from "../src/SpreadsheetError.ts"
 import { Cause, Effect, Stream } from "effect"
+import fc from "fast-check"
 import * as Cell from "../src/Cell.ts"
 import * as Csv from "../src/csv/index.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
@@ -451,6 +452,47 @@ describe("toRecords header phase", () => {
       return Array.from(yield* Stream.runCollect(Spreadsheet.toRecords(Workbook.rows(wb, 0), { header: "first-row" })))
     }))
     assert.deepStrictEqual(fromFile, [{ y: 2 }])
+  })
+
+  it("a header row out of column order, with repeated columns or columns that aren't indexes, names like its compacted cells", () => {
+    const data: Row = { index: 1, hidden: false, cells: [0, 1, 2].map((c) => Cell.number(c, c)) }
+    const named = (cells: Array<Cell.Cell>) => recs([{ index: 0, hidden: false, cells }, data], { header: "first-row", defval: null })
+    // repeated: the last cell of a column names it, also an Empty one
+    expect(named([Cell.text(0, "a"), Cell.text(0, "b"), Cell.text(1, "a")])).toEqual([{ b: 0, a: 1, __EMPTY: 2 }])
+    expect(named([Cell.text(0, "a"), Cell.empty(0), Cell.text(1, "a")])).toEqual([{ a: 1, __EMPTY: 0, __EMPTY_1: 2 }])
+    expect(named([Cell.text(0, "x"), Cell.text(0, "y"), Cell.text(1, "x")])).toEqual([{ y: 0, x: 1, __EMPTY: 2 }])
+    // descending: put in column order before names are made unique
+    expect(named([Cell.text(2, "a"), Cell.text(0, "a"), Cell.text(1, "b")])).toEqual([{ a: 0, b: 1, a_1: 2 }])
+    // columns that aren't non-negative safe integers name nothing
+    const bad = [-1, Number.NaN, 1.5, Infinity].map((c) => Cell.text(c, "a"))
+    expect(named([...bad, Cell.text(0, "a")])).toEqual([{ a: 0, __EMPTY: 1, __EMPTY_1: 2 }])
+  })
+
+  it("any header row names its columns like the header row sorted by column with the last cell of each column kept", () => {
+    const column = fc.oneof(
+      { weight: 8, arbitrary: fc.nat(12) },
+      { weight: 1, arbitrary: fc.constantFrom(-1, -0, Number.NaN, 1.5, Infinity, 2 ** 53) }
+    )
+    const name = fc.constantFrom<string | undefined>("a", "a_1", "b", "", "__EMPTY", undefined)
+    fc.assert(
+      fc.property(
+        fc.array(fc.tuple(column, name), { maxLength: 30 }),
+        fc.array(fc.nat(16), { maxLength: 20 }),
+        fc.boolean(),
+        (header, dataColumns, fill) => {
+          const cell = ([c, n]: readonly [number, string | undefined]) => n === undefined ? Cell.empty(c) : Cell.text(c, n)
+          // independent reference: valid columns, a stable sort, then the last cell of each run of one column
+          const sorted = header.filter(([c]) => Number.isSafeInteger(c) && c >= 0).sort((x, y) => x[0] - y[0])
+          const compacted = sorted.filter(([c], i) => sorted[i + 1]?.[0] !== c)
+          const data: Row = { index: 1, hidden: false, cells: dataColumns.map((c, i) => Cell.number(c, i)) }
+          const options = fill ? { header: "first-row" as const, defval: null } : { header: "first-row" as const }
+          const got = recs([{ index: 0, hidden: false, cells: header.map(cell) }, data], options)
+          const want = recs([{ index: 0, hidden: false, cells: compacted.map(cell) }, data], options)
+          expect(got.map((r) => Object.entries(r))).toEqual(want.map((r) => Object.entries(r)))
+        }
+      ),
+      { numRuns: 1000 }
+    )
   })
 
   it("a data row with two cells in one column takes the last, also an empty one, like the readers' rows", async () => {

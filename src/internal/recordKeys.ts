@@ -36,17 +36,14 @@ const EMPTY = "__EMPTY"
 
 const isEmptyName = (name: string | undefined): name is undefined | "" => name === undefined || name === ""
 
-const isColumn = (column: number): boolean => Number.isSafeInteger(column) && column >= 0
-
-/** `header`: entries with strictly ascending, non-negative integer columns.
- *  Sparse: only the cells present. Never a dense array up to the max column.
- *  Doesn't throw on a violated precondition: a repeated column keeps its
- *  last entry (also an empty one), like the cells a reader keeps for a row
- *  and like a data row in `toRecords`, whose last cell in a column (also an
- *  Empty one) gives that column's value; descending entries are put in
- *  column order, and entries whose column isn't a non-negative safe integer
- *  are ignored. The `used` lookups of each key allocation (first checks
- *  included) go to `meter`. */
+/** `header`: entries with strictly ascending, non-negative safe integer
+ *  columns, one per column (the records code compacts the header row's
+ *  cells first, like a reader compacts a row's). Sparse: only the cells
+ *  present. Never a dense array up to the max column. The entries are
+ *  trusted, not checked: a violated precondition throws nothing and every
+ *  loop stays bounded, but a repeated column would be named twice. The
+ *  `used` lookups of each key allocation (first checks included) go to
+ *  `meter`. */
 export const make = (header: Iterable<HeaderEntry>, meter: Meter = noMeter): RecordKeys => {
   const used = new Set<string>()
   /** Per base name: the next suffix to try. Invariant: `b_1 … b_{next(b)-1}` are all in `used`. */
@@ -88,32 +85,11 @@ export const make = (header: Iterable<HeaderEntry>, meter: Meter = noMeter): Rec
     return candidate
   }
 
-  // Gather the valid entries through a column -> name map: the last entry of
-  // a repeated column wins, as when a reader compacts a row's cells. A map
-  // keeps a column at the place of its first entry, so the order check only
-  // looks at first entries. Progress: one step per entry of the (finite) header.
-  const names = new Map<number, string | undefined>()
-  let ascending = true
-  let last = -1
-  for (const [column, name] of header) {
-    if (!isColumn(column)) continue
-    if (!names.has(column)) {
-      if (column < last) ascending = false
-      last = column
-    }
-    names.set(column, name)
-  }
-  const entries: Array<readonly [number, string]> = []
-  // Progress: one step per column of `names`, which no longer changes.
-  for (const [column, name] of names) if (!isEmptyName(name)) entries.push([column, name])
-  // The precondition says ascending; sort only when it was violated.
-  if (!ascending) entries.sort((x, y) => x[0] - y[0])
-
   // Left to right, first come first served, no look-ahead.
-  // Progress: `i` increases by one per step up to `entries.length`.
+  // Progress: one step per entry of the (finite) header.
   const named: Array<readonly [number, string]> = []
-  for (let i = 0; i < entries.length; i++) {
-    const [column, name] = entries[i]
+  for (const [column, name] of header) {
+    if (isEmptyName(name)) continue
     const key = take(name)
     byColumn.set(column, key)
     named.push([column, key])

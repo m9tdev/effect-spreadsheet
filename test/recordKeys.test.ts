@@ -144,22 +144,11 @@ describe("recordKeys: lazy keys with make (spec examples 20-24)", () => {
     expect(run()).toEqual(["a", "a_1", "__EMPTY", "__EMPTY_1"])
   })
 
-  it("violated preconditions don't throw: repeated column keeps the last, descending is put in order, bad columns ignored", () => {
-    const repeated = make([[0, "a"], [0, "b"], [1, "a"]])
-    expect(repeated.named).toEqual([[0, "b"], [1, "a"]])
-    const descending = make([[2, "a"], [0, "a"], [1, "b"]])
-    expect(descending.named).toEqual([[0, "a"], [1, "b"], [2, "a_1"]])
-    const bad = make([[-1, "a"], [Number.NaN, "a"], [1.5, "a"], [Infinity, "a"], [0, "a"]])
-    expect(bad.named).toEqual([[0, "a"]])
-  })
-
-  it("a repeated column takes its last entry, also when that entry is empty or the columns are out of order", () => {
-    expect(make([[0, "a"], [0, undefined]]).named).toEqual([])
-    expect(make([[0, "a"], [0, ""]]).headerKey(0)).toBeUndefined()
-    expect(make([[0, undefined], [0, "a"]]).named).toEqual([[0, "a"]])
-    expect(make([[2, "a"], [0, "b"], [2, "c"], [0, "d"]]).named).toEqual([[0, "d"], [2, "c"]])
-    // the dropped first entry doesn't take a name from a later column
-    expect(make([[0, "x"], [0, "y"], [1, "x"]]).named).toEqual([[0, "y"], [1, "x"]])
+  it("entries are trusted: a violated precondition throws nothing and names each entry in turn", () => {
+    expect(make([[2, "a"], [0, "a"], [1, "b"]]).named).toEqual([[2, "a"], [0, "a_1"], [1, "b"]])
+    const repeated = make([[0, "a"], [0, "b"]])
+    expect(repeated.named).toEqual([[0, "a"], [0, "b"]])
+    expect(repeated.headerKey(0)).toBe("b")
   })
 
   it("names are ordinary strings: __proto__, constructor, toString", () => {
@@ -296,25 +285,6 @@ describe("recordKeys: properties", () => {
         expect(counted.probes()).toBeLessThanOrEqual(3 * names.length)
       }),
       { numRuns: 2000 }
-    )
-  })
-
-  it("any header names its columns like the header sorted by column with the last entry of each column kept", () => {
-    fc.assert(
-      fc.property(
-        fc.array(fc.tuple(fc.nat(12), alphabet), { maxLength: 30 }),
-        fc.array(fc.nat(16), { maxLength: 40 }),
-        (header, calls) => {
-          // sorted with a stable sort, then the last entry of each run of one column
-          const sorted = [...header].sort((x, y) => x[0] - y[0])
-          const compacted = sorted.filter(([c], i) => sorted[i + 1]?.[0] !== c)
-          const got = make(header)
-          const want = make(compacted)
-          expect(got.named).toEqual(want.named)
-          expect(calls.map(got.key)).toEqual(calls.map(want.key))
-        }
-      ),
-      { numRuns: 1000 }
     )
   })
 
