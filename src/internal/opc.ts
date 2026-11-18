@@ -9,13 +9,12 @@ import type { SpreadsheetError } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
 import { parse } from "./xml/parse.ts"
 import { attr, type XmlHandler } from "./xml/tokenizer.ts"
-import type { Archive } from "./zip/archive.ts"
-import type { ZipEntry } from "./zip/directory.ts"
+import type { Archive, LocatedEntry } from "./zip/archive.ts"
 
 /** Tokenizes one part with `handler`. */
 export const parsePart = (
   archive: Archive,
-  entry: ZipEntry,
+  entry: LocatedEntry,
   handler: XmlHandler,
   limits: Limits
 ): Effect.Effect<void, SpreadsheetError> => parse(archive.read(entry), handler, limits, entry.name)
@@ -29,7 +28,7 @@ export const parsePart = (
  *   root, has a bad `%`-escape, or names the root itself).
  */
 export type Target =
-  | { readonly _tag: "Part"; readonly entry: ZipEntry }
+  | { readonly _tag: "Part"; readonly entry: LocatedEntry }
   | { readonly _tag: "Missing"; readonly name: string }
   | { readonly _tag: "External" }
   | { readonly _tag: "Invalid"; readonly reason: string }
@@ -98,7 +97,7 @@ export interface Rels {
   /** The target of the first relationship of this kind that names a part, present or not. */
   readonly named: (kind: string) => Named | undefined
   /** The part of `named(kind)`; `undefined` if there's no such relationship or its part is missing. */
-  readonly part: (kind: string) => ZipEntry | undefined
+  readonly part: (kind: string) => LocatedEntry | undefined
 }
 
 /** The last path segment of a relationship type URI (`.../officeDocument` -> `officeDocument`). */
@@ -160,5 +159,5 @@ export const packageRels = (archive: Archive, limits: Limits): Effect.Effect<Rel
   readRels(archive, "_rels/.rels", [], limits)
 
 /** The relationships of `part`, targets resolved against its directory. */
-export const partRels = (archive: Archive, part: ZipEntry, limits: Limits): Effect.Effect<Rels, SpreadsheetError> =>
+export const partRels = (archive: Archive, part: LocatedEntry, limits: Limits): Effect.Effect<Rels, SpreadsheetError> =>
   readRels(archive, relsPartOf(part.name), part.name.split("/").slice(0, -1), limits)

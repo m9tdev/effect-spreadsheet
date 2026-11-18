@@ -23,8 +23,7 @@ import { malformedIn, type SheetEntry, sheetVisibility } from "../package.ts"
 import { areaText, BIFF12_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import { toDefinedNames } from "../workbook.ts"
-import type { Archive } from "../zip/archive.ts"
-import type { ZipEntry } from "../zip/directory.ts"
+import type { Archive, LocatedEntry } from "../zip/archive.ts"
 
 export const malformed = malformedIn("xlsb")
 
@@ -177,7 +176,7 @@ const resolveXti = (books: ReadonlyArray<Book>, xtis: Int32Array, ixti: number):
 /** Reads the workbook part. Sheet names are made unique (`uniqueSheetNames`). */
 export const readWorkbookBin = (
   archive: Archive,
-  entry: ZipEntry,
+  entry: LocatedEntry,
   limits: Limits
 ): Effect.Effect<WorkbookBin, SpreadsheetError> =>
   Effect.suspend(() => {
@@ -302,7 +301,7 @@ export const readWorkbookBin = (
  */
 export const readExternalSheets = (
   archive: Archive,
-  entry: ZipEntry,
+  entry: LocatedEntry,
   limits: Limits
 ): Effect.Effect<ReadonlyArray<string>, SpreadsheetError> =>
   Effect.suspend(() => {
@@ -340,11 +339,11 @@ export const readExternalSheets = (
 export const readExternalBooks = (
   archive: Archive,
   workbook: WorkbookBin,
-  partOf: (relationshipId: string) => ZipEntry | undefined,
+  partOf: (relationshipId: string) => LocatedEntry | undefined,
   limits: Limits
 ): Effect.Effect<Map<number, ReadonlyArray<string>>, SpreadsheetError> =>
   Effect.gen(function*() {
-    const byPart = new Map<ZipEntry, ReadonlyArray<string>>()
+    const byPart = new Map<LocatedEntry, ReadonlyArray<string>>()
     const out = new Map<number, ReadonlyArray<string>>()
     const seen = new Set<number>()
     // progress: one name per iteration (at most maxDefinedNames); each book is looked at once

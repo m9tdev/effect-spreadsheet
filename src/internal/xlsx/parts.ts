@@ -15,8 +15,7 @@ import { malformedIn, type SheetEntry, sheetVisibility } from "../package.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import type { DefinedNameEntry } from "../workbook.ts"
 import { attr, type XmlAttributes, type XmlHandler } from "../xml/tokenizer.ts"
-import type { Archive } from "../zip/archive.ts"
-import type { ZipEntry } from "../zip/directory.ts"
+import type { Archive, LocatedEntry } from "../zip/archive.ts"
 
 export const malformed = malformedIn("xlsx")
 
@@ -50,7 +49,7 @@ export interface WorkbookPart {
  */
 export const readWorkbookPart = (
   archive: Archive,
-  entry: ZipEntry,
+  entry: LocatedEntry,
   limits: Limits
 ): Effect.Effect<WorkbookPart, SpreadsheetError> => {
   // names as the file gives them (decoded; `undefined` for a sheet without one), made unique at the end
@@ -177,7 +176,7 @@ export class RichText {
  */
 export const readSharedStrings = (
   archive: Archive,
-  entry: ZipEntry,
+  entry: LocatedEntry,
   limits: Limits
 ): Effect.Effect<ReadonlyArray<string>, SpreadsheetError> => {
   const strings: Array<string> = []
@@ -209,7 +208,7 @@ export const readSharedStrings = (
 /** Reads the number formats and the cell styles that use them (`<c s="...">` is an index into `cellXfs`). */
 export const readStyles = (
   archive: Archive,
-  entry: ZipEntry,
+  entry: LocatedEntry,
   limits: Limits
 ): Effect.Effect<CellStyles, SpreadsheetError> => {
   // each custom code is classified once, here in the parse (which yields
