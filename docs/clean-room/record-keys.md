@@ -92,14 +92,14 @@ export interface RecordKeys {
 }
 
 /** `header`: entries with strictly ascending, non-negative integer columns.
- *  Sparse: only the cells present. Never a dense array up to the max column. */
-export const make: (header: Iterable<HeaderEntry>) => RecordKeys
-
-/** Pure helper (tests, docs): the keys for a dense header, as if every column
- *  had data in the first data row. Equal to `make(entries).key(i)` for
- *  i = 0 … names.length - 1, called in that order. */
-export const recordKeys: (names: ReadonlyArray<string | undefined>) => ReadonlyArray<string>
+ *  Sparse: only the cells present. Never a dense array up to the max column.
+ *  The `used` lookups of each key allocation go to `meter` (tests count them). */
+export const make: (header: Iterable<HeaderEntry>, meter?: Meter) => RecordKeys
 ```
+
+A test helper (`test/helpers/recordKeys.ts`) gives the keys for a dense header,
+as if every column had data in the first data row: `recordKeys(names)`, equal to
+`make(entries).key(i)` for i = 0 … names.length - 1, called in that order.
 
 How `records.ts` uses it:
 

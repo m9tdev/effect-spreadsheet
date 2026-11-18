@@ -158,8 +158,6 @@ export class RecordBuilder {
   private phase: Phase
   private cells = 0
   private fills = 0
-  /** Keys written so far (cells and fills); callers diff it to size batches. */
-  keys = 0
 
   private readonly options: RecordsOptions<unknown>
   private readonly maxCells: number
@@ -174,7 +172,6 @@ export class RecordBuilder {
 
   private countCells(n: number): LimitExceeded | undefined {
     this.cells += n
-    this.keys += n
     return this.cells > this.maxCells
       ? new LimitExceeded({ limit: "maxCellsPerSheet", max: this.maxCells, actual: this.cells })
       : undefined
@@ -182,43 +179,49 @@ export class RecordBuilder {
 
   private countFills(n: number): LimitExceeded | undefined {
     this.fills += n
-    this.keys += n
     return this.fills > this.maxFills
       ? new LimitExceeded({ limit: "maxRecordFields", max: this.maxFills, actual: this.fills })
       : undefined
   }
 
   /**
-   * Returns the record for `row`; undefined if the row is the header,
-   * skipped, or blank; or the limit error.
+   * Takes `row`: its record goes to `out`, unless the row is the header,
+   * skipped, or blank. Returns the keys it wrote, which callers size
+   * batches by (see `record`), or the limit error.
    */
-  push(row: Row): Record<string, unknown> | undefined | LimitExceeded {
+  push(row: Row, out: Array<Record<string, unknown>>): number | LimitExceeded {
     const phase = this.phase
     switch (phase._tag) {
       case "Ready":
-        return this.record(row, phase)
+        return this.record(row, phase, out)
       case "AwaitFirstRow":
         this.phase = ready(row)
-        return undefined
+        return 0
       case "AwaitRow": {
-        if (row.index < phase.at) return undefined
+        if (row.index < phase.at) return 0
         if (row.index === phase.at) {
           this.phase = ready(row)
-          return undefined
+          return 0
         }
         // The header row isn't in the data (rows can be sparse): no names,
         // and this row is data.
         const next = ready(undefined)
         this.phase = next
-        return this.record(row, next)
+        return this.record(row, next, out)
       }
       default:
         return absurd(phase)
     }
   }
 
-  /** The record for a data row, once the header is known. */
-  private record(row: Row, phase: Ready): Record<string, unknown> | undefined | LimitExceeded {
+  /**
+   * The record for a data row, once the header is known, into `out` unless
+   * it is blank. Returns its work in keys, to size batches by: one per cell
+   * of the row (also a cell that writes none: Empty, repeated or dropped)
+   * and, with `defval`, one per header-named column (each written once,
+   * as a fill or a value).
+   */
+  private record(row: Row, phase: Ready, out: Array<Record<string, unknown>>): number | LimitExceeded {
     const namer = phase.namer
     const explicit = phase.explicit
     // One cell per column: the last one, also when it is Empty.
@@ -236,8 +239,6 @@ export class RecordBuilder {
       }
       const over = this.countFills(named.length - valued)
       if (over !== undefined) return over
-      // every header key is written once below (values overwrite): batch by writes
-      this.keys += valued
       // progress: one header-named column per iteration
       for (const [, key] of named) set(record, key, defval)
     }
@@ -253,8 +254,8 @@ export class RecordBuilder {
       set(record, namer.key(cell.column), v)
       empty = false
     }
-    if (empty && !this.options.blankRows) return undefined
-    return record
+    if (!empty || this.options.blankRows) out.push(record)
+    return row.cells.length + (defval === undefined ? 0 : namer.named.length)
   }
 }
 
@@ -326,19 +327,19 @@ export const recordsStream = <E, R>(
             }
             yield* Effect.yieldNow
             const out: Array<Record<string, unknown>> = []
-            const until = builder.keys + BATCH_KEYS
+            let keys = 0
             // progress: i grows by one per iteration, bounded by chunk.length.
             // Rows that give no record (the header, rows before it, blank
             // rows) add few or no keys, so they don't end the batch; their
             // work is bounded by the upstream chunk, which the reader already
             // keeps to one bounded step (and which yielded before it came).
-            while (i < chunk.length && builder.keys < until) {
-              const record = builder.push(chunk[i++]!)
-              if (record instanceof LimitExceeded) {
-                failure = record
+            while (i < chunk.length && keys < BATCH_KEYS) {
+              const written = builder.push(chunk[i++]!, out)
+              if (written instanceof LimitExceeded) {
+                failure = written
                 break
               }
-              if (record !== undefined) out.push(record)
+              keys += written
             }
             if (out.length > 0) return out as unknown as Arr.NonEmptyReadonlyArray<Record<string, unknown>>
           }
