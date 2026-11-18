@@ -2,7 +2,7 @@ import { assert, describe, it } from "@effect/vitest"
 import { Cause, Effect, Exit, Layer, Schema, Stream } from "effect"
 import * as Csv from "../src/csv/index.ts"
 import * as Cell from "../src/Cell.ts"
-import { fromSources } from "../src/internal/workbook.ts"
+import { fromSources, toDefinedNames } from "../src/internal/workbook.ts"
 import * as SpreadsheetError from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
@@ -270,4 +270,33 @@ describe("Workbook from sheet sources", () => {
       assert.strictEqual(yield* Effect.flip(Workbook.sheetDetails(wb, "Gone")), broken)
       assert.strictEqual(Array.from(yield* Stream.runCollect(Workbook.rows(wb, 0))).length, 1)
     }))
+})
+
+describe("defined names from a reader's entries", () => {
+  const entry = (name: string, scope: number | undefined) => ({ name, formula: `${name}!$A$1`, hidden: name === "H", scope })
+
+  it("keeps scopes below the sheet count, makes the rest workbook-wide, and keeps the order", () => {
+    const names = toDefinedNames(
+      [entry("Last", 2), entry("Wide", undefined), entry("First", 0), entry("Count", 3), entry("Past", 4), entry("H", 0xFFFFFFFF)],
+      3
+    )
+    assert.deepStrictEqual(names, [
+      { name: "Last", formula: "Last!$A$1", hidden: false, scope: 2 },
+      { name: "Wide", formula: "Wide!$A$1", hidden: false },
+      { name: "First", formula: "First!$A$1", hidden: false, scope: 0 },
+      { name: "Count", formula: "Count!$A$1", hidden: false },
+      { name: "Past", formula: "Past!$A$1", hidden: false },
+      { name: "H", formula: "H!$A$1", hidden: true }
+    ])
+    // a workbook-wide name has no scope key at all, not an undefined one
+    assert.isFalse(Object.hasOwn(names[1]!, "scope"))
+    assert.isFalse(Object.hasOwn(names[3]!, "scope"))
+  })
+
+  it("without sheets every name is workbook-wide", () => {
+    assert.deepStrictEqual(toDefinedNames([entry("A", 0), entry("B", undefined)], 0), [
+      { name: "A", formula: "A!$A$1", hidden: false },
+      { name: "B", formula: "B!$A$1", hidden: false }
+    ])
+  })
 })
