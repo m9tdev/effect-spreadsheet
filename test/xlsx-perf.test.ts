@@ -8,6 +8,7 @@
  * pauses.
  */
 import { Effect, Stream } from "effect"
+import * as Result from "effect/Result"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { NO_STYLES } from "../src/internal/numFmt.ts"
@@ -68,8 +69,7 @@ describe("xlsx: 200 000 rows", () => {
 
     // linear: compared with tokenizing the same part, best of 3, interleaved
     // in alternating order
-    const archive = open(bytes, SpreadsheetLimits.defaults)
-    if ("_tag" in archive) throw new Error(archive._tag)
+    const archive = Result.getOrThrow(open(bytes, SpreadsheetLimits.defaults))
     const entry = archive.find("xl/worksheets/sheet1.xml")!
     const ignore = { open: () => undefined, close: () => undefined, text: () => undefined }
     const reference = () => Effect.runPromise(parse(archive.read(entry), ignore, SpreadsheetLimits.defaults))
@@ -113,8 +113,7 @@ describe("xlsx: a sheet part in one piece", () => {
       }
     }
     const limits = SpreadsheetLimits.defaults
-    const archive = open(await buildZip([{ name: "sheet1.xml", data: part }]), limits, onePiece)
-    if ("_tag" in archive) throw new Error(archive._tag)
+    const archive = Result.getOrThrow(open(await buildZip([{ name: "sheet1.xml", data: part }]), limits, onePiece))
     const context = { part: "sheet1.xml", strings: undefined, styles: NO_STYLES, date1904: false, limits }
     let rows = 0
     let maxPerPull = 0

@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { Effect, Exit, Stream } from "effect"
+import * as Result from "effect/Result"
 import { describe, expect, it } from "vitest"
 import { WorkMeter } from "../src/internal/meter.ts"
 import { type Archive, inflateBudget, open } from "../src/internal/zip/archive.ts"
@@ -24,8 +25,9 @@ interface Opened extends Archive {
 }
 
 const openOk = (bytes: Uint8Array, l = limits, inflate?: InflateRaw): Opened => {
-  const archive = inflate === undefined ? open(bytes, l) : open(bytes, l, inflate)
-  if ("_tag" in archive) throw new Error(`open failed: ${archive._tag} ${(archive as { reason?: string }).reason}`)
+  const opened = inflate === undefined ? open(bytes, l) : open(bytes, l, inflate)
+  if (Result.isFailure(opened)) throw new Error(`open failed: ${opened.failure._tag} ${(opened.failure as { reason?: string }).reason}`)
+  const archive = opened.success
   const inflated = counter("bytes")
   return { ...archive, read: (entry, l) => Stream.provideService(archive.read(entry, l), WorkMeter, inflated), inflated }
 }
@@ -203,7 +205,8 @@ describe("zip64 extra field bounds", () => {
     const extra = cd + 46 + "a.xml".length // header id, size, then usize, csize, offset
     return { bytes, view, extra }
   }
-  const reasonOf = (result: unknown) => (result as { _tag?: string; reason?: string }).reason ?? (result as { _tag?: string })._tag
+  const reasonOf = (result: ReturnType<typeof readDirectory>) =>
+    Result.isSuccess(result) ? "ok" : (result.failure as { reason?: string }).reason ?? result.failure._tag
 
   it("a ZIP64 field too short for the values it must hold is MalformedFile", async () => {
     const { bytes, view, extra } = await zip64Archive()
@@ -226,9 +229,9 @@ describe("zip64 extra field bounds", () => {
   it("a ZIP64 compressed size of 2^53-1 is read exactly and fails as out of bounds", async () => {
     const { bytes, view, extra } = await zip64Archive()
     view.setBigUint64(extra + 4 + 8, (1n << 53n) - 1n, true)
-    const { entries } = readDirectory(bytes, limits) as { entries: ReadonlyArray<ZipEntry> }
+    const { entries } = Result.getOrThrow(readDirectory(bytes, limits))
     expect(entries[0]!.compressedSize).toBe(Number.MAX_SAFE_INTEGER)
-    expect(open(bytes, limits)).toMatchObject({ _tag: "MalformedFile", reason: "entry data out of bounds" })
+    expect(Result.merge(open(bytes, limits))).toMatchObject({ _tag: "MalformedFile", reason: "entry data out of bounds" })
   })
 })
 
@@ -421,33 +424,33 @@ describe("zip archive: hostile input", () => {
     // a's compressed size grown into b's header
     const overlap = two.slice()
     new DataView(overlap.buffer).setUint32(cd + 20, 20, true)
-    expect(open(overlap, limits)).toMatchObject({ _tag: "MalformedFile", reason: "entries overlap" })
+    expect(Result.merge(open(overlap, limits))).toMatchObject({ _tag: "MalformedFile", reason: "entries overlap" })
     // duplicate names, compared case-insensitively
     const dup = await buildZip([{ name: "A.xml", data: enc("1") }, { name: "a.XML", data: enc("2") }])
-    expect(open(dup, limits)).toMatchObject({ _tag: "MalformedFile", reason: "duplicate entry name" })
+    expect(Result.merge(open(dup, limits))).toMatchObject({ _tag: "MalformedFile", reason: "duplicate entry name" })
     // a local header with the wrong signature
     const badSig = two.slice()
     new DataView(badSig.buffer).setUint32(0, 0, true)
-    expect(open(badSig, limits)).toMatchObject({ _tag: "MalformedFile", reason: "bad local header signature" })
+    expect(Result.merge(open(badSig, limits))).toMatchObject({ _tag: "MalformedFile", reason: "bad local header signature" })
     // a local name that differs from the directory's
     const badName = two.slice()
     badName[30] = "z".charCodeAt(0)
-    expect(open(badName, limits)).toMatchObject({ _tag: "MalformedFile", reason: "local header name differs from the directory" })
+    expect(Result.merge(open(badName, limits))).toMatchObject({ _tag: "MalformedFile", reason: "local header name differs from the directory" })
     // a directory offset past the end of the data
     const farOffset = two.slice()
     new DataView(farOffset.buffer).setUint32(cd + 46 + 5 + 42, 1_000_000, true)
-    expect(open(farOffset, limits)).toMatchObject({ _tag: "MalformedFile", reason: "local header out of bounds" })
+    expect(Result.merge(open(farOffset, limits))).toMatchObject({ _tag: "MalformedFile", reason: "local header out of bounds" })
     // a local header whose method differs from the directory's
     const badMethod = two.slice()
     new DataView(badMethod.buffer).setUint16(8, 8, true)
-    expect(open(badMethod, limits)).toMatchObject({ _tag: "MalformedFile", reason: "local header compression method differs from the directory" })
+    expect(Result.merge(open(badMethod, limits))).toMatchObject({ _tag: "MalformedFile", reason: "local header compression method differs from the directory" })
     // b's data grown into the central directory (still inside the buffer)
     const intoDirectory = two.slice()
     new DataView(intoDirectory.buffer).setUint32(cd + 46 + 5 + 20, 10, true)
-    expect(open(intoDirectory, limits)).toMatchObject({ _tag: "MalformedFile", reason: "entry data overlaps the central directory" })
+    expect(Result.merge(open(intoDirectory, limits))).toMatchObject({ _tag: "MalformedFile", reason: "entry data overlaps the central directory" })
     // compressed size past the buffer
     const farData = two.slice()
     new DataView(farData.buffer).setUint32(cd + 46 + 5 + 20, 1_000_000, true)
-    expect(open(farData, limits)).toMatchObject({ _tag: "MalformedFile", reason: "entry data out of bounds" })
+    expect(Result.merge(open(farData, limits))).toMatchObject({ _tag: "MalformedFile", reason: "entry data out of bounds" })
   })
 })

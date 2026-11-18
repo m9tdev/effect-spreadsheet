@@ -8,6 +8,7 @@
  * sheet (quadratic work) shows in the CPU-time test alone.
  */
 import { Effect, Stream } from "effect"
+import * as Result from "effect/Result"
 import { describe, expect, it } from "vitest"
 import { SLICE_BYTES } from "../src/internal/bytes.ts"
 import { NO_STYLES } from "../src/internal/numFmt.ts"
@@ -113,8 +114,7 @@ describe("xlsb: 200 000 rows", () => {
       }
     }
     const limits = SpreadsheetLimits.defaults
-    const archive = open(await buildZip([{ name: "one.bin", data: part }]), limits, onePiece)
-    if ("_tag" in archive) throw new Error(archive._tag)
+    const archive = Result.getOrThrow(open(await buildZip([{ name: "one.bin", data: part }]), limits, onePiece))
     const entry = archive.find("one.bin")!
     const context = { part: "one.bin", strings: undefined, styles: NO_STYLES, date1904: false, limits }
     let rows = 0

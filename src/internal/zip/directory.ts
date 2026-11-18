@@ -5,6 +5,7 @@
  *
  * @internal
  */
+import * as Result from "effect/Result"
 import { LimitExceeded, MalformedFile } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 
@@ -33,6 +34,9 @@ const LOCAL = 0x04034b50
 
 const malformed = (reason: string, offset?: number) =>
   new MalformedFile(offset === undefined ? { format: "zip", reason } : { format: "zip", reason, offset })
+
+/** A failed result with a `MalformedFile`. */
+const fail = (reason: string, offset?: number) => Result.fail(malformed(reason, offset))
 
 const u64 = (view: DataView, at: number): number | undefined => {
   const lo = view.getUint32(at, true)
@@ -74,10 +78,10 @@ export interface Directory {
 export const readDirectory = (
   bytes: Uint8Array,
   limits: Limits
-): Directory | MalformedFile | LimitExceeded => {
+): Result.Result<Directory, MalformedFile | LimitExceeded> => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const eocd = findEocd(bytes, view)
-  if (eocd < 0) return malformed("end of central directory not found (truncated?)")
+  if (eocd < 0) return fail("end of central directory not found (truncated?)")
   let count = view.getUint16(eocd + 10, true)
   let size: number | undefined = view.getUint32(eocd + 12, true)
   let start: number | undefined = view.getUint32(eocd + 16, true)
@@ -86,23 +90,23 @@ export const readDirectory = (
   if (count === 0xFFFF || size === 0xFFFFFFFF || start === 0xFFFFFFFF) {
     const locator = eocd - 20
     if (locator < 0 || view.getUint32(locator, true) !== ZIP64_LOCATOR) {
-      return malformed("ZIP64 locator missing", Math.max(0, locator))
+      return fail("ZIP64 locator missing", Math.max(0, locator))
     }
     const at = u64(view, locator + 8)
-    if (at === undefined || at + 56 > locator) return malformed("ZIP64 end of central directory out of bounds", locator)
-    if (view.getUint32(at, true) !== ZIP64_EOCD) return malformed("bad ZIP64 end of central directory", at)
+    if (at === undefined || at + 56 > locator) return fail("ZIP64 end of central directory out of bounds", locator)
+    if (view.getUint32(at, true) !== ZIP64_EOCD) return fail("bad ZIP64 end of central directory", at)
     const count64 = u64(view, at + 32)
     size = u64(view, at + 40)
     start = u64(view, at + 48)
-    if (count64 === undefined) return malformed("bad ZIP64 entry count", at)
+    if (count64 === undefined) return fail("bad ZIP64 entry count", at)
     count = count64
     directoryLimit = at
   }
   if (count > limits.maxZipEntries) {
-    return new LimitExceeded({ limit: "maxZipEntries", max: limits.maxZipEntries, actual: count })
+    return Result.fail(new LimitExceeded({ limit: "maxZipEntries", max: limits.maxZipEntries, actual: count }))
   }
   if (size === undefined || start === undefined || start + size > directoryLimit) {
-    return malformed("central directory out of bounds", eocd)
+    return fail("central directory out of bounds", eocd)
   }
   const entries: Array<ZipEntry> = []
   const names = new TextDecoder("utf-8")
@@ -110,8 +114,8 @@ export const readDirectory = (
   const end = start + size
   // progress: p grows by at least 46 per entry; at most `count` entries
   for (let k = 0; k < count; k++) {
-    if (p + 46 > end) return malformed("central directory entry out of bounds", p)
-    if (view.getUint32(p, true) !== CENTRAL) return malformed("bad central directory entry signature", p)
+    if (p + 46 > end) return fail("central directory entry out of bounds", p)
+    if (view.getUint32(p, true) !== CENTRAL) return fail("bad central directory entry signature", p)
     const flags = view.getUint16(p + 8, true)
     const method = view.getUint16(p + 10, true)
     const crc32 = view.getUint32(p + 16, true)
@@ -122,14 +126,14 @@ export const readDirectory = (
     const commentLength = view.getUint16(p + 32, true)
     let localOffset: number | undefined = view.getUint32(p + 42, true)
     const next = p + 46 + nameLength + extraLength + commentLength
-    if (next > end) return malformed("central directory entry out of bounds", p)
+    if (next > end) return fail("central directory entry out of bounds", p)
     const name = names.decode(bytes.subarray(p + 46, p + 46 + nameLength))
     if (uncompressedSize === MAX32 || compressedSize === MAX32 || localOffset === MAX32) {
       // The real values are in the ZIP64 extra field, in this order, each
       // present only when the 32-bit field is 0xFFFFFFFF.
       const extraStart = p + 46 + nameLength
       const zip64 = findExtra(view, extraStart, extraStart + extraLength, ZIP64_EXTRA)
-      if (zip64 === undefined) return malformed("ZIP64 sizes without a ZIP64 extra field", p)
+      if (zip64 === undefined) return fail("ZIP64 sizes without a ZIP64 extra field", p)
       let at = zip64.start
       const take = (): number | undefined => {
         if (at + 8 > zip64.end) return undefined
@@ -141,13 +145,13 @@ export const readDirectory = (
       if (compressedSize === MAX32) compressedSize = take()
       if (localOffset === MAX32) localOffset = take()
       if (uncompressedSize === undefined || compressedSize === undefined || localOffset === undefined) {
-        return malformed("bad ZIP64 extra field", zip64.start)
+        return fail("bad ZIP64 extra field", zip64.start)
       }
     }
     entries.push({ name, method, flags, crc32, compressedSize, uncompressedSize, localOffset })
     p = next
   }
-  return { entries, directoryStart: start }
+  return Result.succeed({ entries, directoryStart: start })
 }
 
 /** Finds an extra field by id within [start, end); its data range, or undefined. */

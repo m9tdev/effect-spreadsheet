@@ -53,8 +53,7 @@ export const detectFormat = (
     if (bytes.length > limits.maxInputBytes) {
       return Effect.fail(new LimitExceeded({ limit: "maxInputBytes", max: limits.maxInputBytes, actual: bytes.length }))
     }
-    const format = detect(bytes, limits)
-    return typeof format === "string" ? Effect.succeed(format) : Effect.fail(format)
+    return Effect.fromResult(detect(bytes, limits))
   })
 
 /** The formats `read` hands to a reader; see the `switch` in `read`. */

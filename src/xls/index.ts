@@ -36,6 +36,7 @@
  * @since 0.1.0
  */
 import { Effect } from "effect"
+import * as Result from "effect/Result"
 import { open as openCfb } from "../internal/cfb/cfb.ts"
 import { type Meter, WorkMeter } from "../internal/meter.ts"
 import { fromSources } from "../internal/workbook.ts"
@@ -59,32 +60,35 @@ const CFB_MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 /** BOF record types of BIFF2-4, by version. */
 const OLD_BOFS: ReadonlyMap<number, string> = new Map([[0x0009, "biff2"], [0x0209, "biff3"], [0x0409, "biff4"]])
 
-/** `UnsupportedFormat` if a stream starts with a BIFF2, BIFF3 or BIFF4 BOF. */
-const oldBiff = (stream: Uint8Array): UnsupportedFormat | undefined => {
+/** The stream, or `UnsupportedFormat` if it starts with a BIFF2, BIFF3 or BIFF4 BOF. */
+const notOldBiff = (stream: Uint8Array): Result.Result<Uint8Array, UnsupportedFormat> => {
   const old = stream.length >= 2 ? OLD_BOFS.get(stream[0]! | (stream[1]! << 8)) : undefined
   return old === undefined
-    ? undefined
-    : new UnsupportedFormat({ format: old, reason: `${old.toUpperCase()} (Excel 2.x-4.x) workbooks aren't supported` })
+    ? Result.succeed(stream)
+    : Result.fail(new UnsupportedFormat({ format: old, reason: `${old.toUpperCase()} (Excel 2.x-4.x) workbooks aren't supported` }))
 }
 
 /** The workbook stream: from a compound file, or the bytes themselves when they are a bare BIFF stream. */
-const workbookStream = (bytes: Uint8Array, limits: SpreadsheetLimits.Limits, meter: Meter): Uint8Array | SpreadsheetError => {
-  if (CFB_MAGIC.every((b, k) => bytes[k] === b)) {
-    const cfb = openCfb(bytes, limits, meter)
-    if ("_tag" in cfb) return cfb
-    const entry = cfb.find("Workbook") ?? cfb.find("Book")
-    if (entry === undefined || entry.type !== "stream") {
-      if (cfb.find("EncryptedPackage") !== undefined) return new Encrypted({ format: "xlsx" })
-      return new UnsupportedFormat({ format: "cfb", reason: "compound file without a Workbook or Book stream" })
+const workbookStream = (
+  bytes: Uint8Array,
+  limits: SpreadsheetLimits.Limits,
+  meter: Meter
+): Result.Result<Uint8Array, SpreadsheetError> =>
+  Result.gen(function*() {
+    if (CFB_MAGIC.every((b, k) => bytes[k] === b)) {
+      const cfb = yield* openCfb(bytes, limits, meter)
+      const entry = cfb.find("Workbook") ?? cfb.find("Book")
+      if (entry === undefined || entry.type !== "stream") {
+        if (cfb.find("EncryptedPackage") !== undefined) return yield* Result.fail(new Encrypted({ format: "xlsx" }))
+        return yield* Result.fail(new UnsupportedFormat({ format: "cfb", reason: "compound file without a Workbook or Book stream" }))
+      }
+      const stream = yield* cfb.read(entry)
+      return yield* notOldBiff(stream)
     }
-    const stream = cfb.read(entry)
-    return "_tag" in stream ? stream : oldBiff(stream) ?? stream
-  }
-  const old = oldBiff(bytes)
-  if (old !== undefined) return old
-  if (bytes.length >= 2 && (bytes[0]! | (bytes[1]! << 8)) === 0x0809) return bytes // a bare BIFF5/8 workbook stream
-  return new MalformedFile({ format: "xls", reason: "neither a compound file nor a BIFF stream" })
-}
+    yield* notOldBiff(bytes)
+    if (bytes.length >= 2 && (bytes[0]! | (bytes[1]! << 8)) === 0x0809) return bytes // a bare BIFF5/8 workbook stream
+    return yield* Result.fail(new MalformedFile({ format: "xls", reason: "neither a compound file nor a BIFF stream" }))
+  })
 
 /**
  * Opens an XLS workbook from its bytes.
@@ -104,8 +108,7 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     if (bytes.length > limits.maxInputBytes) {
       return yield* new LimitExceeded({ limit: "maxInputBytes", max: limits.maxInputBytes, actual: bytes.length })
     }
-    const stream = workbookStream(bytes, limits, yield* WorkMeter)
-    if ("_tag" in stream) return yield* Effect.fail(stream)
+    const stream = yield* Effect.fromResult(workbookStream(bytes, limits, yield* WorkMeter))
     const globals = yield* readGlobals(stream, limits)
 
     const context = (entry: SheetEntry, effective: SpreadsheetLimits.Limits): SheetContext => ({
