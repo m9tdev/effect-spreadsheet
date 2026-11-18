@@ -484,6 +484,21 @@ describe("xlsb defined names", () => {
     ])
   })
 
+  it("a name scoped to the last sheet keeps its scope; one scoped at or past the sheet count is workbook-wide", async () => {
+    const itabs = [0, 3, 4, 5, 0xFFFFFFFE]
+    const { wb } = await readOk({
+      sheets,
+      globals: [B.supSelf(), B.externSheet([[0, 0, 0]]), ...itabs.map((itab) => B.name(`N${itab}`, B.ref3d(0, 0, 0), { itab }))]
+    })
+    expect(wb.definedNames).toEqual([
+      { name: "N0", formula: "Data!$A$1", scope: 0, hidden: false },
+      { name: "N3", formula: "Data!$A$1", scope: 3, hidden: false },
+      { name: "N4", formula: "Data!$A$1", hidden: false },
+      { name: "N5", formula: "Data!$A$1", hidden: false },
+      { name: "N4294967294", formula: "Data!$A$1", hidden: false }
+    ])
+  })
+
   it("a union of two areas (print titles' form) isn't decompiled: \"\"", async () => {
     const union = [...B.area3d(0, 0, 0xFFFFF, 0, 1), ...B.area3d(0, 0, 1, 0, 0x3FFF), 0x10]
     const { wb } = await readOk({ sheets, globals: [B.supSelf(), B.externSheet([[0, 0, 0]]), B.name("Print_Titles", union, { itab: 0, builtin: true })] })

@@ -245,6 +245,20 @@ describe("xlsx: cells and rows", () => {
     }
   })
 
+  it("a name scoped to the last sheet keeps its scope; one scoped at or past the sheet count is workbook-wide", async () => {
+    const { wb } = await readOk({
+      sheets: [{ name: "A" }, { name: "B" }, { name: "C", kind: "chartsheet" }],
+      definedNames: [0, 2, 3, 4, 999999999].map((s) => `<definedName name="N${s}" localSheetId="${s}">A!$A$1</definedName>`).join("")
+    })
+    expect(wb.definedNames).toEqual([
+      { name: "N0", formula: "A!$A$1", hidden: false, scope: 0 },
+      { name: "N2", formula: "A!$A$1", hidden: false, scope: 2 },
+      { name: "N3", formula: "A!$A$1", hidden: false },
+      { name: "N4", formula: "A!$A$1", hidden: false },
+      { name: "N999999999", formula: "A!$A$1", hidden: false }
+    ])
+  })
+
   it("finds the workbook through the relationships, wherever it is", async () => {
     const { wb, sheets } = await readOk({ workbookPath: "book/main.xml", sharedStrings: ["moved"], sheets: [{ name: "S", data: `<row><c t="s"><v>0</v></c></row>` }] })
     expect(wb.sheets[0]!.name).toBe("S")

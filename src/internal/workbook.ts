@@ -37,6 +37,30 @@ export interface SourcedSheet {
 }
 
 /**
+ * A defined name as a reader parsed it: `scope` is the sheet index the file
+ * gives, if any, not yet checked against the sheet list.
+ */
+export interface DefinedNameEntry {
+  readonly name: string
+  readonly formula: string
+  readonly hidden: boolean
+  readonly scope: number | undefined
+}
+
+/**
+ * The workbook's defined names, in order. A name scoped to a sheet that
+ * doesn't exist (an index at or past `sheetCount`) becomes workbook-wide.
+ */
+export const toDefinedNames = (
+  entries: ReadonlyArray<DefinedNameEntry>,
+  sheetCount: number
+): Array<DefinedName> =>
+  // progress: one entry per iteration
+  entries.map(({ name, formula, hidden, scope }) =>
+    scope !== undefined && scope < sheetCount ? { name, formula, hidden, scope } : { name, formula, hidden }
+  )
+
+/**
  * A workbook whose sheets are `sheets`, in order: each `SheetInfo.index` is
  * the sheet's position.
  */
