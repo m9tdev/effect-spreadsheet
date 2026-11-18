@@ -3,10 +3,11 @@ import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import { readNullableWideString, readRichStr, readWideString } from "../src/internal/biff12/fields.ts"
 import { type Biff12Record, readRecords, RecordSplitter } from "../src/internal/biff12/records.ts"
+import { FixedReader } from "../src/internal/binary/layout.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import { counter, metered } from "./helpers/meter.ts"
-import { concat, nullableWide, record, u32, varint, wide } from "./helpers/xlsb.ts"
+import { concat, f64, nullableWide, record, u32, varint, wide } from "./helpers/xlsb.ts"
 
 const MAX = SpreadsheetLimits.defaults.maxRecordBytes
 
@@ -200,39 +201,85 @@ describe("biff12 records", () => {
     const exit = await Effect.runPromiseExit(readRecords(failing, () => undefined, { maxRecordBytes: MAX }, "t.bin"))
     expect(Exit.isFailure(exit) && JSON.stringify(exit.cause)).toContain("CRC-32 mismatch")
   })
+
+  it("readRecords gives the number of records read", async () => {
+    const bytes = concat([record(0x83), record(0x9C, [1, 2, 3]), record(0x1), record(0x84)])
+    expect(await Effect.runPromise(readRecords(Stream.make(bytes.subarray(0, 3), bytes.subarray(3)), () => undefined, { maxRecordBytes: MAX }, "t.bin"))).toBe(4)
+    expect(await Effect.runPromise(readRecords(Stream.empty, () => undefined, { maxRecordBytes: MAX }, "t.bin"))).toBe(0)
+  })
+
+  it("a handler's stop ends the read without an error: no more bytes are pulled and the part's end isn't checked", async () => {
+    const bytes = concat([record(0x83), record(0x167, [1, 2]), record(0x84)])
+    const seen: Array<number> = []
+    const stopAt = (r: Biff12Record) => {
+      seen.push(r.type)
+      return r.type === 0x167 ? "stop" as const : undefined
+    }
+    // a cut-off record and a stream error after the stop are never seen
+    const rest = Stream.concat(Stream.make(new Uint8Array([0x85])), Stream.fail(new MalformedFile({ format: "zip", reason: "CRC-32 mismatch" })))
+    const records = counter("records")
+    const count = await Effect.runPromise(metered(records, readRecords(Stream.concat(Stream.make(bytes), rest), stopAt, { maxRecordBytes: MAX }, "t.bin")))
+    expect(seen).toEqual([0x83, 0x167])
+    expect(count).toBe(2)
+    expect(records.total()).toBe(2)
+    // the splitter hands the stop back, like an error, at the record that stopped
+    const splitter = new RecordSplitter("t.bin", MAX)
+    expect(splitter.feed(bytes, (r) => (r.type === 0x167 ? "stop" : undefined))).toBe("stop")
+    expect(splitter.offset).toBe(record(0x83).length + record(0x167, [1, 2]).length)
+  })
+})
+
+describe("fixed record layouts", () => {
+  it("a record is checked once against its declared minimum: at the minimum it reads, below it is undefined", () => {
+    const reader = new FixedReader()
+    const data = new Uint8Array([...u32(0xFFFFFFFE), ...f64(-2.5), 0x34, 0x12, 0x7F])
+    expect(reader.fixed(data, data.length + 1)).toBeUndefined()
+    const f = reader.fixed(data, data.length)!
+    expect([f.u32(0), f.i32(0), f.f64(4), f.u16(12), f.u8(14)]).toEqual([0xFFFFFFFE, -2, -2.5, 0x1234, 0x7F])
+    expect(reader.fixed(new Uint8Array(0), 0)?.data.length).toBe(0)
+  })
+
+  it("reads a record's own bytes when it is a view inside a larger buffer", () => {
+    const buffer = new Uint8Array([9, 9, 9, ...f64(1e300), ...u32(7), 9, 9])
+    const f = new FixedReader().fixed(buffer.subarray(3, 15), 12)!
+    expect([f.f64(0), f.u32(8)]).toEqual([1e300, 7])
+  })
 })
 
 describe("biff12 strings", () => {
   it("reads an XLWideString and the offset after it", () => {
     const data = new Uint8Array([0xEE, ...wide("Sheet1"), 0xDD])
-    expect(readWideString(data, 1, 100)).toEqual({ value: "Sheet1", end: 1 + 4 + 12 })
-    expect(readWideString(new Uint8Array(wide("")), 0, 100)).toEqual({ value: "", end: 4 })
-    expect(readWideString(new Uint8Array(wide("é😀")), 0, 100)).toEqual({ value: "é😀", end: 4 + 6 })
+    expect(readWideString(data, 1, 100)).toEqual({ _tag: "Ok", value: "Sheet1", end: 1 + 4 + 12 })
+    expect(readWideString(new Uint8Array(wide("")), 0, 100)).toEqual({ _tag: "Ok", value: "", end: 4 })
+    expect(readWideString(new Uint8Array(wide("é😀")), 0, 100)).toEqual({ _tag: "Ok", value: "é😀", end: 4 + 6 })
   })
 
-  it("past the data is undefined, whatever the limit; else a count over the limit is that count, before decoding", () => {
+  it("past the data is Truncated, whatever the limit; else a count over the limit is TooLong with that count, before decoding", () => {
     const data = new Uint8Array(wide("abcdef"))
-    expect(readWideString(data.subarray(0, 15), 0, 100)).toBeUndefined()
-    expect(readWideString(data, 2, 100)).toBeUndefined()
-    expect(readWideString(data, -1, 100)).toBeUndefined()
-    expect(readWideString(data, 0, 5)).toBe(6)
-    expect(readWideString(data, 0, 6)).toEqual({ value: "abcdef", end: 16 })
+    expect(readWideString(data.subarray(0, 15), 0, 100)).toEqual({ _tag: "Truncated" })
+    expect(readWideString(data, 2, 100)).toEqual({ _tag: "Truncated" })
+    expect(readWideString(data, -1, 100)).toEqual({ _tag: "Truncated" })
+    expect(readWideString(data, 0, 5)).toEqual({ _tag: "TooLong", count: 6 })
+    expect(readWideString(data, 0, 6)).toEqual({ _tag: "Ok", value: "abcdef", end: 16 })
+    // the real length, not the limit + 1
+    expect(readWideString(data, 0, 2)).toEqual({ _tag: "TooLong", count: 6 })
+    expect(readWideString(data, 0, 0)).toEqual({ _tag: "TooLong", count: 6 })
     // a huge count in a tiny record is a broken record (past the data), whatever the limit
     const huge = new Uint8Array(u32(0x7FFFFFFF))
-    expect(readWideString(huge, 0, 1000)).toBeUndefined()
-    expect(readWideString(huge, 0, Infinity)).toBeUndefined()
+    expect(readWideString(huge, 0, 1000)).toEqual({ _tag: "Truncated" })
+    expect(readWideString(huge, 0, Infinity)).toEqual({ _tag: "Truncated" })
   })
 
   it("an XLNullableWideString of count 0xFFFFFFFF is no string", () => {
-    expect(readNullableWideString(new Uint8Array(nullableWide(undefined)), 0, 100)).toEqual({ value: undefined, end: 4 })
-    expect(readNullableWideString(new Uint8Array(nullableWide("rId1")), 0, 100)).toEqual({ value: "rId1", end: 12 })
-    expect(readNullableWideString(new Uint8Array(3), 0, 100)).toBeUndefined()
+    expect(readNullableWideString(new Uint8Array(nullableWide(undefined)), 0, 100)).toEqual({ _tag: "Ok", value: undefined, end: 4 })
+    expect(readNullableWideString(new Uint8Array(nullableWide("rId1")), 0, 100)).toEqual({ _tag: "Ok", value: "rId1", end: 12 })
+    expect(readNullableWideString(new Uint8Array(3), 0, 100)).toEqual({ _tag: "Truncated" })
   })
 
   it("a RichStr's text follows its flags byte; runs and phonetic data after it are ignored", () => {
     const rich = new Uint8Array([0x03, ...wide("hello"), ...u32(1), 0, 0, 1, 0, 9, 9, 9])
-    expect(readRichStr(rich, 0, 100)).toEqual({ value: "hello", end: 15 })
-    expect(readRichStr(new Uint8Array(0), 0, 100)).toBeUndefined()
-    expect(readRichStr(rich, 0, 4)).toBe(5)
+    expect(readRichStr(rich, 0, 100)).toEqual({ _tag: "Ok", value: "hello", end: 15 })
+    expect(readRichStr(new Uint8Array(0), 0, 100)).toEqual({ _tag: "Truncated" })
+    expect(readRichStr(rich, 0, 4)).toEqual({ _tag: "TooLong", count: 5 })
   })
 })

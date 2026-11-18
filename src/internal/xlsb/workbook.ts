@@ -13,13 +13,13 @@
  * @internal
  */
 import { Effect } from "effect"
-import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
+import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { DefinedName } from "../../Workbook.ts"
-import { Fields } from "../binary.ts"
 import { readNullableWideString, readWideString } from "../biff12/fields.ts"
+import { type Biff12Record, type Handled, readRecords } from "../biff12/records.ts"
+import { type Fixed, FixedReader, type StringFailure } from "../binary/layout.ts"
 import { malformedIn, type SheetEntry, sheetVisibility } from "../package.ts"
-import { type Biff12Record, readRecords } from "../biff12/records.ts"
 import { areaText, BIFF12_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import { toDefinedNames } from "../workbook.ts"
@@ -28,8 +28,15 @@ import type { ZipEntry } from "../zip/directory.ts"
 
 export const malformed = malformedIn("xlsb")
 
-/** A string of `actual` code units, over maxStringLength. */
-export const tooLong = (limits: Limits, actual: number) => new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual })
+/**
+ * The error of a string read that failed: a `LimitExceeded` with the
+ * string's length if it is over maxStringLength, else (it runs past its
+ * record) a MalformedFile for `reason`.
+ */
+export const stringError = (read: StringFailure, limits: Limits, reason: string, part: string, offset: number): SpreadsheetError =>
+  read._tag === "TooLong"
+    ? new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: read.count })
+    : malformed(reason, part, offset)
 
 const BRT_NAME = 0x0027
 const BRT_BEGIN_BOOK = 0x0083
@@ -128,20 +135,26 @@ const AREA_3D = new Set([0x3B, 0x5B, 0x7B])
 const REF_ERR_3D = new Set([0x3C, 0x5C, 0x7C])
 const AREA_ERR_3D = new Set([0x3D, 0x5D, 0x7D])
 
-/** The reference of a name formula's tokens (`rgce`, `cce` bytes at `at`), when it is a single 3-D one. */
-const nameRef = (f: Fields, at: number, cce: number): RefBuilder | undefined => {
-  const ptg = f.u8(at)
-  if (ptg === undefined) return undefined
-  const ixti = f.u16(at + 1)!
-  // PtgRef3d: ixti, row u32, column u16 (flags in its high bits)
-  if (cce === 9 && (REF_3D.has(ptg) || REF_ERR_3D.has(ptg))) {
-    const r = f.u32(at + 3)!
-    const c = f.u16(at + 7)!
-    return { kind: REF_3D.has(ptg) ? "ref" : "refErr", ixti, xti: MISSING_XTI, r1: r, r2: r, c1: c, c2: c }
+/**
+ * The reference of a name formula's tokens (`rgce`, `cce` bytes at `at`,
+ * all inside the record: checked by the caller), when it is a single 3-D
+ * one. Its fields are read only for those two lengths, so only inside the
+ * formula.
+ */
+const nameRef = (f: Fixed, at: number, cce: number): RefBuilder | undefined => {
+  // PtgRef3d: ptg, ixti u16, row u32, column u16 (flags in its high bits)
+  if (cce === 9) {
+    const ptg = f.u8(at)
+    if (!REF_3D.has(ptg) && !REF_ERR_3D.has(ptg)) return undefined
+    const r = f.u32(at + 3)
+    const c = f.u16(at + 7)
+    return { kind: REF_3D.has(ptg) ? "ref" : "refErr", ixti: f.u16(at + 1), xti: MISSING_XTI, r1: r, r2: r, c1: c, c2: c }
   }
-  // PtgArea3d: ixti, first row u32, last row u32, first column u16, last column u16
-  if (cce === 15 && (AREA_3D.has(ptg) || AREA_ERR_3D.has(ptg))) {
-    return { kind: AREA_3D.has(ptg) ? "area" : "areaErr", ixti, xti: MISSING_XTI, r1: f.u32(at + 3)!, r2: f.u32(at + 7)!, c1: f.u16(at + 11)!, c2: f.u16(at + 13)! }
+  // PtgArea3d: ptg, ixti u16, first row u32, last row u32, first column u16, last column u16
+  if (cce === 15) {
+    const ptg = f.u8(at)
+    if (!AREA_3D.has(ptg) && !AREA_ERR_3D.has(ptg)) return undefined
+    return { kind: AREA_3D.has(ptg) ? "area" : "areaErr", ixti: f.u16(at + 1), xti: MISSING_XTI, r1: f.u32(at + 3), r2: f.u32(at + 7), c1: f.u16(at + 11), c2: f.u16(at + 13) }
   }
   return undefined
 }
@@ -177,23 +190,25 @@ export const readWorkbookBin = (
     const xtis: Array<number> = []
     let date1904 = false
     const max = limits.maxStringLength
-    let records = 0
+    const reader = new FixedReader()
     const handle = (record: Biff12Record): SpreadsheetError | undefined => {
-      // a workbook part starts with BrtBeginBook
-      if (records++ === 0 && record.type !== BRT_BEGIN_BOOK) return malformed(`not a workbook part: it starts with record 0x${record.type.toString(16)}`, part, record.offset)
-      const f = new Fields(record.data)
+      const data = record.data
+      // a workbook part starts with BrtBeginBook (its first record is the one at offset 0)
+      if (record.offset === 0 && record.type !== BRT_BEGIN_BOOK) return malformed(`not a workbook part: it starts with record 0x${record.type.toString(16)}`, part, record.offset)
       switch (record.type) {
         case BRT_BUNDLE_SH: {
-          // hsState u32, iTabID u32, strRelID (nullable), strName
+          // hsState u32, iTabID u32, then strRelID (nullable) and strName
           if (sheets.length >= limits.maxSheets) {
             return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: sheets.length + 1 })
           }
+          const truncated = "truncated sheet record"
+          const f = reader.fixed(data, 8)
+          if (f === undefined) return malformed(truncated, part, record.offset)
           const state = f.u32(0)
-          const rel = readNullableWideString(record.data, 8, max)
-          const name = rel === undefined || typeof rel === "number" ? rel : readWideString(record.data, rel.end, max)
-          if (state === undefined || name === undefined || rel === undefined) return malformed("truncated sheet record", part, record.offset)
-          if (typeof rel === "number") return tooLong(limits, rel)
-          if (typeof name === "number") return tooLong(limits, name)
+          const rel = readNullableWideString(data, 8, max)
+          if (rel._tag !== "Ok") return stringError(rel, limits, truncated, part, record.offset)
+          const name = readWideString(data, rel.end, max)
+          if (name._tag !== "Ok") return stringError(name, limits, truncated, part, record.offset)
           sheets.push({
             name: name.value,
             visibility: sheetVisibility(state),
@@ -201,9 +216,12 @@ export const readWorkbookBin = (
           })
           return undefined
         }
-        case BRT_WB_PROP:
-          date1904 = ((f.u32(0) ?? 0) & 0x01) !== 0
+        case BRT_WB_PROP: {
+          // flags u32 (f1904 bit 0), ...; a record too short for them, as Excel would, means the 1900 system
+          const f = reader.fixed(data, 4)
+          date1904 = f !== undefined && (f.u32(0) & 0x01) !== 0
           return undefined
+        }
         case BRT_SUP_SELF:
         case BRT_SUP_SAME:
           if (books.length < MAX_BOOKS) books.push(SELF_BOOK)
@@ -216,18 +234,19 @@ export const readWorkbookBin = (
           const link = ++externals
           if (books.length >= MAX_BOOKS) return undefined
           // a null id is a complete record: the book has no link part, so its references are #REF!
-          const rel = readNullableWideString(record.data, 0, max)
-          if (rel === undefined) return malformed("truncated external book record", part, record.offset)
-          if (typeof rel === "number") return tooLong(limits, rel)
+          const rel = readNullableWideString(data, 0, max)
+          if (rel._tag !== "Ok") return stringError(rel, limits, "truncated external book record", part, record.offset)
           books.push({ kind: "external", link, relationshipId: rel.value })
           return undefined
         }
         case BRT_EXTERN_SHEET: {
           // cXti u32, then cXti x (iSupBook u32, itabFirst i32, itabLast i32)
+          const f = reader.fixed(data, 4)
+          // the XTIs are the record's tail: checked against its length as a whole
+          if (f === undefined || 4 + 12 * f.u32(0) > data.length) return malformed("truncated external sheet record", part, record.offset)
           const count = f.u32(0)
-          if (count === undefined || 4 + 12 * count > record.data.length) return malformed("truncated external sheet record", part, record.offset)
           // progress: k up to count, which fits in the record (checked above); at most MAX_XTIS kept
-          for (let k = 0; k < count && xtis.length < 3 * MAX_XTIS; k++) xtis.push(f.u32(4 + 12 * k)! | 0, f.u32(8 + 12 * k)! | 0, f.u32(12 + 12 * k)! | 0)
+          for (let k = 0; k < count && xtis.length < 3 * MAX_XTIS; k++) xtis.push(f.i32(4 + 12 * k), f.i32(8 + 12 * k), f.i32(12 + 12 * k))
           return undefined
         }
         case BRT_NAME: {
@@ -235,13 +254,15 @@ export const readWorkbookBin = (
           if (names.length >= limits.maxDefinedNames) {
             return new LimitExceeded({ limit: "maxDefinedNames", max: limits.maxDefinedNames, actual: names.length + 1 })
           }
+          // the name's string comes after the fixed fields, so a record it fits in holds them
+          const name = readWideString(data, 9, max)
+          if (name._tag !== "Ok") return stringError(name, limits, "truncated defined name", part, record.offset)
+          // the formula: its length, then that many bytes of tokens, all inside the record
+          const f = reader.fixed(data, name.end + 4)
+          if (f === undefined || name.end + 4 + f.u32(name.end) > data.length) return malformed("defined name formula past its record", part, record.offset)
           const flags = f.u32(0)
           const itab = f.u32(5)
-          const name = readWideString(record.data, 9, max)
-          if (flags === undefined || itab === undefined || name === undefined) return malformed("truncated defined name", part, record.offset)
-          if (typeof name === "number") return tooLong(limits, name)
           const cce = f.u32(name.end)
-          if (cce === undefined || name.end + 4 + cce > record.data.length) return malformed("defined name formula past its record", part, record.offset)
           const builtin = (flags & 0x20) !== 0
           names.push({
             name: builtin ? `_xlnm.${name.value}` : name.value,
@@ -256,7 +277,7 @@ export const readWorkbookBin = (
       }
     }
     return readRecords(archive.read(entry), handle, limits, part).pipe(
-      Effect.filterOrFail(() => records > 0, () => malformed("empty workbook part", part)),
+      Effect.filterOrFail((records) => records > 0, () => malformed("empty workbook part", part)),
       Effect.map((): WorkbookBin => {
         const unique = uniqueSheetNames(sheets.map((s) => s.name))
         const xtiTable = Int32Array.from(xtis)
@@ -271,9 +292,6 @@ export const readWorkbookBin = (
     )
   })
 
-/** Ends a part's read early: it is caught right away, never seen outside. */
-const DONE = new MalformedFile({ format: "xlsb", reason: "read ends here" })
-
 /**
  * The sheet names of an external link part (its BrtSupTabs record), at
  * most `maxSheets`. The part is read up to that record only.
@@ -285,26 +303,27 @@ export const readExternalSheets = (
 ): Effect.Effect<ReadonlyArray<string>, SpreadsheetError> =>
   Effect.suspend(() => {
     const names: Array<string> = []
-    const handle = (record: Biff12Record): SpreadsheetError | undefined => {
+    const reader = new FixedReader()
+    const truncated = "truncated external sheet list"
+    const handle = (record: Biff12Record): Handled => {
       if (record.type !== BRT_SUP_TABS) return undefined
-      const count = new Fields(record.data).u32(0)
-      if (count === undefined) return malformed("truncated external sheet list", entry.name, record.offset)
+      // cTab u32, then cTab strings
+      const f = reader.fixed(record.data, 4)
+      if (f === undefined) return malformed(truncated, entry.name, record.offset)
+      const count = f.u32(0)
       if (count > limits.maxSheets) return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: count })
       let at = 4
       // progress: k up to count (at most maxSheets); each string read advances at
       for (let k = 0; k < count; k++) {
         const name = readWideString(record.data, at, limits.maxStringLength)
-        if (name === undefined) return malformed("truncated external sheet list", entry.name, record.offset)
-        if (typeof name === "number") return tooLong(limits, name)
+        if (name._tag !== "Ok") return stringError(name, limits, truncated, entry.name, record.offset)
         names.push(name.value)
         at = name.end
       }
-      return DONE
+      // the sheet list is all this part is read for
+      return "stop"
     }
-    return readRecords(archive.read(entry), handle, limits, entry.name).pipe(
-      Effect.catchIf((error) => error === DONE, () => Effect.void),
-      Effect.as(names)
-    )
+    return Effect.as(readRecords(archive.read(entry), handle, limits, entry.name), names)
   })
 
 /**
