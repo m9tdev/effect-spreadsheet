@@ -154,6 +154,25 @@ describe("Workbook", () => {
       assert.strictEqual((yield* Workbook.sheet(wb, 0)).name, "Data")
     }))
 
+  it.effect("a sheet number is looked up by index, not by position", () =>
+    Effect.gen(function*() {
+      const offset = Workbook.make({
+        format: "csv",
+        limits: SpreadsheetLimits.defaults,
+        sheets: [{ name: "One", index: 1, visibility: "visible" }, { name: "Two", index: 2, visibility: "visible" }],
+        rows: (sheet) => Stream.make({ index: 0, hidden: false, cells: [Cell.text(0, sheet.name)] })
+      })
+      assert.strictEqual(Workbook.findSheet(offset, 1)?.name, "One")
+      assert.strictEqual(Workbook.findSheet(offset, 2)?.name, "Two")
+      assert.isUndefined(Workbook.findSheet(offset, 0))
+      const rows = yield* Stream.runCollect(Workbook.rows(offset, 1))
+      assert.strictEqual(Cell.value(Array.from(rows)[0]!.cells[0]!), "One")
+      // a copy of a workbook with its first sheet dropped keeps the others' indexes
+      const dropped: Workbook.Workbook = { ...wb, sheets: wb.sheets.slice(1) }
+      assert.strictEqual(Workbook.findSheet(dropped, 1)?.name, "Hidden")
+      assert.isUndefined(Workbook.findSheet(dropped, 0))
+    }))
+
   it.effect("missing sheet fails with SheetNotFound", () =>
     Effect.gen(function*() {
       const e1 = yield* Effect.flip(Stream.runCollect(Workbook.rows(wb, "Nope")))
