@@ -3,7 +3,7 @@ import * as Result from "effect/Result"
 import { describe, expect, it } from "vitest"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import { readDirectory, type ZipEntry } from "../src/internal/zip/directory.ts"
-import { detect } from "../src/internal/sniff.ts"
+import { detect } from "../src/internal/probe.ts"
 import { makeZip } from "./helpers/zip.ts"
 
 const limits = SpreadsheetLimits.defaults

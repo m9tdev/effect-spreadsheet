@@ -5,13 +5,15 @@
  * @since 0.1.0
  */
 import { absurd, Effect, Stream } from "effect"
+import * as Result from "effect/Result"
 import type * as Cell from "./Cell.ts"
 import * as Csv from "./csv/index.ts"
 import { readCsvWorkbook } from "./internal/csv/read.ts"
 import { type Accepted, accept } from "./internal/input.ts"
+import { WorkMeter } from "./internal/meter.ts"
+import { type Detected, detect, probe } from "./internal/probe.ts"
 import { type RecordsOptions, recordsStream } from "./internal/records.ts"
-import { detect } from "./internal/sniff.ts"
-import { readXls } from "./internal/xls/read.ts"
+import { readProbed } from "./internal/xls/read.ts"
 import { readXlsb } from "./internal/xlsb/read.ts"
 import { readXlsx } from "./internal/xlsx/read.ts"
 import { type InvalidOption, LimitExceeded, type SpreadsheetError, UnsupportedFormat } from "./SpreadsheetError.ts"
@@ -57,15 +59,19 @@ export const detectFormat = (
 ): Effect.Effect<Format, SpreadsheetError> =>
   accept(bytes, options?.limits, detected)
 
-/** The formats `read` hands to a reader; see the `switch` in `read`. */
-type Readable = "csv" | "xlsx" | "xlsb" | "xls" | "cfb"
+/**
+ * The formats `read` hands to a reader by format; see the `switch` in
+ * `read`. Compound files and bare BIFF streams aren't among them: they go
+ * by what the probe found in them.
+ */
+type Readable = "csv" | "xlsx" | "xlsb"
 
 /**
- * Why each format without a reader fails. Typed over every `Format` that
- * isn't `Readable`, so a new `Format` doesn't compile until it either gets a
- * reader in `read` or a reason here.
+ * Why each format without a reader fails. Typed over every detected
+ * `Format` that isn't `Readable`, so a new `Format` doesn't compile until it
+ * either gets a reader in `read` or a reason here.
  */
-const unsupported: Record<Exclude<Format, Readable>, string> = {
+const unsupported: Record<Exclude<Detected["format"], Readable>, string> = {
   ods: "ODS reading is not implemented",
   spreadsheetml: "SpreadsheetML 2003 reading is not implemented yet",
   sylk: "SYLK reading is not implemented",
@@ -98,7 +104,11 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
   // suspend: the options are read when the effect runs, each time it runs
   Effect.suspend(() =>
     accept(bytes, options?.limits, (input) =>
-      Effect.flatMap(detected(input), (format): Effect.Effect<Workbook, SpreadsheetError> => {
+      Effect.flatMap(WorkMeter, (meter): Effect.Effect<Workbook, SpreadsheetError> => {
+        const probed = probe(input.bytes, input.limits, meter)
+        if (Result.isFailure(probed)) return Effect.fail(probed.failure)
+        if (probed.success._tag !== "Detected") return readProbed(probed.success, input.limits)
+        const format = probed.success.format
         switch (format) {
           case "csv":
             return readCsvWorkbook(input.bytes, input.limits, options?.csv)
@@ -106,9 +116,6 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
             return readXlsx(input)
           case "xlsb":
             return readXlsb(input)
-          case "xls":
-          case "cfb": // an encrypted OOXML package (Encrypted), or no workbook stream
-            return readXls(input)
           case "ods":
           case "spreadsheetml":
           case "sylk":
