@@ -9,19 +9,11 @@
  *
  * @internal
  */
-import { Effect, Stream } from "effect"
+import { Effect, Pull, Stream } from "effect"
+import type * as Arr from "effect/Array"
 
 /** Most bytes handed to a reader between two event-loop turns. */
 export const SLICE_BYTES = 64 * 1024
-
-/** `piece` cut into non-empty slices of at most `SLICE_BYTES` (views, not copies). */
-export const slicesOf = (piece: Uint8Array): Array<Uint8Array> => {
-  if (piece.length <= SLICE_BYTES) return piece.length === 0 ? [] : [piece]
-  const out: Array<Uint8Array> = []
-  // progress: at grows by SLICE_BYTES up to piece.length
-  for (let at = 0; at < piece.length; at += SLICE_BYTES) out.push(piece.subarray(at, Math.min(piece.length, at + SLICE_BYTES)))
-  return out
-}
 
 /**
  * The stream as one slice of at most `SLICE_BYTES` per pull, each pulled
@@ -29,8 +21,34 @@ export const slicesOf = (piece: Uint8Array): Array<Uint8Array> => {
  * pulled once the slices of the one before it have all been pulled.
  */
 export const sliced = <E, R>(bytes: Stream.Stream<Uint8Array, E, R>): Stream.Stream<Uint8Array, E, R> =>
-  bytes.pipe(
-    Stream.flatMap((piece) => Stream.fromIterable(slicesOf(piece))),
-    Stream.rechunk(1),
-    Stream.tap(() => Effect.yieldNow)
-  )
+  Stream.transformPull(bytes, (upstream) =>
+    Effect.sync(() => {
+      /** The upstream chunk being cut, the piece in it and the offset in that piece. */
+      let pieces: ReadonlyArray<Uint8Array> = []
+      let index = 0
+      let at = 0
+      const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Uint8Array>, E> = Effect.gen(function*() {
+        // progress: each iteration hands out a non-empty slice (at grows),
+        // moves past a used-up piece (index grows), or pulls one upstream
+        // chunk (consumed); upstream's end ends the stream
+        while (true) {
+          const piece = pieces[index]
+          if (piece === undefined) {
+            pieces = yield* upstream
+            index = 0
+            at = 0
+            continue
+          }
+          if (at >= piece.length) {
+            index++
+            at = 0
+            continue
+          }
+          yield* Effect.yieldNow
+          const slice = piece.subarray(at, Math.min(piece.length, at + SLICE_BYTES))
+          at += slice.length
+          return [slice] as const
+        }
+      })
+      return pull
+    }))

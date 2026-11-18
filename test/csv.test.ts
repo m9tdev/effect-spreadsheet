@@ -512,6 +512,17 @@ describe("csv: limits", () => {
     assert.strictEqual(error?._tag === "LimitExceeded" && error.limit, "maxInputBytes")
   })
 
+  it("maxInputBytes counts a stream's whole chunk before any of it is parsed", async () => {
+    // one chunk of 188 889 bytes, more than two 64 KiB slices, over a 100 000-byte limit
+    const chunk = enc("abcdefgh,ijklmnop\n".repeat(10_500)).subarray(0, 188_889)
+    const { rows, error } = await csvUntilError(Stream.make(chunk), { limits: { maxInputBytes: 100_000 } })
+    assert.strictEqual(rows.length, 0)
+    assert.deepStrictEqual(
+      error?._tag === "LimitExceeded" ? [error.limit, error.max, error.actual] : undefined,
+      ["maxInputBytes", 100_000, 188_889]
+    )
+  })
+
   it.effect("limits come from the layer, per-call overrides win", () =>
     Effect.gen(function*() {
       const e = yield* Effect.flip(csvRows("a,b,c"))
