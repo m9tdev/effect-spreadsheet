@@ -92,14 +92,15 @@ export const inflateRawWeb: InflateRaw = (compressed) => {
           continue
         }
         const result = await reader.read()
-        if (result.done) break
+        if (cancelled || result.done) break // nothing read after a cancel is handed out
         ready.push(result.value)
         held += result.value.length
         notifyNext()
       }
       state = { _tag: "Ended" }
     } catch (error) {
-      state = { _tag: "Failed", error }
+      // an error that arrives after a cancel, before the teardown, is dropped
+      state = cancelled ? { _tag: "Ended" } : { _tag: "Failed", error }
     }
     notifyNext()
   }
@@ -141,8 +142,18 @@ export const inflateRawWeb: InflateRaw = (compressed) => {
     cancel: () => {
       if (cancelled) return
       cancelled = true
-      reader.cancel().catch(() => {})
-      writer.abort().catch(() => {})
+      // The stream is torn down in a later task, not now. Node 22, and 24
+      // before 24.22, hand the output their decompressor has buffered to the
+      // stream in a callback scheduled when a read pulls, without checking
+      // whether the stream was cancelled since: cancelling in between throws
+      // an uncaught `Controller is already closed`. Such callbacks have all
+      // run before a timer fires. The pump stops reading once `cancelled` is
+      // set, so the output made meanwhile is bounded by the stream's queue.
+      // Under faked timers the teardown waits until they are released.
+      setTimeout(() => {
+        reader.cancel().catch(() => {})
+        writer.abort().catch(() => {})
+      }, 0)
       notifyNext()
       notifyPump()
     }
