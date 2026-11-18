@@ -86,14 +86,27 @@ export type CellStart = "read" | "skip" | SpreadsheetError
  */
 export class RowCells {
   /** The cells so far. */
-  cells: Array<Cell.Cell> = []
+  cells: Array<Cell.Cell>
   /** `cells` is in strictly increasing column order. */
   sorted = true
+  /** The last cell's column, -1 before the first. */
+  private last = -1
+
+  /**
+   * Starts with `cells`, empty. The caller allocates the array: V8 keeps
+   * the array's allocation feedback at the caller's `[]`, and an array
+   * allocated here instead was measurably slower to fill (a wide row).
+   */
+  constructor(cells: Array<Cell.Cell>) {
+    this.cells = cells
+  }
 
   /** Adds `cell`; returns how many cells it sorted, compacting the row (0 when it didn't). */
   add(cell: Cell.Cell, maxColumns: number): number {
     const cells = this.cells
-    if (cells.length > 0 && cell.column <= cells[cells.length - 1]!.column) this.sorted = false
+    const column = cell.column
+    if (column <= this.last) this.sorted = false
+    this.last = column
     cells.push(cell)
     // repeated columns don't pile up: past 2 x maxColumns cells an unsorted
     // row is compacted (to at most maxColumns), so the work is amortized
@@ -101,6 +114,7 @@ export class RowCells {
     const sorting = cells.length
     compact(cells)
     this.sorted = true
+    this.last = cells[cells.length - 1]!.column
     return sorting
   }
 
@@ -109,10 +123,11 @@ export class RowCells {
     return this.sorted ? this.cells : compact(this.cells)
   }
 
-  /** Starts a new row; the cells given out by `done` stay as they are. */
-  reset(): void {
-    this.cells = []
+  /** Starts a new row with `cells`, empty (see the constructor); the cells given out by `done` stay as they are. */
+  reset(cells: Array<Cell.Cell>): void {
+    this.cells = cells
     this.sorted = true
+    this.last = -1
   }
 }
 
@@ -167,7 +182,7 @@ export class RowBuilder<At> {
   /** The open row's index, undefined until it is numbered (opened without one, before its first cell). */
   private index: number | undefined
   private hidden = false
-  private readonly row = new RowCells()
+  private readonly row = new RowCells([])
   /** The last cell's column, -1 before the first. */
   private lastColumn = -1
 
@@ -217,7 +232,7 @@ export class RowBuilder<At> {
     this.open = true
     this.index = index
     this.hidden = hidden
-    this.row.reset()
+    this.row.reset([])
     this.lastColumn = -1
     return undefined
   }
@@ -313,8 +328,15 @@ export class HeldRows {
   private hotIndex = -1
   private hot: RowCells | undefined
   private readonly count: SheetCounter
-  private heldCells = 0
-  private sortedCells = 0
+  // the counts below are fields to read, never to set: a format reads them
+  // once per record, also before the code is optimized, where a getter
+  // call costs more than the read
+  /** Cells held: those of the rows not finished yet. */
+  held = 0
+  /** Cells sorted so far, compacting rows: the sorting work. */
+  sorted = 0
+  /** The work done so far: cells added, cells sorted and rows finished. */
+  work = 0
 
   constructor(limits: Limits) {
     this.count = new SheetCounter(limits)
@@ -331,21 +353,6 @@ export class HeldRows {
   /** Whether finished rows wait to be taken. */
   get ready(): boolean {
     return this.out.length > 0
-  }
-
-  /** Cells held: those of the rows not finished yet. */
-  get held(): number {
-    return this.heldCells
-  }
-
-  /** Cells sorted so far, compacting rows: the sorting work. */
-  get sorted(): number {
-    return this.sortedCells
-  }
-
-  /** The work done so far: cells added, cells sorted and rows finished. */
-  get work(): number {
-    return this.count.cells + this.sortedCells + this.count.rows
   }
 
   /** Whether row `index` holds cells. */
@@ -365,14 +372,16 @@ export class HeldRows {
     if (failed !== undefined) return failed
     let row = this.hotIndex === index ? this.hot : this.rows.get(index)
     if (row === undefined) {
-      row = new RowCells()
+      row = new RowCells([])
       this.rows.set(index, row)
     }
     this.hotIndex = index
     this.hot = row
     const before = row.cells.length
-    this.sortedCells += row.add(cell, count.limits.maxColumns)
-    this.heldCells += row.cells.length - before
+    const sorted = row.add(cell, count.limits.maxColumns)
+    this.held += row.cells.length - before
+    this.sorted += sorted
+    this.work += 1 + sorted
     return undefined
   }
 
@@ -382,20 +391,22 @@ export class HeldRows {
    */
   finishRow(index: number, hidden: boolean): SpreadsheetError | undefined {
     const row = this.rows.get(index)
-    let cells: Array<Cell.Cell> = []
     if (row !== undefined) {
       this.rows.delete(index)
-      this.heldCells -= row.cells.length
+      this.held -= row.cells.length
       if (this.hotIndex === index) {
         this.hotIndex = -1
         this.hot = undefined
       }
-      if (!row.sorted) this.sortedCells += row.cells.length
-      cells = row.done()
+      if (!row.sorted) {
+        this.sorted += row.cells.length
+        this.work += row.cells.length
+      }
     }
     const failed = this.count.rowIndex(index) ?? this.count.row()
     if (failed !== undefined) return failed
-    this.out.push({ index, hidden, cells })
+    this.work++
+    this.out.push({ index, hidden, cells: row === undefined ? [] : row.done() })
     return undefined
   }
 }
