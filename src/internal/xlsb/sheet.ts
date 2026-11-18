@@ -36,17 +36,17 @@
  * @internal
  */
 import { Effect, type Stream } from "effect"
-import { absurd } from "effect/Function"
 import * as Cell from "../../Cell.ts"
-import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
+import type { SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import type { ColumnSpan, Range, Row, SheetDetails } from "../../Workbook.ts"
+import type { Range, Row, SheetDetails } from "../../Workbook.ts"
 import { decodeRk, ERROR_CODES, Fields } from "../binary.ts"
 import { readRichStr, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords, recordDecoder } from "../biff12/records.ts"
 import { decoded, step } from "../decode.ts"
 import { type CellStyles, numberCell } from "../numFmt.ts"
-import { compact, mergeSpans, NO_ROWS } from "../sheet.ts"
+import { LayoutBuilder } from "../sheet/layout.ts"
+import { IGNORED, RowBuilder } from "../sheet/rows.ts"
 import { malformed, tooLong } from "./workbook.ts"
 
 export interface SheetContext {
@@ -132,46 +132,30 @@ class Scope {
   }
 }
 
-/**
- * The row being collected: None before the first BrtRowHdr and after a row
- * is emitted (by the next BrtRowHdr, BrtEndSheetData or the end of the
- * part); Open from a BrtRowHdr on, holding that row's cells. `lastColumn`
- * is the last cell's column (short cells follow it), -1 before the first.
- */
-type OpenRow = {
-  readonly _tag: "Open"
-  readonly index: number
-  readonly hidden: boolean
-  readonly cells: Array<Cell.Cell>
-  sorted: boolean
-  lastColumn: number
-}
-type RowState = { readonly _tag: "None" } | OpenRow
-const NO_ROW: RowState = { _tag: "None" }
-
 const errorCode = (code: number): string => ERROR_CODES.get(code) ?? "#N/A"
 
 /** Collects rows from a worksheet's records. Exported for tests. */
 export class SheetRows {
-  /** Completed rows not yet emitted. */
-  out: Array<Row> = []
-
-  /** The completed rows not yet taken; `out` starts over. */
-  take(): ReadonlyArray<Row> {
-    const out = this.out
-    if (out.length === 0) return NO_ROWS
-    this.out = []
-    return out
-  }
-  private cells = 0
-  private rowCount = 0
-  /** The last row's index, -1 before the first row. */
-  private previousRow = -1
-  private row: RowState = NO_ROW
+  /**
+   * The rows: XLSB counts a row against maxRows at its BrtRowHdr, and a
+   * cell record outside a row is MalformedFile.
+   */
+  readonly rows: RowBuilder<Biff12Record>
   private readonly context: SheetContext
 
   constructor(context: SheetContext) {
     this.context = context
+    const part = context.part
+    this.rows = new RowBuilder<Biff12Record>(context.limits, {
+      countRowsAt: "open",
+      cellOutsideRow: (record) => malformed(`cell record 0x${record.type.toString(16)} outside a row`, part, record.offset),
+      malformed: (reason, record) => malformed(reason, part, record.offset)
+    })
+  }
+
+  /** The completed rows not yet taken. */
+  take(): ReadonlyArray<Row> {
+    return this.rows.take()
   }
 
   private readonly scope = new Scope()
@@ -181,60 +165,43 @@ export class SheetRows {
     const type = record.type
     if (!this.scope.step(record)) return undefined
     if (type === BRT_ROW_HDR) return this.openRow(record)
-    if (type === BRT_END_SHEET_DATA) return this.closeRow()
+    if (type === BRT_END_SHEET_DATA) return this.rows.closeRow()
     if (type <= BRT_SHORT_ISST || type === BRT_CELL_RSTRING) return this.cell(record)
     return undefined
   }
 
   /** The end of the part: the open row, if any, is complete (MalformedFile if a future-record block is still open). */
-  end = (): SpreadsheetError | undefined => this.scope.end(this.context.part) ?? this.closeRow()
+  end = (): SpreadsheetError | undefined => this.scope.end(this.context.part) ?? this.rows.closeRow()
 
+  /** A BrtRowHdr: the open row is complete (even if this header is truncated), and the next one opens. */
   private openRow(record: Biff12Record): SpreadsheetError | undefined {
-    const error = this.closeRow()
-    if (error !== undefined) return error
-    const limits = this.context.limits
+    const closed = this.rows.closeRow()
+    if (closed !== undefined) return closed
     // rw u32, ixfe u32, miyRw u16, flags u16 (fDyZero), ...
     const f = new Fields(record.data)
     const index = f.u32(0)
     const flags = f.u16(10)
     if (index === undefined || flags === undefined) return malformed("truncated row header", this.context.part, record.offset)
-    if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
-    if (index <= this.previousRow) return malformed(`row ${index + 1} after row ${this.previousRow + 1}`, this.context.part, record.offset)
-    if (++this.rowCount > limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: this.rowCount })
-    this.previousRow = index
-    this.row = { _tag: "Open", index, hidden: (flags & ROW_HIDDEN) !== 0, cells: [], sorted: true, lastColumn: -1 }
-    return undefined
-  }
-
-  private closeRow(): undefined {
-    const row = this.row
-    switch (row._tag) {
-      case "None":
-        return undefined
-      case "Open":
-        this.out.push({ index: row.index, hidden: row.hidden, cells: row.sorted ? row.cells : compact(row.cells) })
-        this.row = NO_ROW
-        return undefined
-      default:
-        return absurd(row)
-    }
+    return this.rows.openRow(index, (flags & ROW_HIDDEN) !== 0, record)
   }
 
   private cell(record: Biff12Record): SpreadsheetError | undefined {
     const { part, limits } = this.context
-    const row = this.row
-    if (row._tag !== "Open") return malformed(`cell record 0x${record.type.toString(16)} outside a row`, part, record.offset)
+    const rows = this.rows
+    const outside = rows.beginCell(record)
+    if (outside !== undefined) return outside === IGNORED ? undefined : outside
     const type = record.type
     const data = record.data
     const f = new Fields(data)
     const short = type >= BRT_SHORT_BLANK && type <= BRT_SHORT_ISST
     // Cell: column u32 and style u24 (+ flags byte); the short forms have no column
-    const column = short ? row.lastColumn + 1 : f.u32(0)
+    const column = short ? rows.nextColumn : f.u32(0)
     const style = f.u32(short ? 0 : 4)
     const at = short ? 4 : 8
     const truncated = () => malformed(`truncated cell record 0x${type.toString(16)}`, part, record.offset)
     if (column === undefined || style === undefined) return truncated()
-    if (column >= limits.maxColumns) return new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: column + 1 })
+    const placed = rows.placeCell(column)
+    if (placed !== undefined) return placed
     let cell: Cell.Cell
     switch (type) {
       case BRT_CELL_BLANK:
@@ -296,20 +263,7 @@ export class SheetRows {
       default:
         return undefined
     }
-    if (++this.cells > limits.maxCellsPerSheet) {
-      return new LimitExceeded({ limit: "maxCellsPerSheet", max: limits.maxCellsPerSheet, actual: this.cells })
-    }
-    row.lastColumn = column
-    const cells = row.cells
-    if (cells.length > 0 && column <= cells[cells.length - 1]!.column) row.sorted = false
-    cells.push(cell)
-    // repeated columns don't pile up: past 2 x maxColumns cells an unsorted
-    // row is compacted (to at most maxColumns), so the work is amortized
-    if (!row.sorted && cells.length > 2 * limits.maxColumns) {
-      compact(cells)
-      row.sorted = true
-    }
-    return undefined
+    return rows.addCell(cell)
   }
 
   /** A number cell, a Date when its style has a date format. */
@@ -364,40 +318,32 @@ export const sheetDetails = (
   limits: Limits
 ): Effect.Effect<SheetDetails, SpreadsheetError> =>
   Effect.suspend(() => {
-    const hidden: Array<ColumnSpan> = []
-    const merges: Array<Range> = []
-    let colInfos = 0
-    let dimension: Range | undefined
+    const layout = new LayoutBuilder(limits)
     const scope = new Scope()
     const handle = (record: Biff12Record): SpreadsheetError | undefined => {
       if (!scope.step(record)) return undefined
       switch (record.type) {
         case BRT_WS_DIM: {
           const r = range(new Fields(record.data), 0)
-          if (r !== undefined) dimension = r
+          if (r !== undefined) layout.dimension(r)
           return undefined
         }
         case BRT_COL_INFO: {
-          if (++colInfos > limits.maxColumns) return new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: colInfos })
+          const counted = layout.columnRecord()
+          if (counted !== undefined) return counted
           // colFirst u32, colLast u32, coldx u32, ixfe u32, flags u16 (fHidden bit 0)
           const f = new Fields(record.data)
           const first = f.u32(0)
           const last = f.u32(4)
           const flags = f.u16(16)
           if (first === undefined || last === undefined || flags === undefined) return malformed("truncated column info", part, record.offset)
-          if ((flags & 0x01) === 0) return undefined
-          const end = Math.min(last, limits.maxColumns - 1)
-          if (first <= end) hidden.push({ first, last: end })
+          if ((flags & 0x01) !== 0) layout.hideColumns(first, last)
           return undefined
         }
         case BRT_MERGE_CELL: {
           const r = range(new Fields(record.data), 0)
           if (r === undefined) return malformed("bad merge range", part, record.offset)
-          if (merges.length >= limits.maxCellsPerSheet) {
-            return new LimitExceeded({ limit: "maxCellsPerSheet", max: limits.maxCellsPerSheet, actual: merges.length + 1 })
-          }
-          merges.push(r)
-          return undefined
+          return layout.merge(r)
         }
         default:
           return undefined
@@ -406,10 +352,6 @@ export const sheetDetails = (
     return Effect.flatMap(readRecords(bytes, handle, limits, part), () => {
       const error = scope.end(part)
       if (error !== undefined) return Effect.fail(error)
-      return Effect.succeed<SheetDetails>({
-        hiddenColumns: mergeSpans(hidden),
-        merges,
-        ...(dimension === undefined ? {} : { dimension })
-      })
+      return Effect.succeed(layout.result())
     })
   })

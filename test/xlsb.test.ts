@@ -207,9 +207,8 @@ describe("xlsb reader", () => {
     })
   })
 
-  /** Cells the reader holds for its open row (read from its private state). */
-  const heldCells = (rows: SheetRows): number =>
-    (rows as unknown as { readonly row: { readonly cells?: ReadonlyArray<unknown> } }).row.cells?.length ?? 0
+  /** Cells the reader holds for its open row. */
+  const heldCells = (rows: SheetRows): number => rows.rows.held
 
   it("a row repeating its columns holds at most 2 x maxColumns cells", () => {
     const limits = { ...SpreadsheetLimits.defaults, maxColumns: 8 }
@@ -228,8 +227,9 @@ describe("xlsb reader", () => {
     // more than one pass over the columns is held before a compaction
     expect(most).toBeGreaterThan(8)
     expect(rows.end()).toBeUndefined()
-    expect(rows.out[0]!.cells.map((c) => c.column)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
-    expect(rows.out[0]!.cells.map((c) => Cell.value(c))).toEqual([999, 998, 997, 996, 995, 994, 993, 992])
+    const out = rows.take()
+    expect(out[0]!.cells.map((c) => c.column)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+    expect(out[0]!.cells.map((c) => Cell.value(c))).toEqual([999, 998, 997, 996, 995, 994, 993, 992])
   })
 
   it("chart sheets have no rows; macro-enabled packages read the same", async () => {
