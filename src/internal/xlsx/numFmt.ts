@@ -90,15 +90,21 @@ export interface NumberFormat {
 
 const GENERAL: NumberFormat = { code: undefined, date: false }
 
+const LOCALE_DATE: NumberFormat = { code: undefined, date: true }
+
+/** The fixed built-in formats, classified once. */
+const BUILTIN: ReadonlyMap<number, NumberFormat> = new Map(
+  Array.from(BUILTIN_FORMATS, ([id, code]) => [id, { code, date: isDateCode(code) }])
+)
+
+/** The format for a numFmtId with no custom code: shared, never classified again. */
+export const builtinFormat = (id: number): NumberFormat =>
+  id === 0 ? GENERAL : BUILTIN.get(id) ?? (LOCALE_DATE_IDS.has(id) ? LOCALE_DATE : GENERAL)
+
 /** The format for a numFmtId, given the workbook's custom codes. */
 export const formatFor = (id: number, custom: ReadonlyMap<number, string>): NumberFormat => {
   const own = custom.get(id)
-  if (own !== undefined) return { code: own, date: isDateCode(own) }
-  if (id === 0) return GENERAL
-  const builtin = BUILTIN_FORMATS.get(id)
-  if (builtin !== undefined) return { code: builtin, date: isDateCode(builtin) }
-  if (LOCALE_DATE_IDS.has(id)) return { code: undefined, date: true }
-  return GENERAL
+  return own !== undefined ? { code: own, date: isDateCode(own) } : builtinFormat(id)
 }
 
 const DAY_MS = 86_400_000

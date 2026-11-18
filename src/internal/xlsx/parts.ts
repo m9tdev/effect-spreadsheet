@@ -13,7 +13,7 @@ import { parse } from "../xml/parse.ts"
 import type { XmlAttributes, XmlHandler } from "../xml/tokenizer.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
-import { formatFor, type NumberFormat } from "./numFmt.ts"
+import { builtinFormat, isDateCode, type NumberFormat } from "./numFmt.ts"
 
 export const malformed = (reason: string, part?: string) =>
   new MalformedFile({ format: "xlsx", reason, ...(part === undefined ? {} : { part }) })
@@ -309,7 +309,10 @@ export const readStyles = (
   entry: ZipEntry,
   limits: Limits
 ): Effect.Effect<Styles, SpreadsheetError> => {
-  const custom = new Map<number, string>()
+  // each custom code is classified once, here in the parse (which yields
+  // between pieces), not once per cell style after it: one code is at most
+  // maxStringLength characters
+  const custom = new Map<number, NumberFormat>()
   const xfIds: Array<number> = []
   let inCellXfs = false
   // custom codes only from <numFmts>: <dxfs><dxf><numFmt> (conditional
@@ -321,7 +324,9 @@ export const readStyles = (
       else if (name === "numFmt" && inNumFmts) {
         const id = attr(attributes, "numFmtId")
         const code = attr(attributes, "formatCode")
-        if (id !== undefined && code !== undefined && /^\d{1,9}$/.test(id)) custom.set(Number(id), code)
+        if (id !== undefined && code !== undefined && /^\d{1,9}$/.test(id)) {
+          custom.set(Number(id), { code, date: isDateCode(code) })
+        }
       } else if (name === "cellXfs") inCellXfs = true
       else if (name === "xf" && inCellXfs) {
         const id = attr(attributes, "numFmtId")
@@ -335,6 +340,7 @@ export const readStyles = (
     text: () => undefined
   }
   return Effect.map(parsePart(archive, entry, handler, limits), () => ({
-    formats: xfIds.map((id) => formatFor(id, custom))
+    // shared formats: custom ones from the parse, built-in ones from a fixed table
+    formats: xfIds.map((id) => custom.get(id) ?? builtinFormat(id))
   }))
 }
