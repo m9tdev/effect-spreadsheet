@@ -8,6 +8,7 @@ import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import type { Row } from "../src/Workbook.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xlsx from "../src/xlsx/index.ts"
+import { counter, metered } from "./helpers/meter.ts"
 import { csvRows, enc } from "./helpers/run.ts"
 import { xlsx as buildXlsx } from "./helpers/xlsx.ts"
 import { countYields } from "./helpers/yields.ts"
@@ -521,4 +522,15 @@ describe("toRecords header phase", () => {
       assert(both._tag === "LimitExceeded")
       assert.deepStrictEqual([both.limit, both.actual], ["maxRecordFields", 2])
     }))
+})
+
+describe("toRecords: work meter", () => {
+  it("the namer's key probes go to the work meter in context", async () => {
+    const rows = await rowsOf("a,a,a,\n1,2,3,4\n")
+    const probes = counter("probes")
+    const records = await Effect.runPromise(metered(probes, Stream.runCollect(Spreadsheet.toRecords(Stream.fromIterable(rows), { header: "first-row" }))))
+    expect(Array.from(records)).toEqual([{ a: 1, a_1: 2, a_2: 3, __EMPTY: 4 }])
+    // a: 1 check; a_1: the check of a and one suffix probe; a_2: the same; __EMPTY: 1 check
+    expect(probes.total()).toBe(1 + 2 + 2 + 1)
+  })
 })

@@ -207,6 +207,8 @@ describe("xlsb reader", () => {
       most = Math.max(most, heldCells(rows))
     }
     expect(most).toBeLessThanOrEqual(16)
+    // more than one pass over the columns is held before a compaction
+    expect(most).toBeGreaterThan(8)
     expect(rows.end()).toBeUndefined()
     expect(rows.out[0]!.cells.map((c) => c.column)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
     expect(rows.out[0]!.cells.map((c) => Cell.value(c))).toEqual([999, 998, 997, 996, 995, 994, 993, 992])

@@ -10,6 +10,7 @@ import type * as Arr from "effect/Array"
 import { InvalidOption, LimitExceeded } from "../SpreadsheetError.ts"
 import type { LimitOverrides, Limits } from "../SpreadsheetLimits.ts"
 import type { Row } from "../Workbook.ts"
+import { type Meter, WorkMeter } from "./meter.ts"
 import * as RecordKeys from "./recordKeys.ts"
 
 export interface RecordsOptions<D = never> {
@@ -119,7 +120,7 @@ export const validateHeader = (header: unknown): InvalidOption | undefined => {
 }
 
 /** The phase a run starts in, decided once from a valid `options.header`. */
-const initial = (header: RecordsOptions<unknown>["header"]): Phase => {
+const initial = (header: RecordsOptions<unknown>["header"], meter: Meter): Phase => {
   if (header === "first-row") return { _tag: "AwaitFirstRow" }
   if (typeof header === "number") return { _tag: "AwaitRow", at: header }
   const names = header
@@ -134,15 +135,15 @@ const initial = (header: RecordsOptions<unknown>["header"]): Phase => {
     if (typeof name === "string") entries.push([column, name])
     else dropped.add(column)
   }
-  return { _tag: "Ready", namer: RecordKeys.make(entries), explicit: { length: names.length, dropped } }
+  return { _tag: "Ready", namer: RecordKeys.make(entries, meter), explicit: { length: names.length, dropped } }
 }
 
 /** `Ready` with names from the header row's cells (only the cells present), or none without a row. */
-const ready = (row: Row | undefined): Ready => {
+const ready = (row: Row | undefined, meter: Meter): Ready => {
   const entries: Array<RecordKeys.HeaderEntry> = []
   // progress: one header cell per iteration
   if (row !== undefined) for (const cell of row.cells) entries.push([cell.column, headerName(cell)])
-  return { _tag: "Ready", namer: RecordKeys.make(entries), explicit: undefined }
+  return { _tag: "Ready", namer: RecordKeys.make(entries, meter), explicit: undefined }
 }
 
 /**
@@ -162,12 +163,19 @@ export class RecordBuilder {
   private readonly options: RecordsOptions<unknown>
   private readonly maxCells: number
   private readonly maxFills: number
+  /** Where the namers count their key probes. */
+  private readonly meter: Meter
 
-  constructor(options: RecordsOptions<unknown>, limits: { readonly maxCellsPerSheet: number; readonly maxRecordFields: number }) {
+  constructor(
+    options: RecordsOptions<unknown>,
+    limits: { readonly maxCellsPerSheet: number; readonly maxRecordFields: number },
+    meter: Meter
+  ) {
     this.options = options
     this.maxCells = limits.maxCellsPerSheet
     this.maxFills = limits.maxRecordFields
-    this.phase = initial(options.header)
+    this.meter = meter
+    this.phase = initial(options.header, meter)
   }
 
   private countCells(n: number): LimitExceeded | undefined {
@@ -195,17 +203,17 @@ export class RecordBuilder {
       case "Ready":
         return this.record(row, phase, out)
       case "AwaitFirstRow":
-        this.phase = ready(row)
+        this.phase = ready(row, this.meter)
         return 0
       case "AwaitRow": {
         if (row.index < phase.at) return 0
         if (row.index === phase.at) {
-          this.phase = ready(row)
+          this.phase = ready(row, this.meter)
           return 0
         }
         // The header row isn't in the data (rows can be sparse): no names,
         // and this row is data.
-        const next = ready(undefined)
+        const next = ready(undefined, this.meter)
         this.phase = next
         return this.record(row, next, out)
       }
@@ -302,8 +310,8 @@ export const recordsStream = <E, R>(
   const invalid = validateHeader(options.header)
   if (invalid !== undefined) return Stream.fail(invalid)
   return Stream.transformPull(rows, (upstream) =>
-    Effect.sync(() => {
-      const builder = new RecordBuilder(options, limits)
+    Effect.map(WorkMeter, (meter) => {
+      const builder = new RecordBuilder(options, limits, meter)
       const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
       let chunk: ReadonlyArray<Row> = []
       let i = 0
