@@ -34,7 +34,8 @@
 import { Effect, Stream } from "effect"
 import { type CellStyles, NO_STYLES } from "../internal/numFmt.ts"
 import { open } from "../internal/zip/archive.ts"
-import { readRelationships, relationshipKind } from "../internal/opc.ts"
+import type { ZipEntry } from "../internal/zip/directory.ts"
+import { lookup, packageRels, partRels } from "../internal/opc.ts"
 import { malformed, readSharedStrings, readStyles, readWorkbookPart } from "../internal/xlsx/parts.ts"
 import { sheetDetails } from "../internal/xlsx/details.ts"
 import { sheetRows } from "../internal/xlsx/sheet.ts"
@@ -74,38 +75,34 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     if ("_tag" in archive) return yield* Effect.fail(archive)
 
     // the workbook part, through the package relationships
-    const root = yield* readRelationships(archive, "", limits)
-    const officeDocument = root.find((r) => relationshipKind(r.type) === "officeDocument" && r.part !== undefined)
-    const workbookPart = officeDocument?.part ?? "xl/workbook.xml"
-    const workbookEntry = archive.find(workbookPart)
-    if (workbookEntry === undefined) return yield* malformed(`workbook part ${workbookPart} is missing`)
+    const workbookTarget = (yield* packageRels(archive, limits)).named("officeDocument") ?? lookup(archive, "xl/workbook.xml")
+    if (workbookTarget._tag === "Missing") return yield* malformed(`workbook part ${workbookTarget.name} is missing`)
+    const workbookEntry = workbookTarget.entry
     const workbook = yield* readWorkbookPart(archive, workbookEntry, limits)
-    const relationships = yield* readRelationships(archive, workbookEntry.name, limits)
-    const byId = new Map(relationships.map((r) => [r.id, r]))
+    const rels = yield* partRels(archive, workbookEntry, limits)
 
     // Two sheets may not read the same worksheet part: the inflate budget
     // counts each part once, so N sheets on one part would inflate it N
     // times for free. Excel never writes this.
-    const owners = new Map<string, string>()
+    const owners = new Map<ZipEntry | string, string>()
     // progress: one sheet per iteration (bounded by maxSheets)
     for (const sheet of workbook.sheets) {
-      const rel = sheet.relationshipId === undefined ? undefined : byId.get(sheet.relationshipId)
-      if (rel === undefined || rel.part === undefined || relationshipKind(rel.type) !== "worksheet") continue
-      const part = archive.find(rel.part)?.name ?? rel.part
-      const key = part.toLowerCase()
+      const rel = sheet.relationshipId === undefined ? undefined : rels.byId(sheet.relationshipId)
+      if (rel === undefined || rel.kind !== "worksheet") continue
+      const target = rel.target
+      if (target._tag === "External" || target._tag === "Invalid") continue
+      // a present part is its entry; missing ones compare by name, case-insensitively
+      const key = target._tag === "Part" ? target.entry : target.name.toLowerCase()
       const owner = owners.get(key)
       if (owner !== undefined) {
+        const part = target._tag === "Part" ? target.entry.name : target.name
         return yield* malformed(`sheets ${JSON.stringify(owner)} and ${JSON.stringify(sheet.name)} share part ${part}`, workbookEntry.name)
       }
       owners.set(key, sheet.name)
     }
 
-    const partEntry = (kind: string) => {
-      const rel = relationships.find((r) => relationshipKind(r.type) === kind && r.part !== undefined)
-      return rel === undefined ? undefined : archive.find(rel.part!)
-    }
-    const stringsEntry = partEntry("sharedStrings")
-    const stylesEntry = partEntry("styles")
+    const stringsEntry = rels.part("sharedStrings")
+    const stylesEntry = rels.part("styles")
     const strings = stringsEntry === undefined ? undefined : yield* readSharedStrings(archive, stringsEntry, limits)
     const styles: CellStyles = stylesEntry === undefined ? NO_STYLES : yield* readStyles(archive, stylesEntry, limits)
 
@@ -124,12 +121,17 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     /** The worksheet part of a sheet; `undefined` for chart, dialog and macro sheets (no cells). */
     const sheetPart = (sheet: Workbook.SheetInfo) => {
       const entry = workbook.sheets[sheet.index]!
-      const rel = entry.relationshipId === undefined ? undefined : byId.get(entry.relationshipId)
-      if (rel === undefined || rel.part === undefined) {
-        return malformed(`sheet ${JSON.stringify(sheet.name)} has no part`, workbookEntry.name)
+      const rel = entry.relationshipId === undefined ? undefined : rels.byId(entry.relationshipId)
+      if (rel === undefined) return malformed(`sheet ${JSON.stringify(sheet.name)} has no part`, workbookEntry.name)
+      const target = rel.target
+      if (target._tag === "External") {
+        return malformed(`sheet ${JSON.stringify(sheet.name)} has an external target`, workbookEntry.name)
       }
-      if (relationshipKind(rel.type) !== "worksheet") return undefined
-      return archive.find(rel.part) ?? malformed(`sheet part ${rel.part} is missing`, workbookEntry.name)
+      if (target._tag === "Invalid") {
+        return malformed(`sheet ${JSON.stringify(sheet.name)} has a bad target: ${target.reason}`, workbookEntry.name)
+      }
+      if (rel.kind !== "worksheet") return undefined
+      return target._tag === "Part" ? target.entry : malformed(`sheet part ${target.name} is missing`, workbookEntry.name)
     }
 
     return Workbook.make({

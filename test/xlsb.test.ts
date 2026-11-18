@@ -3,7 +3,7 @@ import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { RecordSplitter } from "../src/internal/biff12/records.ts"
-import { readRelationships } from "../src/internal/opc.ts"
+import { partRels } from "../src/internal/opc.ts"
 import { NO_STYLES } from "../src/internal/numFmt.ts"
 import { readStyles } from "../src/internal/xlsb/parts.ts"
 import { SheetRows } from "../src/internal/xlsb/sheet.ts"
@@ -535,9 +535,13 @@ describe("xlsb defined names", () => {
     const archive = open(bytes, limits)
     if ("_tag" in archive) throw new Error(archive._tag)
     const workbook = await Effect.runPromise(readWorkbookBin(archive, archive.find("xl/workbook.bin")!, limits))
-    const rels = await Effect.runPromise(readRelationships(archive, "xl/workbook.bin", limits))
+    const rels = await Effect.runPromise(partRels(archive, archive.find("xl/workbook.bin")!, limits))
     const inflated = counter("bytes")
-    const sheets = await Effect.runPromise(metered(inflated, readExternalBooks(archive, workbook, (id) => rels.find((r) => r.id === id)?.part, limits)))
+    const partOf = (id: string) => {
+      const target = rels.byId(id)?.target
+      return target?._tag === "Part" ? target.entry : undefined
+    }
+    const sheets = await Effect.runPromise(metered(inflated, readExternalBooks(archive, workbook, partOf, limits)))
     expect(sheets.size).toBe(books)
     expect([...sheets.values()].every((names) => names[0] === "Rates")).toBe(true)
     // one read of the part's first slice (64 KiB), not 200 reads of 1 MiB

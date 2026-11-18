@@ -275,22 +275,21 @@ export const readExternalSheets = (
 export const readExternalBooks = (
   archive: Archive,
   workbook: WorkbookBin,
-  partOf: (relationshipId: string) => string | undefined,
+  partOf: (relationshipId: string) => ZipEntry | undefined,
   limits: Limits
 ): Effect.Effect<Map<number, ReadonlyArray<string>>, SpreadsheetError> =>
   Effect.gen(function*() {
-    const byPart = new Map<string, ReadonlyArray<string>>()
+    const byPart = new Map<ZipEntry, ReadonlyArray<string>>()
     const out = new Map<number, ReadonlyArray<string>>()
     // progress: one book per iteration (books are at most MAX_BOOKS)
     for (const book of referencedBooks(workbook)) {
       const entry = workbook.books[book]!
-      const part = entry.kind === "external" && entry.relationshipId !== undefined ? partOf(entry.relationshipId) : undefined
-      const linkEntry = part === undefined ? undefined : archive.find(part)
+      const linkEntry = entry.kind === "external" && entry.relationshipId !== undefined ? partOf(entry.relationshipId) : undefined
       if (linkEntry === undefined) continue
-      let names = byPart.get(linkEntry.name)
+      let names = byPart.get(linkEntry)
       if (names === undefined) {
         names = yield* readExternalSheets(archive, linkEntry, limits)
-        byPart.set(linkEntry.name, names)
+        byPart.set(linkEntry, names)
       }
       out.set(book, names)
     }

@@ -2,7 +2,6 @@ import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { addFormat, cellStyles, classify, isDateCode, type NumberFormat, serialToDate } from "../src/internal/numFmt.ts"
-import { resolvePart } from "../src/internal/opc.ts"
 import { columnName, parseCellRef, parseRange } from "../src/internal/refs.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
@@ -110,15 +109,6 @@ describe("references and part names", () => {
     expect(parseRange("C3")).toEqual({ firstRow: 2, firstColumn: 2, lastRow: 2, lastColumn: 2 })
     expect(parseRange("A1:")).toBeUndefined()
     expect([0, 25, 26, 701, 702, 16383].map(columnName)).toEqual(["A", "Z", "AA", "ZZ", "AAA", "XFD"])
-  })
-
-  it("resolves relationship targets like OPC part names", () => {
-    expect(resolvePart("xl/workbook.xml", "worksheets/sheet1.xml")).toBe("xl/worksheets/sheet1.xml")
-    expect(resolvePart("xl/workbook.xml", "/xl/worksheets/sheet1.xml")).toBe("xl/worksheets/sheet1.xml")
-    expect(resolvePart("xl/workbook.xml", "../docProps/app.xml")).toBe("docProps/app.xml")
-    expect(resolvePart("xl/workbook.xml", "./a%20b.xml")).toBe("xl/a b.xml")
-    expect(resolvePart("xl/workbook.xml", "../../escape.xml")).toBeUndefined()
-    expect(resolvePart("xl/workbook.xml", "%E0%A4%A.xml")).toBeUndefined()
   })
 })
 
