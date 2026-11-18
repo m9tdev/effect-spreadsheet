@@ -46,7 +46,7 @@ import type { Row } from "../../Workbook.ts"
 import { decoded, step } from "../decode.ts"
 import { type CellStyles, numberCell, type NumberFormat, withNumFmt } from "../numFmt.ts"
 import { parseCellRef } from "../refs.ts"
-import { compact, NO_ROWS } from "../sheet/rows.ts"
+import { RowBuilder } from "../sheet/rows.ts"
 import { xmlDecoder } from "../xml/parse.ts"
 import { attr, type XmlAttributes, type XmlHandler } from "../xml/tokenizer.ts"
 import { isTrue, malformed, RichText, unescapeXstring } from "./parts.ts"
@@ -88,44 +88,26 @@ interface PendingCell {
  */
 type CellChild = "none" | "value" | "formula" | "inline"
 
-/** The open row's fields, whether its index is known yet or not. */
-interface RowFields {
-  readonly hidden: boolean
-  readonly cells: Array<Cell.Cell>
-  /** `cells` is in strictly increasing column order. */
-  sorted: boolean
-  lastColumn: number
-}
-
 /**
- * The open row: numbered (by its `r`, or by its first cell), or unnumbered
- * (a row without `r` before its first cell, which decides the index; a row
- * without `r` or cells is the previous row + 1).
+ * Where a row or cell sits, for errors: a cell's `r` text, if it has one.
+ * XLSX errors name the part, not an offset.
  */
-type OpenRow =
-  | RowFields & { readonly _tag: "Numbered"; readonly index: number }
-  | RowFields & { readonly _tag: "Unnumbered"; readonly index: undefined }
+type At = string | undefined
 
 /** Collects rows from tokenizer events. Exported for tests. */
 export class SheetRows implements XmlHandler {
-  /** Completed rows not yet emitted. */
-  out: Array<Row> = []
+  /**
+   * The rows (only inside the sheet data): in XLSX a cell outside a row is
+   * ignored, and a row without `r` is numbered by its first cell.
+   */
+  readonly rows: RowBuilder<At>
 
-  /** The completed rows not yet taken; `out` starts over. */
+  /** The completed rows not yet taken. */
   take(): ReadonlyArray<Row> {
-    const out = this.out
-    if (out.length === 0) return NO_ROWS
-    this.out = []
-    return out
+    return this.rows.take()
   }
-  /** Cells emitted so far (for maxCellsPerSheet), and rows. */
-  private cells = 0
-  private rowCount = 0
 
   private inSheetData = false
-  /** The open row, if any (only inside the sheet data). */
-  private row: OpenRow | undefined
-  private previousRow = -1
 
   /** The open cell, if any (only inside a row). */
   private cell: PendingCell | undefined
@@ -143,6 +125,12 @@ export class SheetRows implements XmlHandler {
   constructor(context: SheetContext) {
     this.context = context
     this.rich = new RichText(context.limits.maxStringLength)
+    const part = context.part
+    this.rows = new RowBuilder<At>(context.limits, {
+      cellOutsideRow: "ignore",
+      malformed: (reason) => malformed(reason, part),
+      cellInOtherRow: (row, ref) => malformed(`cell ${JSON.stringify((ref ?? "").slice(0, 20))} in row ${row + 1}`, part)
+    })
   }
 
   open = (name: string, attributes: XmlAttributes): SpreadsheetError | undefined => {
@@ -166,10 +154,14 @@ export class SheetRows implements XmlHandler {
     if (!this.inSheetData) return undefined
     if (name === "row") {
       // a nested one would replace the open row, dropping its cells
-      if (this.row !== undefined) return malformed("<row> inside a <row>", this.context.part)
+      if (this.rows.inRow) return malformed("<row> inside a <row>", this.context.part)
       return this.openRow(attributes)
     }
-    if (name === "c" && this.row !== undefined) return this.openCell(this.row, attributes)
+    if (name === "c") {
+      const start = this.rows.beginCell(undefined)
+      if (start !== "read") return start === "skip" ? undefined : start
+      return this.openCell(attributes)
+    }
     return undefined
   }
 
@@ -188,7 +180,7 @@ export class SheetRows implements XmlHandler {
       cell.child = "none"
       return undefined
     }
-    if (name === "row" && this.row !== undefined) return this.closeRow(this.row)
+    if (name === "row" && this.rows.inRow) return this.rows.closeRow()
     if (name === "sheetData") this.inSheetData = false
     return undefined
   }
@@ -246,29 +238,24 @@ export class SheetRows implements XmlHandler {
     return "none"
   }
 
+  /** A `<row>`: its `r` gives the index; without one, its first cell or the previous row decides. */
   private openRow(attributes: XmlAttributes): SpreadsheetError | undefined {
-    const limits = this.context.limits
+    const hidden = isTrue(attr(attributes, "hidden"))
     const r = attr(attributes, "r")
-    if (r !== undefined) {
-      if (!/^\d+$/.test(r) || r.length > 10) {
-        if (/^\d+$/.test(r)) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: Infinity })
-        return malformed(`bad row number ${JSON.stringify(r.slice(0, 20))}`, this.context.part)
-      }
-      const index = Number(r) - 1
-      if (index < 0) return malformed("row number 0", this.context.part)
-      if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
-      if (index <= this.previousRow) return this.backwards(index)
-      this.row = { _tag: "Numbered", index, hidden: isTrue(attr(attributes, "hidden")), cells: [], sorted: true, lastColumn: -1 }
-    } else {
-      // decided by the first cell's reference, or previous + 1, at the first cell / row end
-      this.row = { _tag: "Unnumbered", index: undefined, hidden: isTrue(attr(attributes, "hidden")), cells: [], sorted: true, lastColumn: -1 }
+    if (r === undefined) return this.rows.openRow(undefined, hidden, undefined)
+    if (!/^\d+$/.test(r) || r.length > 10) {
+      if (/^\d+$/.test(r)) return new LimitExceeded({ limit: "maxRows", max: this.context.limits.maxRows, actual: Infinity })
+      return malformed(`bad row number ${JSON.stringify(r.slice(0, 20))}`, this.context.part)
     }
-    return undefined
+    const index = Number(r) - 1
+    if (index < 0) return malformed("row number 0", this.context.part)
+    return this.rows.openRow(index, hidden, undefined)
   }
 
-  private openCell(open: OpenRow, attributes: XmlAttributes): SpreadsheetError | undefined {
-    const limits = this.context.limits
-    let column = open.lastColumn + 1
+  /** A `<c>` in a row: its `r` gives the column (and the row), else the previous cell's column + 1. */
+  private openCell(attributes: XmlAttributes): SpreadsheetError | undefined {
+    const rows = this.rows
+    let column = rows.nextColumn
     let row: number | undefined
     const r = attr(attributes, "r")
     if (r !== undefined) {
@@ -279,28 +266,8 @@ export class SheetRows implements XmlHandler {
       column = ref.column
       row = ref.row
     }
-    switch (open._tag) {
-      case "Unnumbered": {
-        // a row without `r`: its first cell decides, by its reference or as the previous row + 1
-        const index = row ?? this.previousRow + 1
-        if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
-        if (index <= this.previousRow) return this.backwards(index)
-        open = { _tag: "Numbered", index, hidden: open.hidden, cells: open.cells, sorted: open.sorted, lastColumn: open.lastColumn }
-        this.row = open
-        break
-      }
-      case "Numbered":
-        if (row !== undefined && row !== open.index) {
-          return malformed(`cell ${JSON.stringify(r!.slice(0, 20))} in row ${open.index + 1}`, this.context.part)
-        }
-        break
-      default:
-        return absurd(open)
-    }
-    if (column >= limits.maxColumns) {
-      return new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: column + 1 })
-    }
-    open.lastColumn = column
+    const placed = rows.placeCell(column, r, row)
+    if (placed !== undefined) return placed
     const s = attr(attributes, "s")
     this.cell = {
       column,
@@ -320,22 +287,9 @@ export class SheetRows implements XmlHandler {
   private closeCell(pending: PendingCell): SpreadsheetError | undefined {
     this.cell = undefined
     this.depth = 0
-    // a cell is only open inside a row (opened by its first cell, if it had no `r`)
-    const open = this.row!
     const cell = this.toCell(pending)
     if (cell instanceof MalformedFile) return cell
-    const max = this.context.limits.maxCellsPerSheet
-    if (++this.cells > max) return new LimitExceeded({ limit: "maxCellsPerSheet", max, actual: this.cells })
-    const cells = open.cells
-    if (cells.length > 0 && cell.column <= cells[cells.length - 1]!.column) open.sorted = false
-    cells.push(cell)
-    // repeated columns don't pile up: past 2 x maxColumns cells an unsorted
-    // row is compacted (to at most maxColumns), so the work is amortized
-    if (!open.sorted && cells.length > 2 * this.context.limits.maxColumns) {
-      compact(cells)
-      open.sorted = true
-    }
-    return undefined
+    return this.rows.addCell(cell)
   }
 
   private toCell(pending: PendingCell): Cell.Cell | MalformedFile {
@@ -397,36 +351,6 @@ export class SheetRows implements XmlHandler {
 
   private format(pending: PendingCell): NumberFormat | undefined {
     return pending.style === undefined ? undefined : this.context.styles.format(pending.style)
-  }
-
-  /** A row whose index (0-based) isn't above the previous row's. */
-  private backwards(index: number): MalformedFile {
-    return malformed(`row ${index + 1} after row ${this.previousRow + 1}`, this.context.part)
-  }
-
-  private closeRow(open: OpenRow): SpreadsheetError | undefined {
-    const limits = this.context.limits
-    let index: number
-    switch (open._tag) {
-      case "Numbered":
-        index = open.index
-        break
-      case "Unnumbered":
-        // a row without `r` or cells
-        index = this.previousRow + 1
-        break
-      default:
-        return absurd(open)
-    }
-    if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
-    if (++this.rowCount > limits.maxRows) {
-      return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: this.rowCount })
-    }
-    const cells = open.sorted ? open.cells : compact(open.cells)
-    this.out.push({ index, hidden: open.hidden, cells })
-    this.previousRow = index
-    this.row = undefined
-    return undefined
   }
 }
 

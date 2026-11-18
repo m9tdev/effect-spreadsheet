@@ -4,17 +4,18 @@
  * declared dimension. Cell data is tokenized but not collected, so the cost
  * is linear in the part's bytes and the memory in the spans and merges.
  *
- * Limits: column spans count against `maxColumns` (a sheet has at most
+ * The layout is collected by the shared `LayoutBuilder`, which holds its
+ * limits: `<col>` elements count against `maxColumns` (a sheet has at most
  * that many columns to describe), merges against `maxCellsPerSheet`.
  *
  * @internal
  */
 import { Effect, type Stream } from "effect"
-import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
+import type { SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import type { ColumnSpan, Range, SheetDetails } from "../../Workbook.ts"
+import type { SheetDetails } from "../../Workbook.ts"
 import { parseRange } from "../refs.ts"
-import { mergeSpans } from "../sheet/layout.ts"
+import { LayoutBuilder } from "../sheet/layout.ts"
 import { parse } from "../xml/parse.ts"
 import { attr, type XmlHandler } from "../xml/tokenizer.ts"
 import { isTrue, malformed } from "./parts.ts"
@@ -25,10 +26,7 @@ export const sheetDetails = (
   limits: Limits
 ): Effect.Effect<SheetDetails, SpreadsheetError> =>
   Effect.suspend(() => {
-    const hidden: Array<ColumnSpan> = []
-    const merges: Array<Range> = []
-    let colElements = 0
-    let dimension: Range | undefined
+    const layout = new LayoutBuilder(limits)
     let inSheetData = false
     let inRow = false
     /**
@@ -57,11 +55,10 @@ export const sheetDetails = (
         if (name === "dimension") {
           const ref = attr(attributes, "ref")
           const range = ref === undefined ? undefined : parseRange(ref)
-          if (range !== undefined) dimension = range
+          if (range !== undefined) layout.dimension(range)
         } else if (name === "col") {
-          if (++colElements > limits.maxColumns) {
-            return new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: colElements })
-          }
+          const counted = layout.columnRecord()
+          if (counted !== undefined) return counted
           if (!isTrue(attr(attributes, "hidden"))) return undefined
           const min = attr(attributes, "min")
           const max = attr(attributes, "max")
@@ -69,17 +66,14 @@ export const sheetDetails = (
             return malformed("bad <col> range", part)
           }
           const first = Number(min) - 1
-          const last = Math.min(Number(max), limits.maxColumns) - 1
-          if (first < 0 || last < first) return first < 0 ? malformed("bad <col> range", part) : undefined
-          hidden.push({ first, last })
+          if (first < 0) return malformed("bad <col> range", part)
+          // a reversed span hides nothing; the part at or past maxColumns is dropped
+          layout.hideColumns(first, Number(max) - 1)
         } else if (name === "mergeCell") {
           const ref = attr(attributes, "ref")
           const range = ref === undefined ? undefined : parseRange(ref)
           if (range === undefined) return malformed(`bad merge range ${JSON.stringify((ref ?? "").slice(0, 40))}`, part)
-          if (merges.length >= limits.maxCellsPerSheet) {
-            return new LimitExceeded({ limit: "maxCellsPerSheet", max: limits.maxCellsPerSheet, actual: merges.length + 1 })
-          }
-          merges.push(range)
+          return layout.merge(range)
         }
         return undefined
       },
@@ -91,9 +85,5 @@ export const sheetDetails = (
       },
       text: () => undefined
     }
-    return Effect.map(parse(bytes, handler, limits, part), (): SheetDetails => ({
-      hiddenColumns: mergeSpans(hidden),
-      merges,
-      ...(dimension === undefined ? {} : { dimension })
-    }))
+    return Effect.map(parse(bytes, handler, limits, part), () => layout.result())
   })
