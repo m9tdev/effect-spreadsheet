@@ -11,8 +11,7 @@ import { readRichStr, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords } from "../biff12/records.ts"
 import { FixedReader } from "../binary/layout.ts"
 import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
-import type { Archive } from "../zip/archive.ts"
-import type { ZipEntry } from "../zip/directory.ts"
+import type { Archive, LocatedEntry } from "../zip/archive.ts"
 import { malformed, stringError } from "./workbook.ts"
 
 const BRT_SST_ITEM = 0x0013
@@ -29,7 +28,7 @@ const BRT_END_CELL_XFS = 0x026A
  */
 export const readSharedStrings = (
   archive: Archive,
-  entry: ZipEntry,
+  entry: LocatedEntry,
   limits: Limits
 ): Effect.Effect<ReadonlyArray<string>, SpreadsheetError> =>
   Effect.suspend(() => {
@@ -60,7 +59,7 @@ export const MAX_CELL_XFS = 0x1000000
  */
 export const readStyles = (
   archive: Archive,
-  entry: ZipEntry,
+  entry: LocatedEntry,
   limits: Limits,
   maxCellXfs = MAX_CELL_XFS
 ): Effect.Effect<CellStyles, SpreadsheetError> =>

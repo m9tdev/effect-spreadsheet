@@ -47,16 +47,36 @@ const LOCAL = 0x04034b50
 const STORED = 0
 const DEFLATE = 8
 
+/**
+ * How an entry's data can be read, decided once when the archive opens:
+ * stored or deflated data, or the reason a read fails. When several apply,
+ * encryption comes first, then an unknown compression method, then a stored
+ * entry whose two sizes differ.
+ */
+export type EntryKind =
+  | "stored"
+  | "deflate"
+  | "encrypted"
+  | { readonly unsupported: number }
+  | "bad-stored-size"
+
+/** A directory entry as an opened archive has checked it: where its data lies in the archive, and how it reads. */
+export interface LocatedEntry extends ZipEntry {
+  /** The entry's compressed data, [start, end) in the archive's bytes. */
+  readonly data: { readonly start: number; readonly end: number }
+  readonly kind: EntryKind
+}
+
 export interface Archive {
-  readonly entries: ReadonlyArray<ZipEntry>
+  readonly entries: ReadonlyArray<LocatedEntry>
   /** The entry with this name (case-insensitive, a leading `/` ignored), if any. */
-  readonly find: (name: string) => ZipEntry | undefined
+  readonly find: (name: string) => LocatedEntry | undefined
   /**
    * The entry's uncompressed bytes, one slice of at most `SLICE_BYTES`
    * per pull, each after a yield. Re-runnable. `limits`
    * (default: the archive's) set this read's inflate budget.
    */
-  readonly read: (entry: ZipEntry, limits?: Limits) => Stream.Stream<Uint8Array, SpreadsheetError>
+  readonly read: (entry: LocatedEntry, limits?: Limits) => Stream.Stream<Uint8Array, SpreadsheetError>
 }
 
 const malformed = (reason: string, part?: string, offset?: number) =>
@@ -70,20 +90,21 @@ const malformed = (reason: string, part?: string, offset?: number) =>
 /** A failed result with a `MalformedFile`. */
 const fail = (reason: string, part?: string, offset?: number) => Result.fail(malformed(reason, part, offset))
 
-interface Located {
-  readonly entry: ZipEntry
-  readonly dataStart: number
-  readonly dataEnd: number
+/** How `entry` reads (see `EntryKind`). */
+const kindOf = (entry: ZipEntry): EntryKind => {
+  if ((entry.flags & 0x1) !== 0) return "encrypted"
+  if (entry.method === STORED) return entry.compressedSize === entry.uncompressedSize ? "stored" : "bad-stored-size"
+  if (entry.method === DEFLATE) return "deflate"
+  return { unsupported: entry.method }
 }
 
-/** Checks the local headers and the layout; returns where each entry's data is. */
-const locate = (bytes: Uint8Array, directory: Directory): Result.Result<Map<ZipEntry, Located>, MalformedFile> => {
-  const entries = directory.entries
+/** Checks the local headers and the layout; the entries, in directory order, with where each one's data is. */
+const locate = (bytes: Uint8Array, directory: Directory): Result.Result<ReadonlyArray<LocatedEntry>, MalformedFile> => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const names = new TextDecoder("utf-8")
-  const located = new Map<ZipEntry, Located>()
+  const located: Array<LocatedEntry> = []
   // progress: one entry per iteration (entries are bounded by maxZipEntries)
-  for (const entry of entries) {
+  for (const entry of directory.entries) {
     const at = entry.localOffset
     if (at + 30 > bytes.length) return fail("local header out of bounds", entry.name, at)
     if (view.getUint32(at, true) !== LOCAL) return fail("bad local header signature", entry.name, at)
@@ -92,26 +113,26 @@ const locate = (bytes: Uint8Array, directory: Directory): Result.Result<Map<ZipE
     }
     const nameLength = view.getUint16(at + 26, true)
     const extraLength = view.getUint16(at + 28, true)
-    const dataStart = at + 30 + nameLength + extraLength
-    const dataEnd = dataStart + entry.compressedSize
-    if (dataEnd > bytes.length) return fail("entry data out of bounds", entry.name, at)
+    const start = at + 30 + nameLength + extraLength
+    const end = start + entry.compressedSize
+    if (end > bytes.length) return fail("entry data out of bounds", entry.name, at)
     // entry data comes before the central directory (and so the EOCD)
-    if (dataEnd > directory.directoryStart) return fail("entry data overlaps the central directory", entry.name, at)
+    if (end > directory.directoryStart) return fail("entry data overlaps the central directory", entry.name, at)
     // The local name must be the directory's name (decoded the same way); a
     // mismatch means the directory points at the wrong data.
     if (names.decode(bytes.subarray(at + 30, at + 30 + nameLength)) !== entry.name) {
       return fail("local header name differs from the directory", entry.name, at)
     }
-    located.set(entry, { entry, dataStart, dataEnd })
+    located.push({ ...entry, data: { start, end }, kind: kindOf(entry) })
   }
   // No two entries may share bytes: sort by header offset and check the gaps.
-  const ordered = [...located.values()].sort((a, b) => a.entry.localOffset - b.entry.localOffset)
+  const ordered = [...located].sort((a, b) => a.localOffset - b.localOffset)
   // progress: i increases up to ordered.length
   for (let i = 1; i < ordered.length; i++) {
     const before = ordered[i - 1]!
     const after = ordered[i]!
-    if (before.dataEnd > after.entry.localOffset) {
-      return fail("entries overlap", after.entry.name, after.entry.localOffset)
+    if (before.data.end > after.localOffset) {
+      return fail("entries overlap", after.name, after.localOffset)
     }
   }
   return Result.succeed(located)
@@ -126,16 +147,23 @@ export const open = (
   const read = readDirectory(bytes, limits)
   if (Result.isFailure(read)) return Result.fail(read.failure)
   const directory = read.success
-  const byName = new Map<string, ZipEntry>()
+  // Names are checked before the local headers.
+  const keys: Array<string> = []
+  const seen = new Set<string>()
   // progress: one entry per iteration
   for (const entry of directory.entries) {
     const key = normalizeName(entry.name)
-    if (byName.has(key)) return fail("duplicate entry name", entry.name, entry.localOffset)
-    byName.set(key, entry)
+    if (seen.has(key)) return fail("duplicate entry name", entry.name, entry.localOffset)
+    seen.add(key)
+    keys.push(key)
   }
   const located = locate(bytes, directory)
   if (Result.isFailure(located)) return Result.fail(located.failure)
-  return Result.succeed(archive(bytes, limits, inflate, directory.entries, byName, located.success))
+  const entries = located.success
+  const byName = new Map<string, LocatedEntry>()
+  // progress: i increases up to entries.length (one key per entry, in the same order)
+  for (let i = 0; i < entries.length; i++) byName.set(keys[i]!, entries[i]!)
+  return Result.succeed(archive(bytes, limits, inflate, entries, byName))
 }
 
 /** The archive over entries `open` has checked and located. */
@@ -143,13 +171,12 @@ const archive = (
   bytes: Uint8Array,
   limits: Limits,
   inflate: InflateRaw,
-  entries: ReadonlyArray<ZipEntry>,
-  byName: ReadonlyMap<string, ZipEntry>,
-  located: ReadonlyMap<ZipEntry, Located>
+  entries: ReadonlyArray<LocatedEntry>,
+  byName: ReadonlyMap<string, LocatedEntry>
 ): Archive => {
   /** Bytes counted against the budget: per entry, the most it has inflated so far. */
   let charged = 0
-  const highWater = new Map<ZipEntry, number>()
+  const highWater = new Map<LocatedEntry, number>()
 
   /**
    * Counts output bytes of `entry` (`soFar` of them so far) under
@@ -159,7 +186,7 @@ const archive = (
    * without being charged or raising the high-water mark, so a re-read
    * fails at the same point again.
    */
-  const account = (entry: ZipEntry, soFar: number, limits: Limits): SpreadsheetError | undefined => {
+  const account = (entry: LocatedEntry, soFar: number, limits: Limits): SpreadsheetError | undefined => {
     if (soFar > entry.uncompressedSize) {
       return malformed(`entry inflates past its declared size of ${entry.uncompressedSize} bytes`, entry.name)
     }
@@ -177,7 +204,7 @@ const archive = (
     return undefined
   }
 
-  const finish = (entry: ZipEntry, size: number, crc: number): SpreadsheetError | undefined => {
+  const finish = (entry: LocatedEntry, size: number, crc: number): SpreadsheetError | undefined => {
     if (size !== entry.uncompressedSize) {
       return malformed(`entry is ${size} bytes, its directory says ${entry.uncompressedSize}`, entry.name)
     }
@@ -185,25 +212,22 @@ const archive = (
     return undefined
   }
 
-  const read = (entry: ZipEntry, readLimits: Limits = limits): Stream.Stream<Uint8Array, SpreadsheetError> => {
-    if ((entry.flags & 0x1) !== 0) return Stream.fail(new Encrypted({ format: "zip" }))
-    if (entry.method !== STORED && entry.method !== DEFLATE) {
-      return Stream.fail(
-        new UnsupportedFormat({ format: "zip", reason: `compression method ${entry.method} in ${entry.name}` })
-      )
+  const read = (entry: LocatedEntry, readLimits: Limits = limits): Stream.Stream<Uint8Array, SpreadsheetError> => {
+    const kind = entry.kind
+    if (kind === "encrypted") return Stream.fail(new Encrypted({ format: "zip" }))
+    if (typeof kind === "object") {
+      return Stream.fail(new UnsupportedFormat({ format: "zip", reason: `compression method ${kind.unsupported} in ${entry.name}` }))
     }
-    const place = located.get(entry)
-    if (place === undefined) return Stream.fail(malformed("entry not in this archive", entry.name))
-    const data = bytes.subarray(place.dataStart, place.dataEnd)
-    if (entry.method === STORED && entry.compressedSize !== entry.uncompressedSize) {
+    if (kind === "bad-stored-size") {
       return Stream.fail(malformed("stored entry with different compressed and uncompressed sizes", entry.name))
     }
+    const data = bytes.subarray(entry.data.start, entry.data.end)
     return Stream.fromChannel(Channel.fromTransform((_, scope: Scope.Scope) =>
       Effect.gen(function*() {
         let size = 0
         let crc = CRC32_START
         let done = false
-        const inflater = entry.method === DEFLATE ? inflate(data) : undefined
+        const inflater = kind === "deflate" ? inflate(data) : undefined
         if (inflater !== undefined) yield* Scope.addFinalizer(scope, Effect.sync(() => inflater.cancel()))
         let storedAt = 0
         // the work meter counts every output byte, re-reads included

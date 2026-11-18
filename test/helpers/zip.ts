@@ -1,6 +1,5 @@
 import { Effect, Stream } from "effect"
-import type { Archive } from "../../src/internal/zip/archive.ts"
-import type { ZipEntry } from "../../src/internal/zip/directory.ts"
+import type { Archive, LocatedEntry } from "../../src/internal/zip/archive.ts"
 import type { SpreadsheetError } from "../../src/SpreadsheetError.ts"
 
 /** Minimal stored-only zip writer for tests (CRCs are zero: only the directory is read). */
@@ -179,5 +178,5 @@ export const buildZip = async (entries: ReadonlyArray<BuildEntry>): Promise<Uint
 }
 
 /** A whole entry of an opened archive, read with the archive's limits. */
-export const readAll = (archive: Archive, entry: ZipEntry): Effect.Effect<Uint8Array, SpreadsheetError> =>
+export const readAll = (archive: Archive, entry: LocatedEntry): Effect.Effect<Uint8Array, SpreadsheetError> =>
   Effect.map(Stream.runCollect(archive.read(entry)), (chunks) => concat(Array.from(chunks)))

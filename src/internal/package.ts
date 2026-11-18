@@ -14,8 +14,7 @@ import type { DefinedName, Format, Row, SheetDetails, Visibility, Workbook } fro
 import { type CellStyles, NO_STYLES } from "./numFmt.ts"
 import { lookup, packageRels, partRels, type Rels } from "./opc.ts"
 import { fromSources, type SheetSource } from "./workbook.ts"
-import type { Archive } from "./zip/archive.ts"
-import type { ZipEntry } from "./zip/directory.ts"
+import type { Archive, LocatedEntry } from "./zip/archive.ts"
 
 /** A `MalformedFile` maker for one package format. */
 export const malformedIn = (format: "xlsx" | "xlsb") => (reason: string, part?: string, offset?: number) =>
@@ -57,9 +56,9 @@ export interface PackageFormat<W extends { readonly sheets: ReadonlyArray<SheetE
   /** The workbook part when the package relationships name none. */
   readonly fallbackWorkbook: string
   readonly malformed: (reason: string, part?: string) => MalformedFile
-  readonly readWorkbook: (archive: Archive, entry: ZipEntry, limits: Limits) => Effect.Effect<W, SpreadsheetError>
-  readonly readStrings: (archive: Archive, entry: ZipEntry, limits: Limits) => Effect.Effect<ReadonlyArray<string>, SpreadsheetError>
-  readonly readStyles: (archive: Archive, entry: ZipEntry, limits: Limits) => Effect.Effect<CellStyles, SpreadsheetError>
+  readonly readWorkbook: (archive: Archive, entry: LocatedEntry, limits: Limits) => Effect.Effect<W, SpreadsheetError>
+  readonly readStrings: (archive: Archive, entry: LocatedEntry, limits: Limits) => Effect.Effect<ReadonlyArray<string>, SpreadsheetError>
+  readonly readStyles: (archive: Archive, entry: LocatedEntry, limits: Limits) => Effect.Effect<CellStyles, SpreadsheetError>
   /** The defined names, read after the strings and styles; `rels` are the workbook part's. */
   readonly definedNames: (
     workbook: W,
@@ -81,7 +80,7 @@ export interface PackageFormat<W extends { readonly sheets: ReadonlyArray<SheetE
  * macro sheet), or why it can't be read.
  */
 type SheetPart =
-  | { readonly _tag: "Part"; readonly entry: ZipEntry }
+  | { readonly _tag: "Part"; readonly entry: LocatedEntry }
   | { readonly _tag: "Missing"; readonly name: string }
   | Extract<SheetSource, { readonly _tag: "NoCells" | "Broken" }>
 
@@ -121,7 +120,7 @@ export const readPackage = <W extends { readonly sheets: ReadonlyArray<SheetEntr
     // Two sheets may not read the same worksheet part: the inflate budget
     // counts each part once, so N sheets on one part would inflate it N
     // times for free. Excel never writes this.
-    const owners = new Map<ZipEntry | string, string>()
+    const owners = new Map<LocatedEntry | string, string>()
     // progress: one sheet per iteration (bounded by maxSheets)
     for (const { sheet, part } of sheets) {
       if (part._tag !== "Part" && part._tag !== "Missing") continue

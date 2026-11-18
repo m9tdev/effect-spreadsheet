@@ -3,7 +3,7 @@ import { Effect, Exit, Stream } from "effect"
 import * as Result from "effect/Result"
 import { describe, expect, it } from "vitest"
 import { WorkMeter } from "../src/internal/meter.ts"
-import { type Archive, inflateBudget, open } from "../src/internal/zip/archive.ts"
+import { type Archive, inflateBudget, type LocatedEntry, open } from "../src/internal/zip/archive.ts"
 import { crc32, CRC32_START, crc32Final, crc32Update } from "../src/internal/zip/crc32.ts"
 import { readDirectory, type ZipEntry } from "../src/internal/zip/directory.ts"
 import type { Inflater, InflateRaw } from "../src/internal/zip/inflate.ts"
@@ -321,7 +321,7 @@ describe("zip archive: hostile input", () => {
     const zip = await zeroEntries(3)
     const archive = openOk(zip, { ...limits, inflateFloorBytes: 2 * MiB })
     const [a, b, c] = archive.entries
-    const readExit = (entry: ZipEntry | undefined, l?: SpreadsheetLimits.Limits) => Effect.runPromise(Effect.exit(Stream.runCollect(archive.read(entry!, l))))
+    const readExit = (entry: LocatedEntry | undefined, l?: SpreadsheetLimits.Limits) => Effect.runPromise(Effect.exit(Stream.runCollect(archive.read(entry!, l))))
     expect(Exit.isSuccess(await readExit(a))).toBe(true)
     expect(Exit.isSuccess(await readExit(b))).toBe(true)
     const over = { _tag: "LimitExceeded", limit: "maxInflateRatio", max: 200 }
@@ -414,6 +414,52 @@ describe("zip archive: hostile input", () => {
     const archive = openOk(zip)
     expect(await errorOf(archive, "secret.xml")).toMatchObject({ _tag: "Encrypted", format: "zip" })
     expect(await errorOf(archive, "bzip.xml")).toMatchObject({ _tag: "UnsupportedFormat", format: "zip" })
+  })
+
+  it("open classifies how each entry reads; a read fails with the first reason that applies", async () => {
+    const zip = await buildZip([
+      { name: "plain.xml", data: enc("stored"), method: "store" },
+      { name: "packed.xml", data: enc("deflated deflated deflated") },
+      { name: "secret.xml", data: enc("x"), flags: 0x801 },
+      // encrypted with an unknown method: encryption is reported
+      { name: "secret-bzip.xml", data: enc("x"), method: "store", methodCode: 12, flags: 0x801 },
+      // encrypted and stored with sizes that differ: encryption is reported
+      { name: "secret-short.xml", data: enc("xyz"), method: "store", uncompressedSize: 9, flags: 0x801 },
+      { name: "bzip.xml", data: enc("x"), method: "store", methodCode: 12 },
+      { name: "short.xml", data: enc("xyz"), method: "store", uncompressedSize: 9 }
+    ])
+    const archive = openOk(zip)
+    expect(Object.fromEntries(archive.entries.map((e) => [e.name, e.kind]))).toEqual({
+      "plain.xml": "stored",
+      "packed.xml": "deflate",
+      "secret.xml": "encrypted",
+      "secret-bzip.xml": "encrypted",
+      "secret-short.xml": "encrypted",
+      "bzip.xml": { unsupported: 12 },
+      "short.xml": "bad-stored-size"
+    })
+    // each entry's data range is its bytes after the local header
+    const plain = archive.find("plain.xml")!
+    expect(new TextDecoder().decode(zip.subarray(plain.data.start, plain.data.end))).toBe("stored")
+    expect(plain.data.start).toBe(plain.localOffset + 30 + "plain.xml".length)
+    const packed = archive.find("PACKED.xml")!
+    expect(packed.data.end - packed.data.start).toBe(packed.compressedSize)
+    expect(new TextDecoder().decode(await Effect.runPromise(readAll(archive, plain)))).toBe("stored")
+    expect(new TextDecoder().decode(await Effect.runPromise(readAll(archive, packed)))).toBe("deflated deflated deflated")
+    expect(await errorOf(archive, "secret-bzip.xml")).toMatchObject({ _tag: "Encrypted", format: "zip" })
+    expect(await errorOf(archive, "secret-short.xml")).toMatchObject({ _tag: "Encrypted", format: "zip" })
+    expect(await errorOf(archive, "bzip.xml")).toMatchObject({ _tag: "UnsupportedFormat", format: "zip", reason: "compression method 12 in bzip.xml" })
+    expect(await errorOf(archive, "short.xml")).toMatchObject({
+      _tag: "MalformedFile",
+      format: "zip",
+      reason: "stored entry with different compressed and uncompressed sizes",
+      part: "short.xml"
+    })
+    // only entries an archive has opened can be read: a bare directory entry has no checked data range
+    const bare = (entry: ZipEntry) =>
+      // @ts-expect-error a directory entry isn't a located entry
+      archive.read(entry)
+    expect(typeof bare).toBe("function")
   })
 
   it("layout problems fail at open: overlap, duplicate names, bad local headers, data past the end", async () => {
