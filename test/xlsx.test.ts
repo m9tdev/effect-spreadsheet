@@ -502,6 +502,25 @@ describe("xlsx: sheet details", () => {
     // also inside a row
     expect(failureOf(await details(await withLayout("", `<row r="1"><sheetData/></row>`)))).toMatchObject(malformed)
   })
+
+  it("a cell's content is skipped, as for rows, whatever its element names", async () => {
+    // a <sheetData> (in any namespace) and a <mergeCell> in a cell's extension are neither nesting nor layout
+    const bytes = await withLayout(
+      `<col min="2" max="2" hidden="1"/>`,
+      `<row r="1"><c r="A1"><v>1</v><extLst><ext uri="x" xmlns:y="y"><y:sheetData/><mergeCell ref="E5:F6"/><col min="1" max="1" hidden="1"/></ext></extLst></c></row>`
+    )
+    const exit = await details(bytes)
+    expect(Exit.isSuccess(exit) && exit.value).toEqual({
+      hiddenColumns: [{ first: 1, last: 1 }],
+      merges: [
+        { firstRow: 0, firstColumn: 0, lastRow: 0, lastColumn: 2 },
+        { firstRow: 2, firstColumn: 1, lastRow: 3, lastColumn: 1 }
+      ],
+      dimension: { firstRow: 1, firstColumn: 1, lastRow: 8, lastColumn: 3 }
+    })
+    const read = await readExit(bytes)
+    expect(Exit.isSuccess(read) && values(read.value.sheets[0]!)).toEqual([[0, false, [[0, "Number", 1]]]])
+  })
 })
 
 describe("xlsx: hostile and broken files", () => {
