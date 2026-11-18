@@ -13,23 +13,11 @@ import { Effect, type Stream } from "effect"
 import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { ColumnSpan, Range, SheetDetails } from "../../Workbook.ts"
+import { parseRange } from "../refs.ts"
+import { mergeSpans } from "../sheet.ts"
 import { parse } from "../xml/parse.ts"
 import type { XmlHandler } from "../xml/tokenizer.ts"
 import { attr, isTrue, malformed } from "./parts.ts"
-import { parseRange } from "../refs.ts"
-
-/** Sorts spans and merges overlapping or adjacent ones. */
-export const mergeSpans = (spans: ReadonlyArray<ColumnSpan>): Array<ColumnSpan> => {
-  const sorted = [...spans].sort((a, b) => a.first - b.first)
-  const out: Array<{ first: number; last: number }> = []
-  // progress: one span per iteration
-  for (const span of sorted) {
-    const last = out[out.length - 1]
-    if (last !== undefined && span.first <= last.last + 1) last.last = Math.max(last.last, span.last)
-    else out.push({ first: span.first, last: span.last })
-  }
-  return out
-}
 
 export const sheetDetails = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,
