@@ -37,10 +37,11 @@ A `Row` is `{ index, hidden, cells }`; each cell is a tagged object
 
 Errors: `UnsupportedFormat { format, reason }`, `MalformedFile { format, part?, offset?, reason }`,
 `LimitExceeded { limit, max, actual }`, `Encrypted { format }`, `SheetNotFound { sheet }`,
-`InvalidOption { option, reason }` (e.g. a bad delimiter or encoding label).
+`InvalidOption { option, reason }` (e.g. a bad delimiter, encoding label or records header).
 
 Bad input and bad reader options are typed errors; bad limits are not. A delimiter that isn't
-one usable character or an unknown encoding label fails with `InvalidOption`, but a limit that
+one usable character, an unknown encoding label or a `toRecords` `header` other than
+`"first-row"`, a row index or an array of names fails with `InvalidOption`, but a limit that
 isn't a non-negative integer or `Infinity` (e.g. `maxRows: NaN`) is a defect (it dies), because
 it would otherwise silently switch the check off.
 

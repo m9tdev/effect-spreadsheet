@@ -1,5 +1,5 @@
 import { assert, describe, expect, expectTypeOf, it } from "@effect/vitest"
-import type { LimitExceeded } from "../src/SpreadsheetError.ts"
+import type { InvalidOption, LimitExceeded } from "../src/SpreadsheetError.ts"
 import { Cause, Effect, Stream } from "effect"
 import * as Cell from "../src/Cell.ts"
 import * as Csv from "../src/csv/index.ts"
@@ -69,10 +69,51 @@ describe("toRecords", () => {
     sparse[0] = "x"
     sparse[2] = "y"
     assert.deepStrictEqual(recs(rows, { header: sparse }), [{ x: 1, y: 3 }])
-    assert.deepStrictEqual(recs(rows, { header: ["x", undefined as unknown as string, "y"] }), [{ x: 1, y: 3 }])
-    assert.deepStrictEqual(recs(rows, { header: ["x", null as unknown as string, "y"] }), [{ x: 1, y: 3 }])
+    assert.deepStrictEqual(recs(rows, { header: ["x", , "y"] }), [{ x: 1, y: 3 }])
+    assert.deepStrictEqual(recs(rows, { header: ["x", undefined, "y"] }), [{ x: 1, y: 3 }])
+    assert.deepStrictEqual(recs(rows, { header: ["x", null, "y"] }), [{ x: 1, y: 3 }])
     // dropped columns get no defval either
     assert.deepStrictEqual(recs(await rowsOf("1\n"), { header: sparse, defval: 0 }), [{ x: 1, y: 0 }])
+  })
+
+  it("header: any value the docs don't allow fails with InvalidOption before any row is read", async () => {
+    // the edges of the documented values still work
+    const valid = await rowsOf("x,y\n1,2\n")
+    assert.deepStrictEqual(recs(valid, { header: 0 }), [{ x: 1, y: 2 }])
+    assert.deepStrictEqual(recs(valid, { header: -0 }), [{ x: 1, y: 2 }])
+    assert.deepStrictEqual(recs(valid, { header: Number.MAX_SAFE_INTEGER }), [])
+    assert.deepStrictEqual(recs(valid, { header: [] }), [])
+    const invalid: ReadonlyArray<unknown> = [
+      1.5,
+      0.5,
+      -1,
+      NaN,
+      Infinity,
+      2 ** 53,
+      "firstrow",
+      "2",
+      "",
+      null,
+      undefined,
+      true,
+      {},
+      ["x", 1, "y"],
+      ["x", {}]
+    ]
+    for (const header of invalid) {
+      let pulled = 0
+      const rows = Stream.fromIterable([{ index: 0, hidden: false, cells: [Cell.text(0, "a")] }]).pipe(
+        Stream.tap(() => Effect.sync(() => pulled++))
+      )
+      const options = { header } as unknown as Spreadsheet.RecordsOptions
+      const fromStream = await Effect.runPromise(Effect.flip(Stream.runCollect(Spreadsheet.toRecords(rows, options))))
+      const fromIterable = await Effect.runPromise(Effect.flip(Spreadsheet.toRecords([], options)))
+      for (const error of [fromStream, fromIterable]) {
+        assert.strictEqual(error._tag, "InvalidOption", String(header))
+        assert.strictEqual(error._tag === "InvalidOption" && error.option, "header")
+      }
+      assert.strictEqual(pulled, 0, String(header))
+    }
   })
 
   it("an explicit \"\" entry is like a blank header cell: __EMPTY key, no defval fill", async () => {
@@ -183,10 +224,12 @@ describe("toRecords", () => {
       const fills = yield* Effect.flip(
         Spreadsheet.toRecords(rows, { header: "first-row", defval: null, limits: { maxRecordFields: 5 } })
       )
-      assert.deepStrictEqual([fills._tag, fills.limit, fills.max, fills.actual], ["LimitExceeded", "maxRecordFields", 5, 6])
+      assert(fills._tag === "LimitExceeded")
+      assert.deepStrictEqual([fills.limit, fills.max, fills.actual], ["maxRecordFields", 5, 6])
       const cells = yield* Effect.flip(
         Spreadsheet.toRecords(rows, { header: "first-row", limits: { maxCellsPerSheet: 2 } })
       )
+      assert(cells._tag === "LimitExceeded")
       assert.deepStrictEqual([cells.limit, cells.max], ["maxCellsPerSheet", 2])
       // the stream variant fails the same way, and the layer applies
       const streamError = yield* Effect.flip(
@@ -213,7 +256,7 @@ describe("toRecords", () => {
       const over = yield* Effect.flip(
         Spreadsheet.toRecords(sparse, { header: "first-row", defval: 0, limits: { maxRecordFields: 3 } })
       )
-      assert.strictEqual(over.limit, "maxRecordFields")
+      assert.strictEqual(over._tag === "LimitExceeded" && over.limit, "maxRecordFields")
     }), 30_000)
 
   it("many rows that give no record (blank, before the header) finish fast and keep yielding", async () => {
@@ -237,6 +280,7 @@ describe("toRecords", () => {
         { index: 2, hidden: false, cells: [Cell.empty(0)] }
       ]
       const error = yield* Effect.flip(Spreadsheet.toRecords(rows, { header: "first-row", limits: { maxCellsPerSheet: 2 } }))
+      assert(error._tag === "LimitExceeded")
       assert.deepStrictEqual([error.limit, error.actual], ["maxCellsPerSheet", 3])
     }))
 
@@ -299,13 +343,22 @@ describe("toRecords", () => {
   it("record values are typed: cell values, plus the defval type", () => {
     const rows: Array<Row> = [{ index: 0, hidden: false, cells: [Cell.text(0, "a")] }]
     expectTypeOf(Spreadsheet.toRecords(rows, { header: "first-row" })).toEqualTypeOf<
-      Effect.Effect<Array<Record<string, Cell.Value>>, LimitExceeded>
+      Effect.Effect<Array<Record<string, Cell.Value>>, LimitExceeded | InvalidOption>
     >()
     expectTypeOf(Spreadsheet.toRecords(rows, { header: "first-row", defval: null })).toEqualTypeOf<
-      Effect.Effect<Array<Record<string, Cell.Value | null>>, LimitExceeded>
+      Effect.Effect<Array<Record<string, Cell.Value | null>>, LimitExceeded | InvalidOption>
     >()
     expectTypeOf(Spreadsheet.toRecords(Stream.fromIterable(rows), { header: "first-row", defval: "" })).toEqualTypeOf<
-      Stream.Stream<Record<string, Cell.Value>, LimitExceeded>
+      Stream.Stream<Record<string, Cell.Value>, LimitExceeded | InvalidOption>
+    >()
+  })
+
+  it("an explicit header array may hold null, undefined and holes, as documented", () => {
+    expectTypeOf<readonly ["x", null, undefined, "y"]>().toExtend<Spreadsheet.RecordsOptions["header"]>()
+    expectTypeOf<Array<string | null | undefined>>().toExtend<Spreadsheet.RecordsOptions["header"]>()
+    const rows: Array<Row> = []
+    expectTypeOf(Spreadsheet.toRecords(rows, { header: ["x", , null, undefined, "y"] })).toEqualTypeOf<
+      Effect.Effect<Array<Record<string, Cell.Value>>, LimitExceeded | InvalidOption>
     >()
   })
 

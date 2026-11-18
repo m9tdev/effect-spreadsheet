@@ -12,7 +12,7 @@ import * as Xlsb from "./xlsb/index.ts"
 import * as Xlsx from "./xlsx/index.ts"
 import { type RecordsOptions, recordsStream } from "./internal/records.ts"
 import { detect } from "./internal/sniff.ts"
-import { LimitExceeded, type SpreadsheetError, UnsupportedFormat } from "./SpreadsheetError.ts"
+import { type InvalidOption, LimitExceeded, type SpreadsheetError, UnsupportedFormat } from "./SpreadsheetError.ts"
 import * as SpreadsheetLimits from "./SpreadsheetLimits.ts"
 import type { Format, Row, Workbook } from "./Workbook.ts"
 
@@ -138,13 +138,17 @@ export const readCsv: (
  * cell values):
  *
  * - `header: "first-row"`: the first row gives the names.
- * - `header: n`: the row with index `n` gives the names; rows before it are
- *   skipped.
+ * - `header: n`: the row with index `n` (an integer, 0 or more) gives the
+ *   names; rows before it are skipped.
  * - `header: [...]`: the given names, by column (repeats made unique the
  *   same way); every row is data. Columns past the array, and columns whose
  *   entry is a hole, `undefined` or `null`, are dropped. An entry `""` is
  *   treated like a blank header cell (an `__EMPTY…` key when data appears,
  *   no `defval` fill).
+ *
+ * Any other `header` (another string, a fraction, a negative number, `NaN`,
+ * an array entry that is not a string, `null` or `undefined`) fails with
+ * `InvalidOption` before any row is read.
  *
  * Header names are made unique (`name`, `name_1`, `name_2`, ...). A column
  * without a header name (a blank or Empty header cell, a gap in the header
@@ -174,11 +178,11 @@ export const toRecords: {
   <E, R, D = never>(
     rows: Stream.Stream<Row, E, R>,
     options: RecordsOptions<D>
-  ): Stream.Stream<Record<string, Cell.Value | D>, E | LimitExceeded, R>
+  ): Stream.Stream<Record<string, Cell.Value | D>, E | LimitExceeded | InvalidOption, R>
   <D = never>(
     rows: Iterable<Row>,
     options: RecordsOptions<D>
-  ): Effect.Effect<Array<Record<string, Cell.Value | D>>, LimitExceeded>
+  ): Effect.Effect<Array<Record<string, Cell.Value | D>>, LimitExceeded | InvalidOption>
 } = (<E, R>(rows: Stream.Stream<Row, E, R> | Iterable<Row>, options: RecordsOptions<unknown>) => {
   const stream = Stream.unwrap(
     Effect.map(SpreadsheetLimits.resolve(options.limits), (limits) =>
