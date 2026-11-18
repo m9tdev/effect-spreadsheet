@@ -224,18 +224,18 @@ export const readRecords = <E, R>(
 ): Effect.Effect<number, E | SpreadsheetError, R> =>
   Effect.flatMap(WorkMeter, (meter) => {
     const splitter = new RecordSplitter(part, limits.maxRecordBytes)
-    let stopped = false
+    let ended = false
     return Stream.runForEachWhile(bytes, (piece) => {
       const before = splitter.records
       const handled = splitter.feed(piece, onRecord)
       meter.add("records", splitter.records - before)
       if (handled === undefined) return GO_ON
       if (handled !== "stop") return Effect.fail(handled)
-      stopped = true
+      ended = true
       return STOP
     }).pipe(
       Effect.flatMap(() => {
-        const error = stopped ? undefined : splitter.end()
+        const error = ended ? undefined : splitter.end()
         return error === undefined ? Effect.succeed(splitter.records) : Effect.fail(error)
       })
     )
