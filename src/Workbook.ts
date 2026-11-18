@@ -6,7 +6,6 @@
  */
 import { Effect, Schema, Stream } from "effect"
 import { Cell } from "./Cell.ts"
-import { NO_DETAILS } from "./internal/sheet/layout.ts"
 import { SheetNotFound, type SpreadsheetError } from "./SpreadsheetError.ts"
 import { type LimitOverrides, type Limits, merge } from "./SpreadsheetLimits.ts"
 
@@ -198,6 +197,9 @@ export interface Workbook {
   /** @internal */
   readonly [DetailsSource]: (sheet: SheetInfo, limits: Limits) => Effect.Effect<SheetDetails, SpreadsheetError>
 }
+
+/** The details of a sheet without layout: no hidden columns, no merges, no dimension. */
+const NO_DETAILS: SheetDetails = { hiddenColumns: [], merges: [] }
 
 /**
  * Builds a workbook. For format implementations: pass the limits resolved

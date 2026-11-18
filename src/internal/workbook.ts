@@ -7,7 +7,7 @@
  * @internal
  */
 import { Effect, Stream } from "effect"
-import type { SpreadsheetError } from "../SpreadsheetError.ts"
+import { SheetNotFound, type SpreadsheetError } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
 import { type DefinedName, type Format, make, type Row, type SheetDetails, type SheetInfo, type Visibility, type Workbook } from "../Workbook.ts"
 import { NO_DETAILS } from "./sheet/layout.ts"
@@ -49,9 +49,11 @@ export const fromSources = (options: {
 }): Workbook => {
   const sources = options.sheets.map((s) => s.source)
   const sheets: Array<SheetInfo> = options.sheets.map((s, index) => ({ name: s.name, index, visibility: s.visibility }))
-  // The workbook only reads the sheets it lists (`Workbook.findSheet` returns
-  // one of `sheets`), and each one's index is its position in `sources`.
-  const sourceOf = (sheet: SheetInfo): SheetSource => sources[sheet.index]!
+  // Each listed sheet's index is its position in `sources`. The workbook only
+  // reads the sheets it lists (`Workbook.findSheet` returns one of `sheets`),
+  // so the fallback, for a sheet of another workbook, is never reached.
+  const sourceOf = (sheet: SheetInfo): SheetSource =>
+    sources[sheet.index] ?? { _tag: "Broken", error: new SheetNotFound({ sheet: sheet.name }) }
   return make({
     format: options.format,
     sheets,
