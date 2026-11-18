@@ -13,6 +13,7 @@ import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xlsb from "../src/xlsb/index.ts"
+import { counter, metered } from "./helpers/meter.ts"
 import { failureOf } from "./helpers/run.ts"
 import * as B from "./helpers/xlsb.ts"
 
@@ -188,6 +189,10 @@ describe("xlsb reader", () => {
     })
   })
 
+  /** Cells the reader holds for its open row (read from its private state). */
+  const heldCells = (rows: SheetRows): number =>
+    (rows as unknown as { readonly row: { readonly cells?: ReadonlyArray<unknown> } }).row.cells?.length ?? 0
+
   it("a row repeating its columns holds at most 2 x maxColumns cells", () => {
     const limits = { ...SpreadsheetLimits.defaults, maxColumns: 8 }
     const rows = new SheetRows({ part: "t.bin", strings: undefined, styles: NO_STYLES, date1904: false, limits })
@@ -199,9 +204,11 @@ describe("xlsb reader", () => {
     // progress: k up to 1000
     for (let k = 0; k < 1000; k++) {
       feed(B.rk(7 - (k % 8), B.rkInt(k)))
-      most = Math.max(most, rows.heldCells)
+      most = Math.max(most, heldCells(rows))
     }
     expect(most).toBeLessThanOrEqual(16)
+    // more than one pass over the columns is held before a compaction
+    expect(most).toBeGreaterThan(8)
     expect(rows.end()).toBeUndefined()
     expect(rows.out[0]!.cells.map((c) => c.column)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
     expect(rows.out[0]!.cells.map((c) => Cell.value(c))).toEqual([999, 998, 997, 996, 995, 994, 993, 992])
@@ -504,12 +511,12 @@ describe("xlsb defined names", () => {
     if ("_tag" in archive) throw new Error(archive._tag)
     const workbook = await Effect.runPromise(readWorkbookBin(archive, archive.find("xl/workbook.bin")!, limits))
     const rels = await Effect.runPromise(readRelationships(archive, "xl/workbook.bin", limits))
-    const before = archive.inflatedBytes()
-    const sheets = await Effect.runPromise(readExternalBooks(archive, workbook, (id) => rels.find((r) => r.id === id)?.part, limits))
+    const inflated = counter("bytes")
+    const sheets = await Effect.runPromise(metered(inflated, readExternalBooks(archive, workbook, (id) => rels.find((r) => r.id === id)?.part, limits)))
     expect(sheets.size).toBe(books)
     expect([...sheets.values()].every((names) => names[0] === "Rates")).toBe(true)
     // one read of the part's first slice (64 KiB), not 200 reads of 1 MiB
-    expect(archive.inflatedBytes() - before).toBeLessThanOrEqual(64 * 1024)
+    expect(inflated.total()).toBeLessThanOrEqual(64 * 1024)
     const { wb } = await readOk({ sheets: [{ name: "S" }], externalLinks: [link], globals })
     expect(wb.definedNames.slice(0, 2).map((n) => n.formula)).toEqual(["[1]Rates!$A$1", "[2]Rates!$A$1"])
   })

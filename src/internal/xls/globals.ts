@@ -20,6 +20,7 @@ import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { DefinedName } from "../../Workbook.ts"
 import { type BiffRecord, BOF_BIFF5_8, EOF, type Gathering, RecordReader, readBof } from "../biff/records.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
+import { WorkMeter } from "../meter.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
@@ -192,14 +193,6 @@ const sheetEnds = (
  */
 export const BATCH_BYTES = 16 * BATCH_CELLS
 
-/**
- * Batches of globals work, summed over every read in this process: each
- * step of the walk, and each `BATCH_RECORDS` XFs or defined names resolved
- * after it (with a yield to the event loop between batches). Tests use it
- * to check that a big globals substream is read in many bounded steps.
- */
-export const batches = { count: 0 }
-
 /** A record the walk reads with its CONTINUEs. */
 type ContinuedKind = "Sst" | "Supbook" | "ExternSheet" | "Name"
 
@@ -278,7 +271,6 @@ class GlobalsWalk {
   step(): "more" | "done" | SpreadsheetError {
     this.units = 0
     this.bytes = 0
-    batches.count++
     // progress: every iteration reads at least one record, CONTINUE or string
     // (each advances a reader), and adds it to units, or returns
     while (this.units < BATCH_RECORDS && this.bytes < BATCH_BYTES) {
@@ -541,16 +533,18 @@ class GlobalsWalk {
  * Reads the globals of a workbook stream (its first substream), in batches
  * of bounded work with a yield to the event loop between them, and so are
  * its number formats and defined names. Sheet names are made unique
- * (`uniqueSheetNames`).
+ * (`uniqueSheetNames`). Each batch counts one unit of work on the meter.
  */
 export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<Globals, SpreadsheetError> =>
   Effect.gen(function*() {
+    const meter = yield* WorkMeter
     const walk = new GlobalsWalk(stream, limits)
     const started = walk.start()
     if (started !== undefined) return yield* Effect.fail(started)
     // progress: every step reads at least one record, CONTINUE or string, or ends
     for (let k = 0;; k++) {
       if (k > 0) yield* Effect.yieldNow
+      meter.add("batches", 1)
       const outcome = walk.step()
       if (outcome === "done") break
       if (outcome !== "more") return yield* Effect.fail(outcome)
@@ -571,7 +565,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
     for (let k = 0; k < walk.xfFormats.length; k++) {
       if (k === 0 || units >= BATCH_RECORDS || cost >= BATCH_BYTES) {
         if (k > 0) yield* Effect.yieldNow
-        batches.count++
+        meter.add("batches", 1)
         units = 0
         cost = 0
       }
@@ -591,7 +585,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
     for (let k = 0; k < walk.names.length; k++) {
       if (k % BATCH_RECORDS === 0) {
         if (k > 0) yield* Effect.yieldNow
-        batches.count++
+        meter.add("batches", 1)
       }
       const n = walk.names[k]!
       const formula = nameFormula(n.rgce, xtis, books, sheetNames)

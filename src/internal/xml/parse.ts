@@ -7,6 +7,7 @@
  */
 import { Effect, Stream } from "effect"
 import { MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
+import { WorkMeter } from "../meter.ts"
 import { type XmlHandler, type XmlLimits, XmlTokenizer } from "./tokenizer.ts"
 
 /**
@@ -90,24 +91,20 @@ const concat = (a: Uint8Array, b: Uint8Array): Uint8Array => {
   return out
 }
 
-/** The result of `parse`: the tokenizer's work counter, for cost checks. */
-export interface ParseStats {
-  readonly work: number
-}
-
 /**
  * Tokenizes a byte stream with `handler`. Fails with the first error (from
- * the input stream, the decoder, the tokenizer or the handler).
+ * the input stream, the decoder, the tokenizer or the handler). The
+ * tokenizer hands its work to the work meter.
  */
 export const parse = <E, R>(
   bytes: Stream.Stream<Uint8Array, E, R>,
   handler: XmlHandler,
   limits: XmlLimits,
   part?: string
-): Effect.Effect<ParseStats, E | SpreadsheetError, R> =>
-  Effect.suspend(() => {
+): Effect.Effect<void, E | SpreadsheetError, R> =>
+  Effect.flatMap(WorkMeter, (meter) => {
     const decoder = new XmlDecoder(part)
-    const tokenizer = new XmlTokenizer(handler, limits, part)
+    const tokenizer = new XmlTokenizer(handler, limits, part, meter)
     return Stream.runForEach(bytes, (chunk) => {
       const text = decoder.push(chunk)
       if (typeof text !== "string") return Effect.fail(text)
@@ -118,7 +115,7 @@ export const parse = <E, R>(
         const rest = decoder.end()
         if (typeof rest !== "string") return Effect.fail(rest)
         const error = tokenizer.feed(rest) ?? tokenizer.end()
-        return error === undefined ? Effect.succeed({ work: tokenizer.work }) : Effect.fail(error)
+        return error === undefined ? Effect.void : Effect.fail(error)
       })
     )
   })

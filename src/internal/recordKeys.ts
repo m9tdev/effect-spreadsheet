@@ -15,6 +15,7 @@
  * Cost: every `take` is O(1) amortized (see `take`), and nothing is allocated
  * per column index, so a far cell at column 16383 costs one map entry.
  */
+import { type Meter, noMeter } from "./meter.ts"
 
 /** One header cell: its 0-based column index and its name. */
 export type HeaderEntry = readonly [column: number, name: string | undefined]
@@ -31,27 +32,27 @@ export interface RecordKeys {
   readonly key: (column: number) => string
 }
 
-/** `RecordKeys` plus a count of the `used` lookups so far (tests check the cost bound). */
-export interface CountedRecordKeys extends RecordKeys {
-  /** Number of `used` lookups made by key allocation so far, first checks included. */
-  readonly probes: () => number
-}
-
 const EMPTY = "__EMPTY"
 
 const isEmptyName = (name: string | undefined): name is undefined | "" => name === undefined || name === ""
 
 const isColumn = (column: number): boolean => Number.isSafeInteger(column) && column >= 0
 
-/** Like `make`, and also reports the probe count. For tests only: `make`
- *  returns a plain `RecordKeys` without `probes`. */
-export const makeCounted = (header: Iterable<HeaderEntry>): CountedRecordKeys => {
+/** `header`: entries with strictly ascending, non-negative integer columns.
+ *  Sparse: only the cells present. Never a dense array up to the max column.
+ *  Doesn't throw on a violated precondition: a repeated column keeps its
+ *  last entry (also an empty one), like the cells a reader keeps for a row
+ *  and like a data row in `toRecords`, whose last cell in a column (also an
+ *  Empty one) gives that column's value; descending entries are put in
+ *  column order, and entries whose column isn't a non-negative safe integer
+ *  are ignored. The `used` lookups of each key allocation (first checks
+ *  included) go to `meter`. */
+export const make = (header: Iterable<HeaderEntry>, meter: Meter = noMeter): RecordKeys => {
   const used = new Set<string>()
   /** Per base name: the next suffix to try. Invariant: `b_1 … b_{next(b)-1}` are all in `used`. */
   const next = new Map<string, number>()
   const lazy = new Map<number, string>()
   const byColumn = new Map<number, string>()
-  let probes = 0
 
   /**
    * Allocates a key from base `b`: `b` if free, else `b_k` for the smallest
@@ -68,19 +69,20 @@ export const makeCounted = (header: Iterable<HeaderEntry>): CountedRecordKeys =>
    * total lookups ≤ 3 × keys handed out.
    */
   const take = (b: string): string => {
-    probes++
     if (!used.has(b)) {
+      meter.add("probes", 1)
       used.add(b)
       return b
     }
     let k = next.get(b) ?? 1
     let candidate = `${b}_${k}`
-    probes++
+    let probes = 2
     while (used.has(candidate)) {
       k++
       candidate = `${b}_${k}`
       probes++
     }
+    meter.add("probes", probes)
     next.set(b, k + 1)
     used.add(candidate)
     return candidate
@@ -129,32 +131,5 @@ export const makeCounted = (header: Iterable<HeaderEntry>): CountedRecordKeys =>
     return fresh
   }
 
-  return { named, headerKey, key, probes: () => probes }
-}
-
-/** `header`: entries with strictly ascending, non-negative integer columns.
- *  Sparse: only the cells present. Never a dense array up to the max column.
- *  Doesn't throw on a violated precondition: a repeated column keeps its
- *  last entry (also an empty one), like the cells a reader keeps for a row
- *  and like a data row in `toRecords`, whose last cell in a column (also an
- *  Empty one) gives that column's value; descending entries are put in
- *  column order, and entries whose column isn't a non-negative safe integer
- *  are ignored. */
-export const make = (header: Iterable<HeaderEntry>): RecordKeys => {
-  const { named, headerKey, key } = makeCounted(header)
   return { named, headerKey, key }
-}
-
-/** Pure helper (tests, docs): the keys for a dense header, as if every column
- *  had data in the first data row. Equal to `make(entries).key(i)` for
- *  i = 0 … names.length - 1, called in that order. Holes count as empty. */
-export const recordKeys = (names: ReadonlyArray<string | undefined>): ReadonlyArray<string> => {
-  const entries: Array<HeaderEntry> = []
-  // Progress: `i` increases by one per step up to `names.length`.
-  for (let i = 0; i < names.length; i++) entries.push([i, names[i]])
-  const keys = make(entries)
-  const out: Array<string> = []
-  // Progress: `i` increases by one per step up to `names.length`.
-  for (let i = 0; i < names.length; i++) out.push(keys.key(i))
-  return out
 }

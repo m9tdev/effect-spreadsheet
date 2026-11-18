@@ -26,6 +26,7 @@ import type * as Arr from "effect/Array"
 import type * as Pull from "effect/Pull"
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
+import { WorkMeter } from "../meter.ts"
 import { CRC32_START, crc32Final, crc32Update } from "./crc32.ts"
 import { type Directory, normalizeName, readDirectory, type ZipEntry } from "./directory.ts"
 import { type InflateRaw, inflateRawWeb } from "./inflate.ts"
@@ -50,10 +51,6 @@ export interface Archive {
    * (default: the archive's) set this read's inflate budget.
    */
   readonly read: (entry: ZipEntry, limits?: Limits) => Stream.Stream<Uint8Array, SpreadsheetError>
-  /** The whole entry; fails up front if its declared size is over `maxBytes`. */
-  readonly readAll: (entry: ZipEntry, maxBytes?: number) => Effect.Effect<Uint8Array, SpreadsheetError>
-  /** Bytes inflated (or copied, for stored entries) so far, over all reads: a work counter. */
-  readonly inflatedBytes: () => number
 }
 
 const malformed = (reason: string, part?: string, offset?: number) =>
@@ -129,22 +126,19 @@ export const open = (
   }
   const located = locate(bytes, directory)
   if (located instanceof MalformedFile) return located
-  /** Bytes inflated in total (every read counts): a work counter. */
-  let inflated = 0
   /** Bytes counted against the budget: per entry, the most it has inflated so far. */
   let charged = 0
   const highWater = new Map<ZipEntry, number>()
 
   /**
-   * Counts `n` more output bytes of `entry` (`soFar` after them) under
+   * Counts output bytes of `entry` (`soFar` of them so far) under
    * `limits`; an error if a limit is crossed. Only bytes past the entry's
    * high-water mark are charged, so re-reads of what was already inflated
    * pass. A chunk that would take the total over the budget is rejected
    * without being charged or raising the high-water mark, so a re-read
    * fails at the same point again.
    */
-  const account = (entry: ZipEntry, soFar: number, n: number, limits: Limits): SpreadsheetError | undefined => {
-    inflated += n
+  const account = (entry: ZipEntry, soFar: number, limits: Limits): SpreadsheetError | undefined => {
     if (soFar > entry.uncompressedSize) {
       return malformed(`entry inflates past its declared size of ${entry.uncompressedSize} bytes`, entry.name)
     }
@@ -191,6 +185,8 @@ export const open = (
         const inflater = entry.method === DEFLATE ? inflate(data) : undefined
         if (inflater !== undefined) yield* Scope.addFinalizer(scope, Effect.sync(() => inflater.cancel()))
         let storedAt = 0
+        // the work meter counts every output byte, re-reads included
+        const meter = yield* WorkMeter
         const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Uint8Array>, SpreadsheetError> = Effect.gen(function*() {
           // progress: each iteration emits a non-empty chunk, ends, or reads
           // one more chunk from the decompressor (which consumes input)
@@ -219,7 +215,8 @@ export const open = (
             }
             if (chunk.length === 0) continue // the decompressor advanced its input
             size += chunk.length
-            const error = account(entry, size, chunk.length, readLimits)
+            meter.add("bytes", chunk.length)
+            const error = account(entry, size, readLimits)
             if (error !== undefined) {
               done = true
               inflater?.cancel()
@@ -234,30 +231,10 @@ export const open = (
     ))
   }
 
-  const readAll = (entry: ZipEntry, maxBytes?: number) =>
-    Effect.gen(function*() {
-      if (maxBytes !== undefined && entry.uncompressedSize > maxBytes) {
-        return yield* Effect.fail(
-          new LimitExceeded({ limit: "maxDecompressedBytes", max: maxBytes, actual: entry.uncompressedSize })
-        )
-      }
-      const chunks = yield* Stream.runCollect(read(entry))
-      const out = new Uint8Array(entry.uncompressedSize)
-      let at = 0
-      // progress: one chunk per iteration; finish() guarantees the total fits
-      for (const chunk of chunks) {
-        out.set(chunk, at)
-        at += chunk.length
-      }
-      return out
-    })
-
   return {
     entries,
     find: (name) => byName.get(normalizeName(name)),
-    read,
-    readAll,
-    inflatedBytes: () => inflated
+    read
   }
 }
 

@@ -43,6 +43,7 @@ import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { ColumnSpan, Range, Row, SheetDetails } from "../../Workbook.ts"
 import { Fields, readRichStr, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords, RecordSplitter } from "../biff12/records.ts"
+import { WorkMeter } from "../meter.ts"
 import { decodeRk, ERROR_CODES } from "../xls/fields.ts"
 import { mergeSpans } from "../xlsx/details.ts"
 import { serialToDate } from "../xlsx/numFmt.ts"
@@ -58,13 +59,6 @@ export interface SheetContext {
   readonly date1904: boolean
   readonly limits: Limits
 }
-
-/**
- * Records handled by the rows reader and by sheetDetails, summed over every
- * read in this process. Tests use it to check that the work grows linearly
- * with the sheet, whatever the machine's load.
- */
-export const work = { records: 0 }
 
 const BRT_ROW_HDR = 0x0000
 const BRT_CELL_BLANK = 0x0001
@@ -175,16 +169,10 @@ export class SheetRows {
     this.context = context
   }
 
-  /** Cells held for the open row (for tests). */
-  get heldCells(): number {
-    return this.row._tag === "Open" ? this.row.cells.length : 0
-  }
-
   private readonly scope = new Scope()
 
   /** Handles one record. */
   handle = (record: Biff12Record): SpreadsheetError | undefined => {
-    work.records++
     const type = record.type
     if (!this.scope.step(record)) return undefined
     if (type === BRT_ROW_HDR) return this.openRow(record)
@@ -333,13 +321,16 @@ export class SheetRows {
   }
 }
 
-/** Rows of a worksheet part, given its byte stream. Re-runnable when the input is. */
+/**
+ * Rows of a worksheet part, given its byte stream. Re-runnable when the
+ * input is. The records of each slice go to the work meter.
+ */
 export const sheetRows = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,
   context: SheetContext
 ): Stream.Stream<Row, SpreadsheetError> =>
   Stream.transformPull(sliced(bytes), (upstream) =>
-    Effect.sync(() => {
+    Effect.map(WorkMeter, (meter) => {
       const rows = new SheetRows(context)
       const splitter = new RecordSplitter(context.part, context.limits.maxRecordBytes)
       const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
@@ -368,11 +359,13 @@ export const sheetRows = (
             state = DONE
             error = splitter.end() ?? rows.end()
           } else {
+            const before = splitter.records
             // progress: one piece per iteration
             for (const piece of chunk) {
               error = splitter.feed(piece, rows.handle)
               if (error !== undefined) break
             }
+            meter.add("records", splitter.records - before)
           }
           // the rows completed before the error come out first; the error on the next pull
           if (error !== undefined) state = { _tag: "Failing", error }
@@ -415,7 +408,6 @@ export const sheetDetails = (
     let dimension: Range | undefined
     const scope = new Scope()
     const handle = (record: Biff12Record): SpreadsheetError | undefined => {
-      work.records++
       if (!scope.step(record)) return undefined
       switch (record.type) {
         case BRT_WS_DIM: {

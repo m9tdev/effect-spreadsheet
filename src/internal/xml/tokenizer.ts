@@ -33,14 +33,15 @@
  * Errors carry the offset (in characters) of the tag or text run they are
  * about, the same however the input is split.
  *
- * Cost: every character is examined a bounded number of times (the
- * `work` counter); a token split across many pieces is collected in parts
- * and joined once.
+ * Cost: every character is examined a bounded number of times (counted in
+ * `work`, and handed to the work meter after each piece); a token split
+ * across many pieces is collected in parts and joined once.
  *
  * @internal
  */
 import { absurd } from "effect/Function"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
+import { type Meter, noMeter } from "../meter.ts"
 
 /** Attributes of a start tag: `[qualified name, decoded value]` pairs, in document order. */
 export type XmlAttributes = ReadonlyArray<readonly [string, string]>
@@ -146,9 +147,10 @@ export const isName = (s: string): boolean => {
 }
 
 export class XmlTokenizer {
-  /** Characters examined so far (each input character a bounded number of times). */
-  work = 0
+  /** Characters examined in the current piece (each input character a bounded number of times). */
+  private work = 0
 
+  private readonly meter: Meter
   private readonly handler: XmlHandler
   private readonly limits: XmlLimits
   private readonly part: string | undefined
@@ -168,10 +170,19 @@ export class XmlTokenizer {
   private textStart = 0
   private failure: SpreadsheetError | undefined
 
-  constructor(handler: XmlHandler, limits: XmlLimits, part?: string) {
+  constructor(handler: XmlHandler, limits: XmlLimits, part?: string, meter: Meter = noMeter) {
     this.handler = handler
     this.limits = limits
     this.part = part
+    this.meter = meter
+  }
+
+  /** Hands the piece's work to the meter. */
+  private report(): void {
+    if (this.work > 0) {
+      this.meter.add("characters", this.work)
+      this.work = 0
+    }
   }
 
   private malformed(reason: string, offset?: number): MalformedFile {
@@ -221,6 +232,7 @@ export class XmlTokenizer {
       }
     }
     this.consumed += n
+    this.report()
     return this.failure
   }
 
@@ -229,6 +241,7 @@ export class XmlTokenizer {
     if (this.failure !== undefined) return this.failure
     if (this.mode._tag !== "Text") return (this.failure = this.malformed("truncated inside a tag", this.consumed))
     this.flushText()
+    this.report()
     if (this.failure !== undefined) return this.failure
     if (this.stack.length > 0) {
       return (this.failure = this.malformed(`truncated: ${this.stack.length} element(s) not closed`, this.consumed))

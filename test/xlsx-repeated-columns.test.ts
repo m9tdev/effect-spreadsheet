@@ -25,6 +25,10 @@ const read = async (data: string, limits?: LimitOverrides) => {
   return exit.value.map((r) => [r.index, r.cells.map((c) => [c.column, c._tag, Cell.value(c) ?? null])])
 }
 
+/** Cells the reader holds for its open row (read from its private state). */
+const heldCells = (rows: SheetRows): number =>
+  (rows as unknown as { readonly row: { readonly cells: ReadonlyArray<unknown> } | undefined }).row?.cells.length ?? 0
+
 /** A SheetRows fed by a tokenizer, one piece of XML at a time. */
 const driver = (maxColumns: number) => {
   const limits = { ...SpreadsheetLimits.defaults, maxColumns }
@@ -45,7 +49,7 @@ describe("xlsx sheet: repeated columns", () => {
     // 1 000 passes over columns H..A (unsorted): 8 000 cells for 8 columns
     for (let k = 0; k < 8000; k++) {
       feed(`<c r="${"HGFEDCBA"[k % 8]}1"><v>${k}</v></c>`)
-      most = Math.max(most, rows.heldCells)
+      most = Math.max(most, heldCells(rows))
     }
     expect(most).toBeLessThanOrEqual(2 * 8 + 1)
     feed(`</row></sheetData></worksheet>`)
@@ -61,7 +65,7 @@ describe("xlsx sheet: repeated columns", () => {
     // B A D C B A D C B: 9 cells > 2 x 4, compacted at the 9th (B1 = 8), leaving A..D
     feed(`<worksheet><sheetData><row r="1">`)
     for (let k = 0; k < 9; k++) feed(`<c r="${"DCBA"[(k + 2) % 4]}1"><v>${k}</v></c>`)
-    expect(rows.heldCells).toBe(4)
+    expect(heldCells(rows)).toBe(4)
     // no r: the column after the previous cell (B), i.e. C, which is before
     // the last held cell (D), so the row is unsorted again and C1 = 100 wins
     feed(`<c><v>100</v></c></row></sheetData></worksheet>`)

@@ -36,18 +36,11 @@ import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../Sprea
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { ColumnSpan, Range, Row, SheetDetails } from "../../Workbook.ts"
 import { BOF_BIFF5_8, type BiffRecord, CONTINUE, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
+import { WorkMeter } from "../meter.ts"
 import { serialToDate } from "../xlsx/numFmt.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { decodeRk, ERROR_CODES, Fields, readString } from "./fields.ts"
 import type { Globals } from "./globals.ts"
-
-/**
- * Steps of the rows reader's loops (records scanned and read, cells, rows,
- * queue and sort steps) and of sheetDetails' record walk, summed over every read in this process. Tests use
- * it to check that the work grows linearly with the sheet, whatever the
- * machine's load; it costs one increment per step.
- */
-export const work = { steps: 0 }
 
 /** Records handled per pull: bounded work between event-loop turns. */
 export const BATCH_RECORDS = 4096
@@ -60,14 +53,14 @@ export const BATCH_CELLS = 65_536
 
 /**
  * Cells held in rows not emitted yet (rows waiting for a later cell of
- * theirs, or for an earlier row): at most `heldCells`, 16 batches. Rows
+ * theirs, or for an earlier row): at most 16 batches. Rows
  * stream in row order, so a row whose cells come both early and late in
  * the sheet holds back every row after it; real files split rows across a
  * few rows only (the corpus holds at most a few thousand cells). Past it,
  * the sheet is MalformedFile: MS-XLS puts a row's cells in its row block.
- * Tests may lower it.
+ * Tests may lower it (`SheetContext.heldCells`).
  */
-export const caps = { heldCells: 16 * BATCH_CELLS }
+export const HELD_CELLS = 16 * BATCH_CELLS
 
 const ROW = 0x0208
 const LABELSST = 0x00FD
@@ -99,6 +92,8 @@ export interface SheetContext {
   readonly part: string
   readonly globals: Globals
   readonly limits: Limits
+  /** The cap on held cells, `HELD_CELLS` by default (tests lower it). */
+  readonly heldCells?: number
 }
 
 const malformed = (part: string, reason: string, offset?: number) =>
@@ -159,22 +154,24 @@ class RowScan {
     this.reader = new RecordReader(context.stream, context.part, offset, context.end)
   }
 
-  /** Reads up to `max` records; `done` at the sheet's EOF or where the records stop (the main pass reports why). */
-  step(max: number): void {
+  /**
+   * Reads up to `max` records; `done` at the sheet's EOF or where the records
+   * stop (the main pass reports why). Returns its steps, for the work meter.
+   */
+  step(max: number): number {
     // progress: k up to max; every next() advances the reader
     for (let k = 0; k < max; k++) {
-      work.steps++
       const record = this.reader.next()
       if (record === undefined || record instanceof MalformedFile) {
         this.done = true
-        return
+        return k + 1
       }
       // nested substreams as the main pass sees them (see `handle`)
       if (record.type === BOF_BIFF5_8) this.nested++
       else if (record.type === EOF) {
         if (this.nested === 0) {
           this.done = true
-          return
+          return k + 1
         }
         this.nested--
       } else if (this.nested === 0 && record.data.length >= 2) {
@@ -187,6 +184,7 @@ class RowScan {
         }
       }
     }
+    return max
   }
 }
 
@@ -199,7 +197,6 @@ const compact = (cells: Array<Cell.Cell>): Array<Cell.Cell> => {
   let kept = 0
   // progress: k up to cells.length
   for (let k = 0; k < cells.length; k++) {
-    work.steps++
     const next = cells[k + 1]
     if (next === undefined || next.column !== cells[k]!.column) cells[kept++] = cells[k]!
   }
@@ -257,7 +254,7 @@ export class Rows {
   private rowCount = 0
   /** Cells read so far (repeats included): counted against maxCellsPerSheet. */
   cellCount = 0
-  /** Cells in `open` rows: exactly those held, not emitted yet (see `caps`). */
+  /** Cells in `open` rows: exactly those held, not emitted yet (see `HELD_CELLS`). */
   held = 0
   /**
    * Cells read, cells sorted (compacting a row) and rows emitted: the
@@ -266,6 +263,12 @@ export class Rows {
    */
   effort = 0
   budget = Infinity
+  /**
+   * Steps of its loops (cells, rows, queue and sort steps), and of the
+   * caller's record loop: the work meter's units, handed over by the
+   * caller once per batch.
+   */
+  steps = 0
   /** Depth of substreams nested in this one (embedded charts: BOF ... EOF). */
   nested = 0
   /** Whether a FORMULA waits for its text result in the next STRING record (see `handle`). */
@@ -316,6 +319,7 @@ export class Rows {
       this.hotEntry = undefined
     }
     this.effort += entry.sorted ? 1 : 1 + entry.cells.length
+    if (!entry.sorted) this.steps += entry.cells.length
     return this.push(index, this.hidden.has(index), entry.sorted ? entry.cells : compact(entry.cells))
   }
 
@@ -330,7 +334,7 @@ export class Rows {
     let cells = 0
     // progress: outAt increases up to out.length
     do {
-      work.steps++
+      this.steps++
       cells += this.out[this.outAt++]!.cells.length
     } while (this.outAt < this.out.length && this.outAt - from < BATCH_RECORDS && cells < BATCH_CELLS)
     const chunk = this.out.slice(from, this.outAt) as unknown as Arr.NonEmptyReadonlyArray<Row>
@@ -349,7 +353,7 @@ export class Rows {
   complete(offset: number): SpreadsheetError | undefined {
     // progress: nextRow increases, bounded by order.length (offset may be Infinity)
     while (this.nextRow < this.order.length && this.nextAt <= offset && this.effort < this.budget) {
-      work.steps++
+      this.steps++
       const index = this.order[this.nextRow]!
       if (this.waiting(index)) return undefined
       this.nextRow++
@@ -366,7 +370,7 @@ export class Rows {
   }
 
   cell(row: number, cell: Cell.Cell): SpreadsheetError | undefined {
-    work.steps++
+    this.steps++
     const limits = this.context.limits
     if (cell.column >= limits.maxColumns) {
       return new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: cell.column + 1 })
@@ -390,6 +394,7 @@ export class Rows {
     // compacted (to at most maxColumns), so the work is amortized
     if (!entry.sorted && entry.cells.length > 2 * limits.maxColumns) {
       this.effort += entry.cells.length
+      this.steps += entry.cells.length
       this.held -= entry.cells.length
       compact(entry.cells)
       this.held += entry.cells.length
@@ -410,7 +415,7 @@ export class Rows {
     // progress: leftAt increases up to left.length
     while (this.leftAt < left.length) {
       if (this.effort >= this.budget) return false
-      work.steps++
+      this.steps++
       const failed = this.finishRow(left[this.leftAt++]!)
       if (failed !== undefined) return failed
     }
@@ -603,19 +608,26 @@ const DONE: Phase = { _tag: "Done" }
 
 /** The rows of a worksheet substream. Re-runnable. */
 export const sheetRows = (context: SheetContext): Stream.Stream<Row, SpreadsheetError> =>
-  Stream.fromPull(Effect.sync(() => {
+  Stream.fromPull(Effect.map(WorkMeter, (meter) => {
     const opened = openSubstream(context)
     let phase: Phase = opened instanceof RecordReader
       ? { _tag: "Scanning", reader: opened, scan: new RowScan(context, opened.offset) }
       : { _tag: "Failed", error: opened }
     const rows = new Rows(context)
+    const heldCells = context.heldCells ?? HELD_CELLS
     const maxStringBytes = stringMaxBytes(context.limits)
+    /** Hands the steps of the last batch to the meter. */
+    const report = Effect.sync(() => {
+      meter.add("steps", rows.steps)
+      rows.steps = 0
+    })
     const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
       // progress: each iteration takes queued rows, or scans up to
       // BATCH_RECORDS record headers, or reads up to BATCH_RECORDS records
       // (the scan's or the reader's offset grows with each), or emits rows
       // (at least one, or the phase moves on), or ends the stream
       while (true) {
+        yield* report
         yield* Effect.yieldNow
         if (rows.queued()) return rows.take()
         const current: Phase = phase
@@ -624,7 +636,7 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
             return yield* Effect.fail(current.error)
           case "Scanning": {
             const { scan } = current
-            scan.step(BATCH_RECORDS)
+            rows.steps += scan.step(BATCH_RECORDS)
             if (scan.done) {
               rows.start(scan.lastAt, scan.declared, scan.hidden)
               phase = { _tag: "Reading", reader: current.reader, handledAt: -1 }
@@ -640,7 +652,7 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
             if (caught !== undefined) return yield* Effect.fail(caught)
             // progress: k up to BATCH_RECORDS; every next() advances the reader
             for (let k = 0; k < BATCH_RECORDS && rows.effort < rows.budget && !rows.behind(current.handledAt); k++) {
-              work.steps++
+              rows.steps++
               const record = rows.nested === 0 && context.globals.biff8 && reader.peekType() === STRING
                 ? reader.nextWithContinues(maxStringBytes, "maxStringLength")
                 : reader.next()
@@ -656,8 +668,8 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
                 break
               }
               if (result !== false) return yield* Effect.fail(result)
-              if (rows.held > caps.heldCells) {
-                return yield* Effect.fail(malformed(context.part, `rows split too far apart: over ${caps.heldCells} cells held for rows not complete`, record.offset))
+              if (rows.held > heldCells) {
+                return yield* Effect.fail(malformed(context.part, `rows split too far apart: over ${heldCells} cells held for rows not complete`, record.offset))
               }
               current.handledAt = record.offset
               const error = rows.complete(record.offset)
@@ -687,7 +699,8 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
         }
       }
     })
-    return pull
+    // the steps of the last batch count also when the pull fails
+    return Effect.ensuring(pull, report)
   }))
 
 /** Merges sorted spans that overlap or touch. */
@@ -709,6 +722,22 @@ const mergeSpans = (spans: ReadonlyArray<ColumnSpan>): Array<ColumnSpan> => {
  * (yielding every `BATCH_RECORDS` records).
  */
 export const sheetDetails = (context: SheetContext): Effect.Effect<SheetDetails, SpreadsheetError> =>
+  Effect.flatMap(WorkMeter, (meter) => {
+    const walked: Walked = { steps: 0 }
+    const report = Effect.sync(() => {
+      meter.add("steps", walked.steps)
+      walked.steps = 0
+    })
+    return Effect.ensuring(walkDetails(context, walked, report), report)
+  })
+
+/** Records walked since the work meter was last told. */
+interface Walked {
+  steps: number
+}
+
+/** `sheetDetails`' walk: it counts each record in `walked`, and `report`s the count before each yield. */
+const walkDetails = (context: SheetContext, walked: Walked, report: Effect.Effect<void>): Effect.Effect<SheetDetails, SpreadsheetError> =>
   Effect.gen(function*() {
     const opened = openSubstream(context)
     if (!(opened instanceof RecordReader)) return yield* Effect.fail(opened)
@@ -720,8 +749,11 @@ export const sheetDetails = (context: SheetContext): Effect.Effect<SheetDetails,
     let nested = 0
     // progress: every next() advances the reader
     for (let k = 1;; k++) {
-      work.steps++
-      if (k % BATCH_RECORDS === 0) yield* Effect.yieldNow
+      walked.steps++
+      if (k % BATCH_RECORDS === 0) {
+        yield* report
+        yield* Effect.yieldNow
+      }
       const record = opened.next()
       if (record === undefined) return yield* Effect.fail(malformed(part, "the sheet has no EOF"))
       if (record instanceof MalformedFile) return yield* Effect.fail(record)

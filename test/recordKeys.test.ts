@@ -1,7 +1,15 @@
 import { describe, it } from "@effect/vitest"
 import fc from "fast-check"
 import { expect } from "vitest"
-import { make, makeCounted, recordKeys } from "../src/internal/recordKeys.ts"
+import { type HeaderEntry, make, type RecordKeys } from "../src/internal/recordKeys.ts"
+import { counter } from "./helpers/meter.ts"
+import { recordKeys } from "./helpers/recordKeys.ts"
+
+/** `make`, with the count of `used` lookups its key allocations made so far, first checks included. */
+const makeCounted = (header: Iterable<HeaderEntry>): RecordKeys & { readonly probes: () => number } => {
+  const probes = counter("probes")
+  return { ...make(header, probes), probes: probes.total }
+}
 
 const range = (n: number, f: (i: number) => string): Array<string> => Array.from({ length: n }, (_, i) => f(i))
 
@@ -73,7 +81,6 @@ describe("recordKeys: make returns a plain RecordKeys", () => {
   it("has exactly named, headerKey and key (no probe counter)", () => {
     expect(Object.keys(make([[0, "a"]])).sort()).toEqual(["headerKey", "key", "named"])
     expect("probes" in make([])).toBe(false)
-    expect(typeof makeCounted([]).probes).toBe("function")
   })
 })
 

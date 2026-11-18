@@ -2,12 +2,24 @@ import fc from "fast-check"
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import { readNullableWideString, readRichStr, readWideString } from "../src/internal/biff12/fields.ts"
-import { type Biff12Record, readRecords, RecordSplitter, splitAll } from "../src/internal/biff12/records.ts"
+import { type Biff12Record, readRecords, RecordSplitter } from "../src/internal/biff12/records.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
+import { counter, metered } from "./helpers/meter.ts"
 import { concat, nullableWide, record, u32, varint, wide } from "./helpers/xlsb.ts"
 
 const MAX = SpreadsheetLimits.defaults.maxRecordBytes
+
+/** Every record of a whole part, or the first error. */
+const splitAll = (bytes: Uint8Array, part: string, maxRecordBytes: number): Array<Biff12Record> | SpreadsheetError => {
+  const out: Array<Biff12Record> = []
+  const splitter = new RecordSplitter(part, maxRecordBytes)
+  const error = splitter.feed(bytes, (record) => {
+    out.push(record)
+    return undefined
+  }) ?? splitter.end()
+  return error ?? out
+}
 
 const summary = (records: ReadonlyArray<Biff12Record>) => records.map((r) => [r.type, r.offset, Array.from(r.data)])
 
@@ -175,11 +187,12 @@ describe("biff12 records", () => {
   it("readRecords reads a stream of chunks, and fails on a cut-off record or a stream error", async () => {
     const bytes = concat([record(0x83), record(0x9C, [1, 2, 3]), record(0x84)])
     const seen: Array<number> = []
-    const stats = await Effect.runPromise(readRecords(Stream.make(bytes.subarray(0, 4), bytes.subarray(4)), (r) => {
+    const records = counter("records")
+    await Effect.runPromise(metered(records, readRecords(Stream.make(bytes.subarray(0, 4), bytes.subarray(4)), (r) => {
       seen.push(r.type)
       return undefined
-    }, { maxRecordBytes: MAX }, "t.bin"))
-    expect(stats.records).toBe(3)
+    }, { maxRecordBytes: MAX }, "t.bin")))
+    expect(records.total()).toBe(3)
     expect(seen).toEqual([0x83, 0x9C, 0x84])
     const cut = await Effect.runPromiseExit(readRecords(Stream.make(bytes.subarray(0, 6)), () => undefined, { maxRecordBytes: MAX }, "t.bin"))
     expect(Exit.isFailure(cut) && JSON.stringify(cut.cause)).toContain("runs past the end of the part")
