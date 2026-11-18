@@ -66,10 +66,27 @@ export const parseEncoding = (label: string): Result.Result<Decoding, InvalidOpt
     encoding = new TextDecoder(label).encoding
   } catch {
     return Result.fail(
-      new InvalidOption({ option: "encoding", reason: `text encoding ${JSON.stringify(label)} is not supported` })
+      new InvalidOption({ option: "encoding", reason: `text encoding ${shown(label)} is not supported` })
     )
   }
   return Result.succeed(() => makeDecoder(encoding))
+}
+
+/**
+ * A label as an error message shows it: as JSON, or, for values JSON can't
+ * show without throwing (a BigInt, a cycle), as a string, else its type.
+ * Plain JavaScript can pass anything as the label.
+ */
+const shown = (label: unknown): string => {
+  try {
+    return `${JSON.stringify(label)}`
+  } catch {
+    try {
+      return String(label)
+    } catch {
+      return typeof label
+    }
+  }
 }
 
 /**

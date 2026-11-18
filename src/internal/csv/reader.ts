@@ -92,9 +92,19 @@ export const failAtDecoding = <E, R>(
   limits: Limits,
   error: InvalidOption
 ): Stream.Stream<Row, E | SpreadsheetError, R> =>
-  sliced(limitInput(input, limits.maxInputBytes)).pipe(
-    Stream.scan(() => 0, (bytes, slice: Uint8Array) => bytes + slice.length),
-    Stream.takeUntil((bytes) => bytes >= 3),
-    Stream.drain,
-    Stream.concat(Stream.fail(error))
-  )
+  Stream.transformPull(sliced(limitInput(input, limits.maxInputBytes)), (upstream) =>
+    Effect.sync(() => {
+      const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
+      const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, E | SpreadsheetError> = Effect.gen(function*() {
+        let bytes = 0
+        // progress: each iteration pulls a non-empty slice (`sliced` drops
+        // empty pieces), so `bytes` grows, or meets the input's end and stops
+        while (bytes < 3) {
+          const next = yield* pullUpstream
+          if (next === undefined) break
+          for (const slice of next) bytes += slice.length
+        }
+        return yield* Effect.fail(error)
+      })
+      return pull
+    }))

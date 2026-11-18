@@ -96,6 +96,7 @@ export const rows: {
 ): Stream.Stream<Workbook.Row, E | SpreadsheetError, R> =>
   Stream.unwrap(
     Effect.map(SpreadsheetLimits.resolve(options?.limits), (limits) => {
+      // the delimiter, then the encoding, as `csvOptions` checks them for `read`
       const delimiter = parseDelimiter(options?.delimiter)
       if (Result.isFailure(delimiter)) return Stream.fail(delimiter.failure)
       const decoding = parseEncoding(options?.encoding ?? "auto")
@@ -108,8 +109,9 @@ export const rows: {
 /**
  * Opens delimited text as a one-sheet workbook. The limits are resolved
  * here (context plus `options.limits`) and kept in the workbook; for a
- * `Uint8Array` the size limit is checked here too. Parsing happens when
- * rows are streamed.
+ * `Uint8Array` the size limit is checked here too. The options are
+ * checked here and kept: changing the options object later doesn't affect
+ * the workbook's rows. Parsing happens when rows are streamed.
  * A byte-stream input is consumed each time the rows are streamed, so it
  * must be re-runnable to stream them more than once, and may only fail
  * with `SpreadsheetError` (map other errors first, or use {@link rows},

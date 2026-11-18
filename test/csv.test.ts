@@ -232,6 +232,18 @@ describe("csv: delimiters", () => {
       )
       assert.deepStrictEqual(viaSpreadsheet?._tag === "InvalidOption" && viaSpreadsheet.option, "delimiter", label)
     }
+    // the wording names what was passed
+    const reasons: ReadonlyArray<[unknown, string]> = [
+      [null, "must be a one-character string, not null"],
+      [[","], "must be a one-character string, not an array"],
+      [{}, "must be a one-character string, not an object"],
+      [59, "must be a one-character string, not a number"],
+      [10n, "must be a one-character string, not a bigint"]
+    ]
+    for (const [delimiter, reason] of reasons) {
+      const error = failureOf(await csvExit("a", { delimiter } as unknown as Csv.ReadOptions))
+      assert.deepStrictEqual(error?._tag === "InvalidOption" && error.reason, reason, String(delimiter))
+    }
     // an absent or undefined delimiter is still guessed
     const guessed = [["a", "b"]]
     assert.deepStrictEqual(await csvAoa("a;b\n", { delimiter: undefined }), guessed)
@@ -300,6 +312,26 @@ describe("csv: encodings", () => {
     assert.deepStrictEqual(error?._tag === "InvalidOption" && error.option, "encoding")
     const atRead = await Effect.runPromise(Effect.flip(Csv.read(enc("a"), { encoding: "klingon" })))
     assert.deepStrictEqual(atRead._tag === "InvalidOption" && atRead.option, "encoding")
+  })
+
+  it("an encoding JSON can't show (a BigInt, a cycle) is an InvalidOption naming it, not a defect", async () => {
+    const cycle: { self?: unknown } = {}
+    cycle.self = cycle
+    const cases: ReadonlyArray<[unknown, string]> = [
+      [10n, "text encoding 10 is not supported"],
+      [cycle, "text encoding [object Object] is not supported"],
+      [Symbol("x"), "text encoding undefined is not supported"],
+      [5, "text encoding 5 is not supported"]
+    ]
+    for (const [encoding, reason] of cases) {
+      const options = { encoding } as unknown as Csv.ReadOptions
+      const streamed = failureOf(await csvExit("abc", options))
+      assert.deepStrictEqual(streamed?._tag === "InvalidOption" && streamed.reason, reason, String(reason))
+      const atRead = failureOf(await Effect.runPromise(Effect.exit(Csv.read(enc("abc"), options))))
+      assert.deepStrictEqual(atRead?._tag === "InvalidOption" && atRead.reason, reason, String(reason))
+      const viaSpreadsheet = failureOf(await Effect.runPromise(Effect.exit(Spreadsheet.read(enc("abc"), { csv: options }))))
+      assert.deepStrictEqual(viaSpreadsheet?._tag === "InvalidOption" && viaSpreadsheet.reason, reason, String(reason))
+    }
   })
 
   it("rows: an unknown encoding fails once 3 bytes have come (or at the end); the input's errors and the size limit before that come first", async () => {

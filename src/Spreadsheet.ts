@@ -82,7 +82,8 @@ const unsupported: Record<Exclude<Format, Readable>, string> = {
  * Opens a workbook from its bytes, whatever its format: the format is
  * detected from the content ({@link detectFormat}), never from a name.
  * Formats without a reader fail with `UnsupportedFormat` naming what was
- * found.
+ * found. The options are checked here and kept: changing the options object
+ * later doesn't affect the workbook's rows.
  *
  * The workbook keeps using `bytes` after this returns: XLSX and XLSB zip entries
  * and XLS workbook streams (bare, or in consecutive sectors of a compound
