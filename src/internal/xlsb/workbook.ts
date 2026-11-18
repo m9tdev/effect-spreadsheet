@@ -15,22 +15,17 @@
 import { Effect } from "effect"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import type { DefinedName, Visibility } from "../../Workbook.ts"
+import type { DefinedName } from "../../Workbook.ts"
 import { Fields } from "../binary.ts"
 import { readNullableWideString, readWideString } from "../biff12/fields.ts"
+import { malformedIn, type SheetEntry, sheetVisibility } from "../package.ts"
 import { type Biff12Record, readRecords } from "../biff12/records.ts"
 import { areaText, BIFF12_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
 
-export const malformed = (reason: string, part?: string, offset?: number) =>
-  new MalformedFile({
-    format: "xlsb",
-    reason,
-    ...(part === undefined ? {} : { part }),
-    ...(offset === undefined ? {} : { offset })
-  })
+export const malformed = malformedIn("xlsb")
 
 /** A string of `actual` code units, over maxStringLength. */
 export const tooLong = (limits: Limits, actual: number) => new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual })
@@ -45,12 +40,6 @@ const BRT_SUP_SAME = 0x0166
 const BRT_SUP_TABS = 0x0167
 const BRT_EXTERN_SHEET = 0x016A
 const BRT_SUP_ADDIN = 0x029B
-
-export interface SheetEntry {
-  readonly name: string
-  readonly visibility: Visibility
-  readonly relationshipId: string | undefined
-}
 
 /**
  * A supporting book (BrtSup* records, in order): this workbook, an add-in,
@@ -161,7 +150,7 @@ export const readWorkbookBin = (
           if (typeof name === "number") return tooLong(limits, name)
           sheets.push({
             name: name.value,
-            visibility: state === 1 ? "hidden" : state === 2 ? "veryHidden" : "visible",
+            visibility: sheetVisibility(state),
             relationshipId: rel.value
           })
           return undefined

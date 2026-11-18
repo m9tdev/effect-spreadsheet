@@ -688,7 +688,8 @@ describe("xlsx: hostile and broken files", () => {
       expect(failureOf(await Effect.runPromise(Effect.exit(run)))).toMatchObject({
         _tag: "MalformedFile",
         format: "xlsx",
-        reason: "sheet part xl/worksheets/sheet2.xml is missing"
+        reason: "sheet part xl/worksheets/sheet2.xml is missing",
+        part: "xl/workbook.xml"
       })
     }
     const relsXml = `<Relationships xmlns="x"><Relationship Id="rId1" Type="http://x/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://x/worksheet" Target="../../../etc/passwd"/></Relationships>`

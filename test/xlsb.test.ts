@@ -45,6 +45,11 @@ const values = (rows: ReadonlyArray<Workbook.Row>) =>
 const STYLES = { xfs: [0, 14, 164, 165], formats: { 164: "0.000", 165: "yyyy-mm-dd hh:mm" } }
 
 describe("xlsb reader", () => {
+  it("reads a sheet state code other than 1 (hidden) or 2 (very hidden) as visible", async () => {
+    const { wb } = await readOk({ sheets: [{ name: "Three", state: 3 }, { name: "Big", state: 0x102 }] })
+    expect(wb.sheets.map((s) => s.visibility)).toEqual(["visible", "visible"])
+  })
+
   it("reads sheets in order with their visibility, through Spreadsheet.read too", async () => {
     const book: B.TestBook = { sheets: [{ name: "Data" }, { name: "Hidden", state: 1 }, { name: "Very", state: 2 }] }
     const { wb } = await readOk(book)
