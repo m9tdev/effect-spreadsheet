@@ -143,6 +143,20 @@ describe("xlsx: cells and rows", () => {
     expect(sheets[0]![0]!.cells.map(Cell.value)).toEqual(["aA _x0042_", "bC", "cD"])
   })
 
+  it("_xHHHH_ escapes are decoded in sheet names and in defined names and their text, not in number format codes", async () => {
+    const { wb, sheets } = await readOk({
+      xfs: [0, 164],
+      numFmts: { 164: "0.0_x0042_" },
+      sheets: [{ name: "A_x0042_C", data: `<row><c s="1"><v>1</v></c></row>` }, { name: "_x005F_x0044_" }],
+      definedNames: `<definedName name="N_x0042_" localSheetId="0">'A_x0042_C'!$A$1</definedName>`
+    })
+    expect(wb.sheets.map((s) => s.name)).toEqual(["ABC", "_x0044_"])
+    expect(wb.definedNames).toEqual([{ name: "NB", formula: "'ABC'!$A$1", hidden: false, scope: 0 }])
+    expect(sheets[0]![0]!.cells[0]!.numFmt).toBe("0.0_x0042_")
+    expect(values(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, "ABC"))))))
+      .toEqual([[0, false, [[0, "Number", 1]]]])
+  })
+
   it("number formats come only from <numFmts>, not from conditional formats (<dxfs>)", async () => {
     const { sheets } = await readOk({
       xfs: [0, 164],
