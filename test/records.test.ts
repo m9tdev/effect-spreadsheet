@@ -116,6 +116,12 @@ describe("toRecords", () => {
     }
   })
 
+  it("header: a number past the safe integers is rejected with a reason that says so", async () => {
+    const error = await Effect.runPromise(Effect.flip(Spreadsheet.toRecords([], { header: 2 ** 53 })))
+    assert.strictEqual(error._tag, "InvalidOption")
+    assert.include(error._tag === "InvalidOption" ? error.reason : "", "a safe integer, 0 or more")
+  })
+
   it("an explicit \"\" entry is like a blank header cell: __EMPTY key, no defval fill", async () => {
     assert.deepStrictEqual(recs(await rowsOf("1\n"), { header: ["x", "", "y"], defval: 0 }), [{ x: 1, y: 0 }])
     assert.deepStrictEqual(recs(await rowsOf("1,2\n"), { header: ["x", "", "y"], defval: 0 }), [{ x: 1, __EMPTY: 2, y: 0 }])

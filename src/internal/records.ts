@@ -15,7 +15,7 @@ import * as RecordKeys from "./recordKeys.ts"
 export interface RecordsOptions<D = never> {
   /**
    * - `"first-row"`: the first row is the header.
-   * - a number: the row with that `index` (an integer, 0 or more) is the
+   * - a number: the row with that `index` (a safe integer, 0 or more) is the
    *   header; earlier rows are skipped.
    * - an array: column `i` is named `header[i]` (repeats made unique the same
    *   way); columns past its end, and columns whose entry is a hole,
@@ -97,7 +97,7 @@ export const validateHeader = (header: unknown): InvalidOption | undefined => {
   if (typeof header === "number") {
     return Number.isSafeInteger(header) && header >= 0
       ? undefined
-      : invalidHeader(`${header} is not a row index (an integer, 0 or more)`)
+      : invalidHeader(`${header} is not a row index (a safe integer, 0 or more)`)
   }
   if (typeof header === "string") {
     return invalidHeader(`${JSON.stringify(header)} must be "first-row", a row index or an array of names`)
