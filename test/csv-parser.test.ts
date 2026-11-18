@@ -9,7 +9,7 @@ import type { Row } from "../src/Workbook.ts"
 
 const parser = (options: { delimiter?: string; strict?: boolean } = {}) =>
   new CsvParser({
-    delimiter: options.delimiter,
+    delimiter: options.delimiter?.charCodeAt(0),
     inferTypes: false,
     strict: options.strict ?? false,
     limits: SpreadsheetLimits.defaults

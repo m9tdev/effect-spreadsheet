@@ -188,6 +188,12 @@ describe("csv: delimiters", () => {
     assert.deepStrictEqual(await csvAoa("sep=;\na,b\n", { delimiter: "," }), [["sep=;"], ["a", "b"]])
   })
 
+  it("a sep= line naming a character that can't delimit (a quote) is data, as that delimiter option is invalid", async () => {
+    assert.deepStrictEqual(await csvAoa('sep="\na;b\n'), [['sep="'], ["a", "b"]])
+    const error = failureOf(await csvExit("a", { delimiter: '"' }))
+    assert.deepStrictEqual(error?._tag === "InvalidOption" && error.reason, '"\\"" must be one character other than a quote, CR or LF')
+  })
+
   it("invalid delimiter option is an InvalidOption error", async () => {
     for (const delimiter of ['"', ";;", "", "\n", "\r"]) {
       const error = failureOf(await csvExit("a", { delimiter }))
@@ -294,6 +300,39 @@ describe("csv: encodings", () => {
     assert.deepStrictEqual(error?._tag === "InvalidOption" && error.option, "encoding")
     const atRead = await Effect.runPromise(Effect.flip(Csv.read(enc("a"), { encoding: "klingon" })))
     assert.deepStrictEqual(atRead._tag === "InvalidOption" && atRead.option, "encoding")
+  })
+
+  it("rows: an unknown encoding fails once 3 bytes have come (or at the end); the input's errors and the size limit before that come first", async () => {
+    const encoding = "klingon"
+    const failing = (pieces: ReadonlyArray<string>) =>
+      Stream.concat(Stream.fromIterable(pieces.map(enc)), Stream.fail({ _tag: "Upstream" as const }))
+    const tagOf = async (input: Stream.Stream<Uint8Array, { readonly _tag: "Upstream" }>, options: Csv.ReadOptions) =>
+      (await Effect.runPromise(Effect.flip(Stream.runCollect(Csv.rows(input, options)))))._tag
+    // fewer than 3 bytes before the input fails: its error
+    assert.strictEqual(await tagOf(failing([]), { encoding }), "Upstream")
+    assert.strictEqual(await tagOf(failing(["a", "b"]), { encoding }), "Upstream")
+    // 3 bytes in: the encoding is the error, the input is not read further
+    assert.strictEqual(await tagOf(failing(["a", "bc"]), { encoding }), "InvalidOption")
+    // a short input that ends
+    assert.strictEqual(await tagOf(Stream.empty, { encoding }), "InvalidOption")
+    assert.strictEqual(await tagOf(Stream.make(enc("a")), { encoding }), "InvalidOption")
+    // the size limit is met first
+    assert.strictEqual(await tagOf(Stream.make(enc("abc")), { encoding, limits: { maxInputBytes: 2 } }), "LimitExceeded")
+    // the delimiter is checked first, before any input
+    const both = await Effect.runPromise(Effect.flip(Stream.runCollect(Csv.rows(failing([]), { encoding, delimiter: ";;" }))))
+    assert.strictEqual(both._tag === "InvalidOption" && both.option, "delimiter")
+    // at read, both are checked before any row
+    const atRead = await Effect.runPromise(Effect.flip(Csv.read(Stream.empty, { encoding })))
+    assert.strictEqual(atRead._tag === "InvalidOption" && atRead.reason, 'text encoding "klingon" is not supported')
+  })
+
+  it("a workbook's rows use the options as checked when it was read", async () => {
+    const options: { delimiter?: string; encoding?: string; inferTypes?: boolean } = { delimiter: ";", inferTypes: true }
+    const workbook = await Effect.runPromise(Csv.read(enc("1;2\n"), options))
+    options.delimiter = ";;"
+    options.encoding = "klingon"
+    options.inferTypes = false
+    assert.deepStrictEqual(toAoa(await Effect.runPromise(Stream.runCollect(Workbook.rows(workbook, 0)))), [[1, 2]])
   })
 
   it("encoding is decided on the first 64 KiB only: an invalid byte near 70 000 is U+FFFD, however chunked", async () => {

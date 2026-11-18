@@ -6,46 +6,13 @@
 import { Cause, Effect, Pull, Stream } from "effect"
 import type * as Arr from "effect/Array"
 import * as Result from "effect/Result"
-import { InvalidOption, LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
+import { type InvalidOption, LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
 import { sliced } from "../bytes.ts"
 import { ByteDecoder } from "./decode.ts"
+import type { CsvOptions } from "./options.ts"
 import { CsvParser } from "./parser.ts"
-
-export interface ResolvedOptions {
-  readonly encoding: string
-  readonly delimiter: string | undefined
-  readonly inferTypes: boolean
-  readonly strict: boolean
-  readonly limits: Limits
-}
-
-/**
- * Checks `options.delimiter` at runtime, since the type can be bypassed
- * (plain JavaScript, casts): `undefined` (guess it) or a one-character
- * string other than a quote, CR or LF.
- */
-export const validateDelimiter = (delimiter: unknown): InvalidOption | undefined => {
-  if (delimiter === undefined) return undefined
-  if (typeof delimiter !== "string") {
-    const type = typeof delimiter
-    const kind = delimiter === null
-      ? "null"
-      : Array.isArray(delimiter)
-      ? "an array"
-      : type === "object"
-      ? "an object"
-      : `a ${type}`
-    return new InvalidOption({ option: "delimiter", reason: `must be a one-character string, not ${kind}` })
-  }
-  return delimiter.length === 1 && delimiter !== '"' && delimiter !== "\r" && delimiter !== "\n"
-    ? undefined
-    : new InvalidOption({
-      option: "delimiter",
-      reason: `${JSON.stringify(delimiter)} must be one character other than a quote, CR or LF`
-    })
-}
 
 /**
  * The input, failing with `LimitExceeded` once its bytes add up past
@@ -66,23 +33,23 @@ const limitInput = <E, R>(input: Stream.Stream<Uint8Array, E, R>, maxInputBytes:
     }))
 
 /**
- * Parses a byte stream into rows. The input is read in slices of at most
- * 64 KiB, each decoded and parsed after a yield to the event loop.
+ * Parses a byte stream into rows, with checked options and the limits in
+ * effect. The input is read in slices of at most 64 KiB, each decoded and
+ * parsed after a yield to the event loop.
  */
 export const rowsFromByteStream = <E, R>(
   input: Stream.Stream<Uint8Array, E, R>,
-  options: ResolvedOptions
-): Stream.Stream<Row, E | SpreadsheetError, R> => {
-  const invalid = validateDelimiter(options.delimiter)
-  if (invalid !== undefined) return Stream.fail(invalid)
-  return Stream.transformPull(sliced(limitInput(input, options.limits.maxInputBytes)), (upstream) =>
+  options: CsvOptions,
+  limits: Limits
+): Stream.Stream<Row, E | SpreadsheetError, R> =>
+  Stream.transformPull(sliced(limitInput(input, limits.maxInputBytes)), (upstream) =>
     Effect.sync(() => {
-      const decoder = new ByteDecoder(options.encoding)
+      const decoder = new ByteDecoder(options.decoding)
       const parser = new CsvParser({
         delimiter: options.delimiter,
         inferTypes: options.inferTypes,
         strict: options.strict,
-        limits: options.limits
+        limits
       })
       let finished = false
       const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
@@ -100,17 +67,11 @@ export const rowsFromByteStream = <E, R>(
           if (next !== undefined) {
             let text = ""
             // progress: one slice per iteration (one per pull, as `sliced` emits them)
-            for (const slice of next) {
-              const decoded = decoder.push(slice)
-              if (Result.isFailure(decoded)) return yield* Effect.fail(decoded.failure)
-              text += decoded.success
-            }
+            for (const slice of next) text += decoder.push(slice)
             rows = parser.feed(text, false)
           } else {
             finished = true
-            const text = decoder.end()
-            if (Result.isFailure(text)) return yield* Effect.fail(text.failure)
-            rows = parser.feed(text.success, true)
+            rows = parser.feed(decoder.end(), true)
           }
           if (Result.isFailure(rows)) return yield* Effect.fail(rows.failure)
           if (rows.success.length > 0) return rows.success as unknown as Arr.NonEmptyReadonlyArray<Row>
@@ -118,4 +79,22 @@ export const rowsFromByteStream = <E, R>(
       })
       return pull
     }))
-}
+
+/**
+ * What `Csv.rows` streams when the requested encoding is unknown: the input
+ * is read as far as decoding would read it before choosing the decoder (3
+ * bytes, to look for a BOM, or the whole input if shorter), then the stream
+ * fails with `error`. So the input's own errors and the size limit, met
+ * before that point, come first, as they do with a known encoding.
+ */
+export const failAtDecoding = <E, R>(
+  input: Stream.Stream<Uint8Array, E, R>,
+  limits: Limits,
+  error: InvalidOption
+): Stream.Stream<Row, E | SpreadsheetError, R> =>
+  sliced(limitInput(input, limits.maxInputBytes)).pipe(
+    Stream.scan(() => 0, (bytes, slice: Uint8Array) => bytes + slice.length),
+    Stream.takeUntil((bytes) => bytes >= 3),
+    Stream.drain,
+    Stream.concat(Stream.fail(error))
+  )

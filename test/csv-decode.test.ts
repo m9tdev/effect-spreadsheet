@@ -2,21 +2,20 @@ import { describe, expect, it } from "@effect/vitest"
 import { Stream } from "effect"
 import * as Result from "effect/Result"
 import { ByteDecoder, DETECT_BYTES } from "../src/internal/csv/decode.ts"
+import { type Decoding, parseEncoding } from "../src/internal/csv/options.ts"
 import { InvalidOption } from "../src/SpreadsheetError.ts"
 import { chunksOf, csvUntilError, enc } from "./helpers/run.ts"
 
 const utf8Bom = new Uint8Array([0xEF, 0xBB, 0xBF])
 
-/** The text of a decoder step that must succeed. */
-const textOf = (r: Result.Result<string, InvalidOption>): string => {
-  if (Result.isFailure(r)) throw new Error(`unexpected ${r.failure._tag}`)
-  return r.success
-}
+/** The text of a decoder step. */
+const textOf = (text: string): string => text
 
-/** The error of a decoder step that must fail. */
-const errorOf = (r: Result.Result<string, InvalidOption>): InvalidOption => {
-  if (Result.isSuccess(r)) throw new Error(`expected an error, got ${JSON.stringify(r.success)}`)
-  return r.failure
+/** The decoding for a label that must be known. */
+const decoding = (label: string): Decoding => {
+  const parsed = parseEncoding(label)
+  if (Result.isFailure(parsed)) throw new Error(`unexpected ${parsed.failure._tag}`)
+  return parsed.success
 }
 
 describe("csv: byte decoder", () => {
@@ -29,7 +28,7 @@ describe("csv: byte decoder", () => {
     expect(textOf(auto.push(body))).toBe("")
     expect(textOf(auto.end())).toBe("né")
 
-    const requested = new ByteDecoder("windows-1252")
+    const requested = new ByteDecoder(decoding("windows-1252"))
     expect(textOf(requested.push(utf8Bom.subarray(0, 1)))).toBe("")
     // 3 bytes held: the encoding is decided here
     expect(textOf(requested.push(utf8Bom.subarray(1)))).toBe("")
@@ -59,19 +58,20 @@ describe("csv: byte decoder", () => {
     expect(textOf(new ByteDecoder("auto").end())).toBe("")
   })
 
-  it("an unknown requested encoding is an error, and every later push or end returns that same error", () => {
-    const decoder = new ByteDecoder("klingon")
-    expect(textOf(decoder.push(enc("a")))).toBe("")
-    const error = errorOf(decoder.push(enc("bc")))
-    expect(error).toBeInstanceOf(InvalidOption)
-    expect(errorOf(decoder.push(enc("d")))).toBe(error)
-    expect(errorOf(decoder.end())).toBe(error)
-
-    const atEnd = new ByteDecoder("klingon")
-    expect(textOf(atEnd.push(enc("a")))).toBe("")
-    const endError = errorOf(atEnd.end())
-    expect(endError).toBeInstanceOf(InvalidOption)
-    expect(errorOf(atEnd.end())).toBe(endError)
+  it("an unknown encoding is an InvalidOption when parsed, with the label in the reason; known labels make fresh decoders", () => {
+    const unknown = parseEncoding("klingon")
+    if (Result.isSuccess(unknown)) throw new Error("expected an error")
+    expect(unknown.failure).toBeInstanceOf(InvalidOption)
+    expect(unknown.failure.option).toBe("encoding")
+    expect(unknown.failure.reason).toBe('text encoding "klingon" is not supported')
+    expect(parseEncoding("auto")).toEqual(Result.succeed("auto"))
+    const latin1 = decoding("latin1")
+    if (latin1 === "auto") throw new Error("expected a decoder maker")
+    const a = latin1()
+    const b = latin1()
+    expect(a).not.toBe(b)
+    expect(a.encoding).toBe("windows-1252")
+    expect(a.ignoreBOM).toBe(false)
   })
 
   it("an unknown encoding through rows on a multi-chunk stream fails with InvalidOption and no rows", async () => {
