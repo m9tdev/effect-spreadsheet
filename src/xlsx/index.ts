@@ -33,6 +33,7 @@
  */
 import { Effect } from "effect"
 import { type PackageFormat, readPackage } from "../internal/package.ts"
+import { toDefinedNames } from "../internal/workbook.ts"
 import { sheetDetails } from "../internal/xlsx/details.ts"
 import { malformed, readSharedStrings, readStyles, readWorkbookPart, type WorkbookPart } from "../internal/xlsx/parts.ts"
 import { sheetRows } from "../internal/xlsx/sheet.ts"
@@ -82,13 +83,7 @@ const XLSX: PackageFormat<WorkbookPart> = {
   readWorkbook: readWorkbookPart,
   readStrings: readSharedStrings,
   readStyles,
-  definedNames: (workbook) =>
-    Effect.succeed(workbook.definedNames.map((d) => ({
-      name: d.name,
-      formula: d.formula,
-      hidden: d.hidden,
-      ...(d.scope !== undefined && d.scope < workbook.sheets.length ? { scope: d.scope } : {})
-    }))),
+  definedNames: (workbook) => Effect.succeed(toDefinedNames(workbook.definedNames, workbook.sheets.length)),
   rows: sheetRows,
   details: sheetDetails
 }

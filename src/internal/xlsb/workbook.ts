@@ -22,6 +22,7 @@ import { malformedIn, type SheetEntry, sheetVisibility } from "../package.ts"
 import { type Biff12Record, readRecords } from "../biff12/records.ts"
 import { areaText, BIFF12_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
+import { toDefinedNames } from "../workbook.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
 
@@ -327,13 +328,11 @@ export const definedNames = (
         return sheet === "#REF!" ? sheet : `${sheet}#REF!`
     }
   }
-  // progress: one name per iteration (at most maxDefinedNames)
-  return workbook.names.map((n) => ({
-    name: n.name,
-    formula: formula(n.ref),
-    ...(n.scope !== undefined && n.scope < sheetNames.length ? { scope: n.scope } : {}),
-    hidden: n.hidden
-  }))
+  return toDefinedNames(
+    // progress: one name per iteration (at most maxDefinedNames)
+    workbook.names.map((n) => ({ name: n.name, formula: formula(n.ref), hidden: n.hidden, scope: n.scope })),
+    sheetNames.length
+  )
 }
 
 /** External books that some name's reference points into, by book index. */

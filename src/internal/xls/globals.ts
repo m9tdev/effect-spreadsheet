@@ -25,6 +25,7 @@ import { WorkMeter } from "../meter.ts"
 import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
+import { type DefinedNameEntry, toDefinedNames } from "../workbook.ts"
 import { codepageLabel, readString, type Text, textDecoder } from "./fields.ts"
 import { BATCH_CELLS, BATCH_RECORDS } from "./sheet.ts"
 
@@ -55,9 +56,6 @@ export interface SheetEntry {
   readonly kind: SheetKind
 }
 
-/** A defined name, as the workbook gives it (`scope` only when the name is local to a sheet). */
-export type DefinedNameEntry = DefinedName
-
 export interface Globals {
   readonly biff8: boolean
   readonly text: Text
@@ -66,7 +64,8 @@ export interface Globals {
   /** Number formats by XF index (a cell's `ixfe`). */
   readonly styles: CellStyles
   readonly strings: ReadonlyArray<string>
-  readonly definedNames: ReadonlyArray<DefinedNameEntry>
+  /** The defined names (`scope` only when the name is local to a sheet). */
+  readonly definedNames: ReadonlyArray<DefinedName>
 }
 
 /** A string longer than maxStringLength (`actual` when its length is known). */
@@ -573,11 +572,15 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
       }
       const n = walk.names[k]!
       const formula = nameFormula(n.rgce, xtis, books, sheetNames)
-      definedNames.push(
-        n.scope !== undefined && n.scope < sheets.length
-          ? { name: n.name, formula, hidden: n.hidden, scope: n.scope }
-          : { name: n.name, formula, hidden: n.hidden }
-      )
+      definedNames.push({ name: n.name, formula, hidden: n.hidden, scope: n.scope })
     }
-    return { biff8: walk.biff8, text: walk.text, date1904: walk.date1904, sheets: ended, styles, strings: walk.strings, definedNames }
+    return {
+      biff8: walk.biff8,
+      text: walk.text,
+      date1904: walk.date1904,
+      sheets: ended,
+      styles,
+      strings: walk.strings,
+      definedNames: toDefinedNames(definedNames, sheets.length)
+    }
   })
