@@ -157,6 +157,16 @@ describe.each(["xlsx", "xlsb"] as const)("%s: relationship targets of sheets", (
         `sheet "h" has no part`
       ]
     })
+    // each of these errors names the workbook part, whose relationships lead nowhere
+    const wb = await Effect.runPromise((format === "xlsx" ? Xlsx.read : Xlsb.read)(
+      await (format === "xlsx" ? xlsxPackage : xlsbPackage)({ sheets, workbookPath, packageRels: office, workbookRels: targets, parts: [sheetPart] })
+    ))
+    for (const name of ["b", "c", "d", "e", "f", "h"]) {
+      const rows = failureOf(await Effect.runPromiseExit(Stream.runCollect(Workbook.rows(wb, name))))
+      const details = failureOf(await Effect.runPromiseExit(Workbook.sheetDetails(wb, name)))
+      expect(rows).toMatchObject({ _tag: "MalformedFile", format, part: workbookPath })
+      expect(details).toMatchObject({ _tag: "MalformedFile", format, part: workbookPath })
+    }
   })
 
   it("finds the workbook part through the package relationships, or at its usual name", async () => {

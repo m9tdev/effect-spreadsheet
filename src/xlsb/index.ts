@@ -84,7 +84,7 @@ const XLSB: PackageFormat<WorkbookBin> = {
   malformed,
   readWorkbook: readWorkbookBin,
   readStrings: readSharedStrings,
-  readStyles: (archive, entry, limits) => readStyles(archive, entry, limits),
+  readStyles,
   // the sheet names of external workbooks that defined names point into
   // (each external link part read once, however many books share it; a missing one leaves #REF!)
   definedNames: (workbook, rels, archive, limits) =>

@@ -236,7 +236,7 @@ export const make = (options: {
  * @category getters
  */
 export const findSheet = (workbook: Workbook, sheet: string | number): SheetInfo | undefined => {
-  if (typeof sheet === "number") return workbook.sheets[sheet]
+  if (typeof sheet === "number") return workbook.sheets.find((s) => s.index === sheet)
   const exact = workbook.sheets.find((s) => s.name === sheet)
   if (exact !== undefined) return exact
   const lower = sheet.toLowerCase()

@@ -217,6 +217,34 @@ describe("Workbook from sheet sources", () => {
       assert.deepStrictEqual(yield* Workbook.sheetDetails(wb, "chart"), { hiddenColumns: [], merges: [] })
     }))
 
+  it.effect("a sheet number that matches no sheet's index fails with SheetNotFound", () =>
+    Effect.gen(function*() {
+      for (const index of [-1, 0.5, wb.sheets.length]) {
+        assert.isUndefined(Workbook.findSheet(wb, index))
+        assert.deepStrictEqual((yield* Effect.flip(Workbook.sheet(wb, index))).sheet, index)
+        assert.strictEqual((yield* Effect.flip(Stream.runCollect(Workbook.rows(wb, index))))._tag, "SheetNotFound")
+        assert.strictEqual((yield* Effect.flip(Workbook.sheetDetails(wb, index)))._tag, "SheetNotFound")
+      }
+    }))
+
+  it.effect("a sheet added to a copy of the sheet list has no source: reading it fails with SheetNotFound", () =>
+    Effect.gen(function*() {
+      const extra: Workbook.SheetInfo = { name: "Extra", index: 3, visibility: "visible" }
+      const spread: Workbook.Workbook = { ...wb, sheets: [...wb.sheets, extra] }
+      const rows = yield* Effect.flip(Stream.runCollect(Workbook.rows(spread, "Extra")))
+      assert.deepStrictEqual([rows._tag, (rows as SpreadsheetError.SheetNotFound).sheet], ["SheetNotFound", "Extra"])
+      assert.strictEqual((yield* Effect.flip(Workbook.sheetDetails(spread, 3)))._tag, "SheetNotFound")
+    }))
+
+  it.effect("each read of a sheet without cells gets its own details", () =>
+    Effect.gen(function*() {
+      const first = yield* Workbook.sheetDetails(wb, 1)
+      const second = yield* Workbook.sheetDetails(wb, 1)
+      assert.notStrictEqual(first, second)
+      assert.notStrictEqual(first.hiddenColumns, second.hiddenColumns)
+      assert.notStrictEqual(first.merges, second.merges)
+    }))
+
   it.effect("a broken sheet fails only when read", () =>
     Effect.gen(function*() {
       assert.strictEqual(yield* Effect.flip(Stream.runCollect(Workbook.rows(wb, 2))), broken)

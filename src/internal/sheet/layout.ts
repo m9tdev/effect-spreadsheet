@@ -14,9 +14,6 @@ import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { ColumnSpan, Range, SheetDetails } from "../../Workbook.ts"
 
-/** The details of a sheet without layout: no hidden columns, no merges, no dimension. */
-export const NO_DETAILS: SheetDetails = { hiddenColumns: [], merges: [] }
-
 /** Sorts spans and merges overlapping or adjacent ones. */
 export const mergeSpans = (spans: ReadonlyArray<ColumnSpan>): Array<ColumnSpan> => {
   const sorted = [...spans].sort((a, b) => a.first - b.first)
