@@ -165,6 +165,35 @@ describe("xls: cells and rows (BIFF8)", () => {
     ])
   })
 
+  it("a later sheet with the same name, in any case, gets a suffix; rows, details and defined names stay with their sheet", async () => {
+    const { wb, sheets, details } = await readOk({
+      globals: [X.externSheet([1, 3]), X.name("First", X.ref3d(0, 0, 0), { itab: 2 }), X.name("Second", X.ref3d(1, 0, 0))],
+      sheets: [
+        { name: "A", records: [X.number(0, 0, 0, 1)] },
+        { name: "A", state: 1, records: [X.colInfo(1, 1, true), X.number(0, 0, 0, 2)] },
+        { name: "Data", records: [X.number(0, 0, 0, 3)] },
+        { name: "DATA", records: [X.number(0, 0, 0, 4)] }
+      ]
+    })
+    expect(wb.sheets).toEqual([
+      { name: "A", index: 0, visibility: "visible" },
+      { name: "A (2)", index: 1, visibility: "hidden" },
+      { name: "Data", index: 2, visibility: "visible" },
+      { name: "DATA (2)", index: 3, visibility: "visible" }
+    ])
+    expect(wb.definedNames).toEqual([
+      { name: "First", formula: "'A (2)'!$A$1", hidden: false, scope: 1 },
+      { name: "Second", formula: "'DATA (2)'!$A$1", hidden: false }
+    ])
+    expect(sheets.map(values)).toEqual([1, 2, 3, 4].map((v) => [[0, false, [[0, "Number", v]]]]))
+    expect(details[1]!.hiddenColumns).toEqual([{ first: 1, last: 1 }])
+    for (const [k, s] of wb.sheets.entries()) {
+      expect(values(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, s.name))))), s.name)
+        .toEqual([[0, false, [[0, "Number", k + 1]]]])
+    }
+    expect((await Effect.runPromise(Workbook.sheetDetails(wb, "A (2)"))).hiddenColumns).toEqual([{ first: 1, last: 1 }])
+  })
+
   it("rows can be streamed twice; limits from read time stay with the workbook", async () => {
     const bytes = X.xls(one([X.number(0, 0, 0, 1), X.number(1, 0, 0, 2), X.number(2, 0, 0, 3)]))
     const wb = await Effect.runPromise(Xls.read(bytes).pipe(Effect.provide(SpreadsheetLimits.layer({ maxRows: 2 }))))

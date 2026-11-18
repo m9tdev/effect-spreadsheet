@@ -9,6 +9,7 @@
 import { Effect } from "effect"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
+import { uniqueSheetNames } from "../sheetNames.ts"
 import { parse } from "../xml/parse.ts"
 import type { XmlAttributes, XmlHandler } from "../xml/tokenizer.ts"
 import type { Archive } from "../zip/archive.ts"
@@ -138,6 +139,7 @@ export interface WorkbookPart {
 
 /**
  * Reads the workbook part: sheets in order, defined names, the date system.
+ * Sheet names are decoded, then made unique (`uniqueSheetNames`).
  * A `<sheets>` inside `<sheets>`, or a `<definedName>` inside a defined
  * name, is MalformedFile: it would end the sheet list early, or replace the
  * open name.
@@ -147,7 +149,8 @@ export const readWorkbookPart = (
   entry: ZipEntry,
   limits: Limits
 ): Effect.Effect<WorkbookPart, SpreadsheetError> => {
-  const sheets: Array<SheetEntry> = []
+  // names as the file gives them (decoded; `undefined` for a sheet without one), made unique at the end
+  const sheets: Array<Omit<SheetEntry, "name"> & { readonly name: string | undefined }> = []
   const definedNames: Array<DefinedNameEntry> = []
   let date1904 = false
   let inSheets = false
@@ -168,8 +171,9 @@ export const readWorkbookPart = (
             return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: sheets.length + 1 })
           }
           const state = attr(attributes, "state")
+          const sheetName = attr(attributes, "name")
           sheets.push({
-            name: unescapeXstring(attr(attributes, "name") ?? `Sheet${sheets.length + 1}`),
+            name: sheetName === undefined ? undefined : unescapeXstring(sheetName),
             visibility: state === "hidden" ? "hidden" : state === "veryHidden" ? "veryHidden" : "visible",
             relationshipId: relationshipId(attributes)
           })
@@ -205,7 +209,10 @@ export const readWorkbookPart = (
       return undefined
     }
   }
-  return Effect.map(parsePart(archive, entry, handler, limits), () => ({ sheets, definedNames, date1904 }))
+  return Effect.map(parsePart(archive, entry, handler, limits), () => {
+    const names = uniqueSheetNames(sheets.map((s) => s.name))
+    return { sheets: sheets.map((s, k) => ({ ...s, name: names[k]! })), definedNames, date1904 }
+  })
 }
 
 /** `_xHHHH_` escapes in OOXML strings (ST_Xstring): one UTF-16 code unit each; `_x005F_` is `_`. */

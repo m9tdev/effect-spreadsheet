@@ -33,6 +33,7 @@ These are the intended differences:
 | a phonetic run (`<rPh>`) inside a `<t>` (invalid OOXML) | only the run is skipped (with the `<t>` elements inside it); the outer `<t>`'s text after the run is kept | the text up to the run's inner `</t>`, the run's markup included; the outer `<t>`'s text after that is lost |
 | `_xHHHH_` escapes in a defined name's `name` (e.g. `N_x0042_`) | decoded (`NB`), as in sheet names and in the defined name's formula text | kept as written (it decodes sheet names and formula text); the test doesn't compare XLSX defined names |
 | a defined name whose `localSheetId` names no sheet | no `scope`: it looks workbook-wide | keeps `Sheet: 99` |
+| sheets with the same name (also differing only in case, or only after `_xHHHH_` decoding), and a `<sheet>` without a `name` | every sheet is read; a later sheet with the same name in any case is reported as `Name (2)` (or the next free `Name (n)`), a nameless one as `Sheet<n>` (its position, or the next free `Sheet<n>`); see the README | keeps duplicate names, and both names give the later sheet's cells (names differing only in case stay apart); a sheet without a name fails the read |
 | XLM macro sheets (and chart and dialog sheets) | no rows, empty `sheetDetails` | cells, where it reads them |
 
 An impossible ISO date such as `2020-02-30` rolls over to the next valid

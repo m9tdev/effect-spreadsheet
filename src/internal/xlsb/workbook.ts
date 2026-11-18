@@ -19,6 +19,7 @@ import type { DefinedName, Visibility } from "../../Workbook.ts"
 import { Fields, readNullableWideString, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords } from "../biff12/records.ts"
 import { areaText, BIFF12_GRID, cellText, sheetPrefix } from "../refText.ts"
+import { uniqueSheetNames } from "../sheetNames.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
 import { sliced } from "./slices.ts"
@@ -125,7 +126,7 @@ const nameRef = (f: Fields, at: number, cce: number): NameRef | undefined => {
   return undefined
 }
 
-/** Reads the workbook part. */
+/** Reads the workbook part. Sheet names are made unique (`uniqueSheetNames`). */
 export const readWorkbookBin = (
   archive: Archive,
   entry: ZipEntry,
@@ -219,7 +220,10 @@ export const readWorkbookBin = (
     }
     return readRecords(sliced(archive.read(entry)), handle, limits, part).pipe(
       Effect.filterOrFail(() => records > 0, () => malformed("empty workbook part", part)),
-      Effect.map((): WorkbookBin => ({ sheets, date1904, books, xtis: Int32Array.from(xtis), names }))
+      Effect.map((): WorkbookBin => {
+        const unique = uniqueSheetNames(sheets.map((s) => s.name))
+        return { sheets: sheets.map((s, k) => ({ ...s, name: unique[k]! })), date1904, books, xtis: Int32Array.from(xtis), names }
+      })
     )
   })
 
