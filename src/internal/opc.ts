@@ -176,7 +176,7 @@ export const contentType = (
   limits: Limits
 ): Effect.Effect<string | undefined, SpreadsheetError> => {
   const entry = archive.find("[Content_Types].xml")
-  if (entry === undefined) return Effect.succeed(undefined)
+  if (entry === undefined) return Effect.undefined
   const key = normalizeName(part.name)
   const dot = key.lastIndexOf(".")
   const extension = dot > key.lastIndexOf("/") ? key.slice(dot + 1) : undefined

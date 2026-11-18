@@ -23,7 +23,8 @@ const formatOf = async (bytes: Uint8Array) => {
 /** The first cell's value of the first sheet, or the error. */
 const firstCell = async (read: Effect.Effect<Workbook.Workbook, unknown>) => {
   const exit = await run(Effect.flatMap(read, (wb) => Stream.runCollect(Workbook.rows(wb, 0))))
-  return Exit.isSuccess(exit) ? [...exit.value][0]?.cells[0]?.value : failureOf(exit)
+  const cell = Exit.isSuccess(exit) ? [...exit.value][0]?.cells[0] : undefined
+  return cell === undefined ? failureOf(exit) : cell._tag === "Empty" ? "empty" : cell.value
 }
 
 const XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
@@ -157,8 +158,8 @@ describe("zip packages: broken ones fail, other zips don't", () => {
   it("a package-looking zip the archive rejects is MalformedFile; another zip stays a zip", async () => {
     for (const marker of ["_rels/.rels", "xl/workbook.xml", "/XL/Workbook.bin"]) {
       const bytes = makeZip([{ name: marker }, { name: "README" }, { name: "readme" }])
-      for (const exit of [await run(Spreadsheet.detectFormat(bytes)), await run(Spreadsheet.read(bytes))]) {
-        expect(failureOf(exit), marker).toMatchObject({ _tag: "MalformedFile", format: "zip", reason: "duplicate entry name" })
+      for (const error of [failureOf(await run(Spreadsheet.detectFormat(bytes))), failureOf(await run(Spreadsheet.read(bytes)))]) {
+        expect(error, marker).toMatchObject({ _tag: "MalformedFile", format: "zip", reason: "duplicate entry name" })
       }
     }
     const plain = makeZip([{ name: "README" }, { name: "readme" }])
