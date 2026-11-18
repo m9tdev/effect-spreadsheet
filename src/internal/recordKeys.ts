@@ -86,19 +86,24 @@ export const makeCounted = (header: Iterable<HeaderEntry>): CountedRecordKeys =>
     return candidate
   }
 
-  // Gather the valid entries; the first entry of a repeated column wins.
-  // Progress: one step per entry of the (finite) header.
-  const entries: Array<readonly [number, string]> = []
-  const seen = new Set<number>()
+  // Gather the valid entries through a column -> name map: the last entry of
+  // a repeated column wins, as when a reader compacts a row's cells. A map
+  // keeps a column at the place of its first entry, so the order check only
+  // looks at first entries. Progress: one step per entry of the (finite) header.
+  const names = new Map<number, string | undefined>()
   let ascending = true
   let last = -1
   for (const [column, name] of header) {
-    if (!isColumn(column) || seen.has(column)) continue
-    seen.add(column)
-    if (column < last) ascending = false
-    last = column
-    if (!isEmptyName(name)) entries.push([column, name])
+    if (!isColumn(column)) continue
+    if (!names.has(column)) {
+      if (column < last) ascending = false
+      last = column
+    }
+    names.set(column, name)
   }
+  const entries: Array<readonly [number, string]> = []
+  // Progress: one step per column of `names`, which no longer changes.
+  for (const [column, name] of names) if (!isEmptyName(name)) entries.push([column, name])
   // The precondition says ascending; sort only when it was violated.
   if (!ascending) entries.sort((x, y) => x[0] - y[0])
 
@@ -130,8 +135,10 @@ export const makeCounted = (header: Iterable<HeaderEntry>): CountedRecordKeys =>
 /** `header`: entries with strictly ascending, non-negative integer columns.
  *  Sparse: only the cells present. Never a dense array up to the max column.
  *  Doesn't throw on a violated precondition: a repeated column keeps its
- *  first entry, descending entries are put in column order, and entries whose
- *  column isn't a non-negative safe integer are ignored. */
+ *  last entry (also an empty one), like the cells a reader keeps for a row
+ *  and like the data row's own values; descending entries are put in column
+ *  order, and entries whose column isn't a non-negative safe integer are
+ *  ignored. */
 export const make = (header: Iterable<HeaderEntry>): RecordKeys => {
   const { named, headerKey, key } = makeCounted(header)
   return { named, headerKey, key }

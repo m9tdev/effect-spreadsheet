@@ -6,7 +6,10 @@ import * as Csv from "../src/csv/index.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import type { Row } from "../src/Workbook.ts"
+import * as Workbook from "../src/Workbook.ts"
+import * as Xlsx from "../src/xlsx/index.ts"
 import { csvRows, enc } from "./helpers/run.ts"
+import { xlsx as buildXlsx } from "./helpers/xlsx.ts"
 import { countYields } from "./helpers/yields.ts"
 
 const rowsOf = (text: string) => Effect.runPromise(csvRows(text, { inferTypes: true }))
@@ -425,5 +428,27 @@ describe("toRecords header phase", () => {
     const rows: Array<Row> = [row(0, "1", "2", "3", "4"), row(1, "5")]
     assert.deepStrictEqual(recs(rows, { header: sparse }), [{ x: "1", z: "3" }, { x: "5" }])
     assert.deepStrictEqual(recs(rows, { header: [] }), [])
+  })
+
+  it("a header row with two cells in one column takes the last, like the data and the readers' rows", async () => {
+    const rows: Array<Row> = [
+      { index: 0, hidden: false, cells: [Cell.text(0, "x"), Cell.text(0, "y")] },
+      { index: 1, hidden: false, cells: [Cell.number(0, 1), Cell.number(0, 2)] }
+    ]
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [{ y: 2 }])
+    assert.deepStrictEqual(recs(rows, { header: 0 }), [{ y: 2 }])
+    // the XLSX reader keeps the last cell of a column, so its rows give the same records
+    const bytes = await buildXlsx({
+      sheets: [{
+        name: "S",
+        data: `<row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c><c r="A1" t="inlineStr"><is><t>y</t></is></c></row>` +
+          `<row r="2"><c r="A2"><v>1</v></c><c r="A2"><v>2</v></c></row>`
+      }]
+    })
+    const fromFile = await Effect.runPromise(Effect.gen(function*() {
+      const wb = yield* Xlsx.read(bytes)
+      return Array.from(yield* Stream.runCollect(Spreadsheet.toRecords(Workbook.rows(wb, 0), { header: "first-row" })))
+    }))
+    assert.deepStrictEqual(fromFile, [{ y: 2 }])
   })
 })

@@ -276,8 +276,9 @@ Why it can't hang, and why the total cost is O(n) expected:
 - No recursion and no regexes, and nothing parses suffixes back out of names.
 
 `make` must not throw on a violated precondition (repeated or descending column
-in the entries). If a column repeats, the first entry wins. Every loop stays
-bounded regardless.
+in the entries). If a column repeats, the last entry wins (also an empty one),
+like the cells the readers keep for a row and like the data row's own values.
+Every loop stays bounded regardless.
 
 ## 7. Existing tests that must keep passing (unchanged)
 
