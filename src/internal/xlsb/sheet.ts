@@ -35,8 +35,7 @@
  *
  * @internal
  */
-import { Cause, Effect, Pull, Stream } from "effect"
-import type * as Arr from "effect/Array"
+import { Effect, type Stream } from "effect"
 import { absurd } from "effect/Function"
 import * as Cell from "../../Cell.ts"
 import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
@@ -44,10 +43,10 @@ import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { ColumnSpan, Range, Row, SheetDetails } from "../../Workbook.ts"
 import { decodeRk, ERROR_CODES, Fields } from "../binary.ts"
 import { readRichStr, readWideString } from "../biff12/fields.ts"
-import { type Biff12Record, readRecords, RecordSplitter } from "../biff12/records.ts"
-import { WorkMeter } from "../meter.ts"
+import { type Biff12Record, readRecords, recordDecoder } from "../biff12/records.ts"
+import { decoded, step } from "../decode.ts"
 import { serialToDate } from "../numFmt.ts"
-import { compact, DONE, mergeSpans, type PullState, READING } from "../sheet.ts"
+import { compact, mergeSpans, NO_ROWS } from "../sheet.ts"
 import type { CellStyles } from "./parts.ts"
 import { malformed, tooLong } from "./workbook.ts"
 
@@ -157,6 +156,14 @@ const errorCode = (code: number): string => ERROR_CODES.get(code) ?? "#N/A"
 export class SheetRows {
   /** Completed rows not yet emitted. */
   out: Array<Row> = []
+
+  /** The completed rows not yet taken; `out` starts over. */
+  take(): ReadonlyArray<Row> {
+    const out = this.out
+    if (out.length === 0) return NO_ROWS
+    this.out = []
+    return out
+  }
   private cells = 0
   private rowCount = 0
   /** The last row's index, -1 before the first row. */
@@ -328,54 +335,20 @@ export const sheetRows = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,
   context: SheetContext
 ): Stream.Stream<Row, SpreadsheetError> =>
-  Stream.transformPull(bytes, (upstream) =>
-    Effect.map(WorkMeter, (meter) => {
-      const rows = new SheetRows(context)
-      const splitter = new RecordSplitter(context.part, context.limits.maxRecordBytes)
-      const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
-      let state: PullState = READING
-      const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
-        // progress: each iteration pulls one upstream piece (consumed), or
-        // ends the input (Done), or ends the stream (Failing goes to Done)
-        while (true) {
-          switch (state._tag) {
-            case "Reading":
-              break
-            case "Failing": {
-              const error = state.error
-              state = DONE
-              return yield* Effect.fail(error)
-            }
-            case "Done":
-              return yield* Cause.done()
-            default:
-              return absurd(state)
-          }
-          const chunk = yield* pullUpstream
-          let error: SpreadsheetError | undefined
-          if (chunk === undefined) {
-            state = DONE
-            error = splitter.end() ?? rows.end()
-          } else {
-            const before = splitter.records
-            // progress: one piece per iteration
-            for (const piece of chunk) {
-              error = splitter.feed(piece, rows.handle)
-              if (error !== undefined) break
-            }
-            meter.add("records", splitter.records - before)
-          }
-          // the rows completed before the error come out first; the error on the next pull
-          if (error !== undefined) state = { _tag: "Failing", error }
-          if (rows.out.length > 0) {
-            const out = rows.out
-            rows.out = []
-            return out as unknown as Arr.NonEmptyReadonlyArray<Row>
-          }
-        }
-      })
-      return pull
-    }))
+  decoded(bytes, (meter) => {
+    const rows = new SheetRows(context)
+    const records = recordDecoder(rows.handle, context.limits, context.part, meter)
+    return {
+      feed: (piece) => {
+        const error = records.feed(piece).error
+        return step(rows.take(), error)
+      },
+      end: () => {
+        const error = records.end().error ?? rows.end()
+        return step(rows.take(), error)
+      }
+    }
+  })
 
 /** An RfX range (rwFirst, rwLast, colFirst, colLast: u32 each) at `at`; undefined if truncated or reversed. */
 const range = (f: Fields, at: number): Range | undefined => {
