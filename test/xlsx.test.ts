@@ -222,6 +222,16 @@ describe("xlsx: cells and rows", () => {
     expect(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, 0)))).length).toBe(1)
   })
 
+  it("entry names with a leading slash read through Spreadsheet.read like through Xlsx.read", async () => {
+    const bytes = await xlsx({ workbookPath: "/xl/workbook.xml", sheets: [{ name: "S", data: `<row><c><v>42</v></c></row>` }] })
+    const cells = async (wb: Workbook.Workbook) => values(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, 0)))))
+    const direct = await Effect.runPromise(Xlsx.read(bytes))
+    expect(await cells(direct)).toEqual([[0, false, [[0, "Number", 42]]]])
+    const wb = await Effect.runPromise(Spreadsheet.read(bytes))
+    expect(wb.format).toBe("xlsx")
+    expect(await cells(wb)).toEqual(await cells(direct))
+  })
+
   it("limits from the layer at read time stay with the workbook", async () => {
     const bytes = await xlsx({ sheets: [{ name: "S", data: `<row><c><v>1</v></c></row><row><c><v>2</v></c></row><row><c><v>3</v></c></row>` }] })
     const wb = await Effect.runPromise(Xlsx.read(bytes).pipe(Effect.provide(SpreadsheetLimits.layer({ maxRows: 2 }))))

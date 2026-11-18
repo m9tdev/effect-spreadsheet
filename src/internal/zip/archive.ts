@@ -27,7 +27,7 @@ import type * as Pull from "effect/Pull"
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import { CRC32_START, crc32Final, crc32Update } from "./crc32.ts"
-import { type Directory, readDirectory, type ZipEntry } from "./directory.ts"
+import { type Directory, normalizeName, readDirectory, type ZipEntry } from "./directory.ts"
 import { type InflateRaw, inflateRawWeb } from "./inflate.ts"
 
 /** The archive-wide inflate budget for an archive of `archiveBytes` bytes. */
@@ -63,8 +63,6 @@ const malformed = (reason: string, part?: string, offset?: number) =>
     ...(part === undefined ? {} : { part }),
     ...(offset === undefined ? {} : { offset })
   })
-
-const normalize = (name: string): string => (name.startsWith("/") ? name.slice(1) : name).toLowerCase()
 
 interface Located {
   readonly entry: ZipEntry
@@ -125,7 +123,7 @@ export const open = (
   const byName = new Map<string, ZipEntry>()
   // progress: one entry per iteration
   for (const entry of entries) {
-    const key = normalize(entry.name)
+    const key = normalizeName(entry.name)
     if (byName.has(key)) return malformed("duplicate entry name", entry.name, entry.localOffset)
     byName.set(key, entry)
   }
@@ -256,7 +254,7 @@ export const open = (
 
   return {
     entries,
-    find: (name) => byName.get(normalize(name)),
+    find: (name) => byName.get(normalizeName(name)),
     read,
     readAll,
     inflatedBytes: () => inflated
