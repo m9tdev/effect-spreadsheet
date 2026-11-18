@@ -99,45 +99,38 @@ describe("probe: bare BIFF streams", () => {
     }
   })
 
-  it("a stream starting with a BIFF3 or BIFF4 BOF type but no well-formed BOF is MalformedFile at once, to detection and both readers", async () => {
-    const cases: Array<[string, string, Uint8Array]> = [
-      ["BIFF3", "length 4", new Uint8Array([0x09, 0x02, 0x04, 0x00, 0x00, 0x00, 0x10, 0x00])],
-      ["BIFF3", "data type 0x0000", new Uint8Array([0x09, 0x02, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])],
-      ["BIFF3", "two bytes", new Uint8Array([0x09, 0x02])],
-      ["BIFF4", "length 8", new Uint8Array([0x09, 0x04, 0x08, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00])],
-      ["BIFF4", "data type 0x0033", new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x33, 0x00])],
-      ["BIFF4", "a BOF cut short", new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x10])]
+  it("bytes starting with a BIFF2-4 BOF type but no well-formed BOF are MalformedFile to Xls.read, and text or unknown data to detection", async () => {
+    // UTF-16LE text without a BOM, whose first character makes its first word a BIFF2-4 BOF record type
+    const utf16le = (text: string) => new Uint8Array([...text].flatMap((c) => [c.charCodeAt(0) & 0xFF, c.charCodeAt(0) >> 8]))
+    // [version, label, bytes, what detection and Spreadsheet.read make of them: CSV rows, or unknown data]
+    const cases: Array<[string, string, Uint8Array, number | "unknown"]> = [
+      ["BIFF2", "length 6", new Uint8Array([0x09, 0x00, 0x06, 0x00, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00]), "unknown"],
+      ["BIFF2", "data type 0x0033", new Uint8Array([0x09, 0x00, 0x04, 0x00, 0x02, 0x00, 0x33, 0x00, 0x00, 0x80, 0x00, 0x90]), "unknown"],
+      ["BIFF2", "two bytes", new Uint8Array([0x09, 0x00]), "unknown"],
+      ["BIFF2", "text starting with a tab", utf16le("\t\tname\tx\n1\t2\t3\n"), 2],
+      ["BIFF3", "length 4", new Uint8Array([0x09, 0x02, 0x04, 0x00, 0x00, 0x00, 0x10, 0x00]), "unknown"],
+      ["BIFF3", "data type 0x0000", new Uint8Array([0x09, 0x02, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), "unknown"],
+      ["BIFF3", "text starting with U+0209", utf16le("\u0209abc\tx\n1\t2\n"), 2],
+      ["BIFF4", "length 8", new Uint8Array([0x09, 0x04, 0x08, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00]), "unknown"],
+      ["BIFF4", "data type 0x0033", new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x33, 0x00]), "unknown"],
+      ["BIFF4", "a BOF cut short", new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x10]), "unknown"],
+      ["BIFF4", "text starting with U+0409", utf16le("\u0409,name,x\n1,2,3\n"), 2]
     ]
-    for (const [version, label, bytes] of cases) {
-      const expected = { _tag: "MalformedFile", format: "xls", reason: `malformed ${version} BOF record` }
-      expect(tagOf(bytes), label).toBe("MalformedFile")
-      expect(failureOf(await run(Spreadsheet.detectFormat(bytes))), label).toMatchObject(expected)
-      expect(await xlsError(bytes), label).toMatchObject(expected)
-      expect(await readError(bytes), label).toMatchObject(expected)
-    }
-  })
-
-  it("bytes starting 09 00 without a well-formed BIFF2 BOF are MalformedFile to Xls.read, and text or unknown data to detection", async () => {
-    const utf16le = (text: string) => new Uint8Array([...text].flatMap((c) => [c.charCodeAt(0), 0]))
-    const expected = { _tag: "MalformedFile", format: "xls", reason: "malformed BIFF2 BOF record" }
-    // UTF-16LE text without a BOM that starts with a tab: its first record looks like a BIFF2 BOF of length 9
-    const text = utf16le("\t\tname\tx\n1\t2\t3\n")
-    expect(tagOf(text)).toBe("Detected")
-    expect(await formatOf(text)).toBe("csv")
-    const exit = await run(Effect.flatMap(Spreadsheet.read(text), (wb) => Stream.runCollect(Workbook.rows(wb, 0))))
-    expect(Exit.isSuccess(exit) && Array.from(exit.value).length).toBe(2)
-    expect(await xlsError(text)).toMatchObject(expected)
-    // binary data: a BIFF2 BOF of length 6, one of an unknown data type, two bytes
-    const binary = [
-      new Uint8Array([0x09, 0x00, 0x06, 0x00, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00]),
-      new Uint8Array([0x09, 0x00, 0x04, 0x00, 0x02, 0x00, 0x33, 0x00, 0x00, 0x80, 0x00, 0x90]),
-      new Uint8Array([0x09, 0x00])
-    ]
-    for (const bytes of binary) {
-      expect(tagOf(bytes), `${bytes}`).toBe("Detected")
-      expect(await formatOf(bytes), `${bytes}`).toBe("unknown")
-      expect(await readError(bytes), `${bytes}`).toMatchObject({ _tag: "UnsupportedFormat", format: "unknown" })
-      expect(await xlsError(bytes), `${bytes}`).toMatchObject(expected)
+    for (const [version, label, bytes, detected] of cases) {
+      expect(tagOf(bytes), label).toBe("Detected")
+      expect(await xlsError(bytes), label).toMatchObject({
+        _tag: "MalformedFile",
+        format: "xls",
+        reason: `malformed ${version} BOF record`
+      })
+      if (detected === "unknown") {
+        expect(await formatOf(bytes), label).toBe("unknown")
+        expect(await readError(bytes), label).toMatchObject({ _tag: "UnsupportedFormat", format: "unknown" })
+      } else {
+        expect(await formatOf(bytes), label).toBe("csv")
+        const exit = await run(Effect.flatMap(Spreadsheet.read(bytes), (wb) => Stream.runCollect(Workbook.rows(wb, 0))))
+        expect(Exit.isSuccess(exit) && Array.from(exit.value).length, label).toBe(detected)
+      }
     }
   })
 })
