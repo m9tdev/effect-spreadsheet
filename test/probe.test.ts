@@ -47,8 +47,14 @@ describe("probe: bare BIFF streams", () => {
   })
 
   it("Xls.read rejects a stream starting 09 08 without a well-formed BOF at once, as detection does", async () => {
-    // a BOF of the wrong length, an unknown version, an unknown data type
-    for (const patch of [[0x09, 0x08, 0x0C, 0x00], [0x09, 0x08, 0x10, 0x00, 0x00, 0x07], [0x09, 0x08, 0x10, 0x00, 0x00, 0x06, 0x99, 0x00]]) {
+    // a BOF of the wrong length, unknown versions (0x0700; 0x0601: BIFF8 is exactly 0x0600), an unknown data type
+    const patches = [
+      [0x09, 0x08, 0x0C, 0x00],
+      [0x09, 0x08, 0x10, 0x00, 0x00, 0x07],
+      [0x09, 0x08, 0x10, 0x00, 0x01, 0x06],
+      [0x09, 0x08, 0x10, 0x00, 0x00, 0x06, 0x99, 0x00]
+    ]
+    for (const patch of patches) {
       const bytes = bof(patch)
       expect(await xlsError(bytes), `${patch}`).toMatchObject({
         _tag: "MalformedFile",
@@ -105,6 +111,30 @@ describe("probe: compound files", () => {
         format: "cfb",
         reason: "compound file without a Workbook or Book stream"
       })
+    }
+  })
+
+  it("a workbook stream wins over an encrypted package in the same compound file", async () => {
+    const bytes = writeCfb([
+      { name: "EncryptionInfo", data: new Uint8Array(200) },
+      { name: "EncryptedPackage", data: new Uint8Array(5000) },
+      { name: "Workbook", data: book() }
+    ]).bytes
+    expect(tagOf(bytes)).toBe("Biff")
+    expect(await formatOf(bytes)).toBe("xls")
+    for (const read of [Xls.read(bytes), Spreadsheet.read(bytes)]) {
+      const exit = await run(read)
+      expect(Exit.isSuccess(exit) && exit.value.sheets.map((s) => s.name)).toEqual(["S"])
+    }
+  })
+
+  it("a Workbook stream wins over a Book stream", async () => {
+    const biff5 = X.workbookStream({ biff: 5, sheets: [{ name: "FromBook", records: [] }] })
+    const biff8 = X.workbookStream({ sheets: [{ name: "FromWorkbook", records: [] }] })
+    const bytes = writeCfb([{ name: "Book", data: biff5 }, { name: "Workbook", data: biff8 }]).bytes
+    for (const read of [Xls.read(bytes), Spreadsheet.read(bytes)]) {
+      const exit = await run(read)
+      expect(Exit.isSuccess(exit) && exit.value.sheets.map((s) => s.name)).toEqual(["FromWorkbook"])
     }
   })
 
