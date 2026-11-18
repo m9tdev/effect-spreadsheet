@@ -241,10 +241,12 @@ export const readWorkbookBin = (
         }
         case BRT_EXTERN_SHEET: {
           // cXti u32, then cXti x (iSupBook u32, itabFirst i32, itabLast i32)
+          const truncated = "truncated external sheet record"
           const f = reader.fixed(data, 4)
-          // the XTIs are the record's tail: checked against its length as a whole
-          if (f === undefined || 4 + 12 * f.u32(0) > data.length) return malformed("truncated external sheet record", part, record.offset)
+          if (f === undefined) return malformed(truncated, part, record.offset)
           const count = f.u32(0)
+          // the XTIs are the record's tail: checked against its length as a whole
+          if (4 + 12 * count > data.length) return malformed(truncated, part, record.offset)
           // progress: k up to count, which fits in the record (checked above); at most MAX_XTIS kept
           for (let k = 0; k < count && xtis.length < 3 * MAX_XTIS; k++) xtis.push(f.i32(4 + 12 * k), f.i32(8 + 12 * k), f.i32(12 + 12 * k))
           return undefined
@@ -258,11 +260,13 @@ export const readWorkbookBin = (
           const name = readWideString(data, 9, max)
           if (name._tag !== "Ok") return stringError(name, limits, "truncated defined name", part, record.offset)
           // the formula: its length, then that many bytes of tokens, all inside the record
+          const pastRecord = "defined name formula past its record"
           const f = reader.fixed(data, name.end + 4)
-          if (f === undefined || name.end + 4 + f.u32(name.end) > data.length) return malformed("defined name formula past its record", part, record.offset)
+          if (f === undefined) return malformed(pastRecord, part, record.offset)
+          const cce = f.u32(name.end)
+          if (name.end + 4 + cce > data.length) return malformed(pastRecord, part, record.offset)
           const flags = f.u32(0)
           const itab = f.u32(5)
-          const cce = f.u32(name.end)
           const builtin = (flags & 0x20) !== 0
           names.push({
             name: builtin ? `_xlnm.${name.value}` : name.value,
