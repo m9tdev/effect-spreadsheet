@@ -45,7 +45,7 @@ export const parsePart = (
   entry: ZipEntry,
   handler: XmlHandler,
   limits: Limits
-): Effect.Effect<void, SpreadsheetError> => Effect.asVoid(parse(archive.read(entry), handler, limits, entry.name))
+): Effect.Effect<void, SpreadsheetError> => parse(archive.read(entry), handler, limits, entry.name)
 
 /**
  * Resolves a relationship target against the directory of its source part

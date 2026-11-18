@@ -1,27 +1,35 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
+import { WorkMeter } from "../src/internal/meter.ts"
 import { type Archive, inflateBudget, open } from "../src/internal/zip/archive.ts"
 import { crc32, CRC32_START, crc32Final, crc32Update } from "../src/internal/zip/crc32.ts"
 import { readDirectory, type ZipEntry } from "../src/internal/zip/directory.ts"
 import type { Inflater, InflateRaw } from "../src/internal/zip/inflate.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
+import { type Counter, counter } from "./helpers/meter.ts"
 import { failureOf } from "./helpers/run.ts"
-import { buildZip, concat, deflateRaw, testCrc32 } from "./helpers/zip.ts"
+import { buildZip, concat, deflateRaw, readAll, testCrc32 } from "./helpers/zip.ts"
 
 const limits = SpreadsheetLimits.defaults
 const enc = (s: string) => new TextEncoder().encode(s)
 /** The web inflater emits chunks of at most 16 KiB; limits are checked per chunk. */
 const CHUNK = 64 * 1024
 
-const openOk = (bytes: Uint8Array, l = limits, inflate?: InflateRaw): Archive => {
+/** An opened archive whose reads all count on one work meter: `inflated` is the bytes inflated (or copied) over all its reads. */
+interface Opened extends Archive {
+  readonly inflated: Counter
+}
+
+const openOk = (bytes: Uint8Array, l = limits, inflate?: InflateRaw): Opened => {
   const archive = inflate === undefined ? open(bytes, l) : open(bytes, l, inflate)
   if ("_tag" in archive) throw new Error(`open failed: ${archive._tag} ${(archive as { reason?: string }).reason}`)
-  return archive
+  const inflated = counter("bytes")
+  return { ...archive, read: (entry, l) => Stream.provideService(archive.read(entry, l), WorkMeter, inflated), inflated }
 }
 
 const readAllExit = (archive: Archive, name: string) =>
-  Effect.runPromise(Effect.exit(archive.readAll(archive.find(name)!)))
+  Effect.runPromise(Effect.exit(readAll(archive, archive.find(name)!)))
 
 const errorOf = async (archive: Archive, name: string) => failureOf(await readAllExit(archive, name))
 
@@ -90,11 +98,11 @@ describe("zip archive: reading entries", () => {
         if (!(bytes[0] === 0x50 && bytes[1] === 0x4B && bytes[2] === 0x03 && bytes[3] === 0x04)) continue
         const archive = openOk(bytes)
         for (const entry of archive.entries) {
-          const exit = await Effect.runPromise(Effect.exit(archive.readAll(entry)))
+          const exit = await Effect.runPromise(Effect.exit(readAll(archive, entry)))
           expect(Exit.isSuccess(exit), `${name}: ${entry.name}`).toBe(true)
         }
         // work done: exactly the declared sizes, once
-        expect(archive.inflatedBytes()).toBe(archive.entries.reduce((n, e) => n + e.uncompressedSize, 0))
+        expect(archive.inflated.total()).toBe(archive.entries.reduce((n, e) => n + e.uncompressedSize, 0))
         files++
       }
     }
@@ -199,7 +207,7 @@ describe("zip archive: hostile input", () => {
     const error = await errorOf(archive, "bomb.xml")
     expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxInflateRatio", max: 200 })
     // work done: the budget plus at most one chunk, not 96 MiB
-    expect(archive.inflatedBytes()).toBeLessThanOrEqual(FLOOR + CHUNK)
+    expect(archive.inflated.total()).toBeLessThanOrEqual(FLOOR + CHUNK)
   }, 60_000)
 
   it("a bomb that would inflate forever stops at the budget (fake inflater, declared 1 GiB)", async () => {
@@ -208,7 +216,7 @@ describe("zip archive: hostile input", () => {
     const zip = await buildZip([{ name: "endless.xml", data: enc("x"), uncompressedSize: 1024 * MiB }])
     const archive = openOk(zip, limits, endless)
     expect(await errorOf(archive, "endless.xml")).toMatchObject({ _tag: "LimitExceeded", limit: "maxInflateRatio" })
-    expect(archive.inflatedBytes()).toBeLessThanOrEqual(FLOOR + MiB)
+    expect(archive.inflated.total()).toBeLessThanOrEqual(FLOOR + MiB)
   })
 
   const zeroEntries = async (count: number) => {
@@ -224,7 +232,7 @@ describe("zip archive: hostile input", () => {
   const readEntries = async (archive: Archive) => {
     let read = 0
     for (const entry of archive.entries) {
-      const error = failureOf(await Effect.runPromise(Effect.exit(archive.readAll(entry))))
+      const error = failureOf(await Effect.runPromise(Effect.exit(readAll(archive, entry))))
       if (error !== undefined) return { read, error }
       read++
     }
@@ -238,7 +246,7 @@ describe("zip archive: hostile input", () => {
     const { read, error } = await readEntries(archive)
     expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxInflateRatio", max: 200 })
     expect(read).toBe(64) // the 65th MiB crosses the floor
-    expect(archive.inflatedBytes()).toBeLessThanOrEqual(FLOOR + CHUNK)
+    expect(archive.inflated.total()).toBeLessThanOrEqual(FLOOR + CHUNK)
   }, 60_000)
 
   it("50 such entries (50 MiB) fit within the 64 MiB floor; a lower floor stops them early", async () => {
@@ -253,14 +261,14 @@ describe("zip archive: hostile input", () => {
     expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxInflateRatio" })
     expect(read).toBe(Math.floor(budget / MiB))
     expect(read).toBeLessThan(50)
-    expect(tight.inflatedBytes()).toBeLessThanOrEqual(budget + CHUNK)
+    expect(tight.inflated.total()).toBeLessThanOrEqual(budget + CHUNK)
   }, 60_000)
 
   it("reading an entry again doesn't spend the budget again", async () => {
     const zip = await zeroEntries(1)
     const archive = openOk(zip, { ...limits, inflateFloorBytes: 2 * MiB })
     for (let k = 0; k < 5; k++) expect((await readEntries(archive)).error).toBeUndefined()
-    expect(archive.inflatedBytes()).toBe(5 * MiB)
+    expect(archive.inflated.total()).toBe(5 * MiB)
   })
 
   it("after one entry goes over the budget, entries already read still read; new bytes still fail", async () => {
@@ -280,7 +288,7 @@ describe("zip archive: hostile input", () => {
     // limits given to one read set its budget against the same total
     expect(Exit.isSuccess(await readExit(c, { ...limits, inflateFloorBytes: 3 * MiB }))).toBe(true)
     expect(failureOf(await readExit(a, { ...limits, inflateFloorBytes: 0, maxInflateRatio: 1 }))).toBeUndefined()
-    expect(archive.inflatedBytes()).toBeLessThanOrEqual(6 * MiB + 2 * CHUNK)
+    expect(archive.inflated.total()).toBeLessThanOrEqual(6 * MiB + 2 * CHUNK)
   })
 
   it("the chunk that goes over the budget isn't charged, so reading the entry again fails again", async () => {
@@ -305,11 +313,11 @@ describe("zip archive: hostile input", () => {
     const archive = openOk(zip, { ...limits, maxDecompressedBytes: 3 * 1024 * 1024 })
     let error: unknown
     for (const entry of archive.entries) {
-      error = failureOf(await Effect.runPromise(Effect.exit(archive.readAll(entry))))
+      error = failureOf(await Effect.runPromise(Effect.exit(readAll(archive, entry))))
       if (error !== undefined) break
     }
     expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes" })
-    expect(archive.inflatedBytes()).toBeLessThanOrEqual(3 * 1024 * 1024 + CHUNK)
+    expect(archive.inflated.total()).toBeLessThanOrEqual(3 * 1024 * 1024 + CHUNK)
   })
 
   it("an entry that inflates past its declared size stops there", async () => {
@@ -319,7 +327,7 @@ describe("zip archive: hostile input", () => {
     const error = await errorOf(archive, "lie.xml")
     expect(error).toMatchObject({ _tag: "MalformedFile", part: "lie.xml" })
     expect(String((error as { reason: string }).reason)).toMatch(/past its declared size/)
-    expect(archive.inflatedBytes()).toBeLessThanOrEqual(1000 + CHUNK)
+    expect(archive.inflated.total()).toBeLessThanOrEqual(1000 + CHUNK)
   })
 
   it("an entry shorter than declared, or with a wrong CRC, is MalformedFile", async () => {

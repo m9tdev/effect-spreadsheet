@@ -44,6 +44,7 @@ import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
+import { WorkMeter } from "../meter.ts"
 import { XmlDecoder } from "../xml/parse.ts"
 import { type XmlAttributes, type XmlHandler, XmlTokenizer } from "../xml/tokenizer.ts"
 import { serialToDate } from "./numFmt.ts"
@@ -345,11 +346,6 @@ export class SheetRows implements XmlHandler {
     return undefined
   }
 
-  /** Cells held for the open row (for tests). */
-  get heldCells(): number {
-    return this.row === undefined ? 0 : this.row.cells.length
-  }
-
   private toCell(pending: PendingCell): Cell.Cell | MalformedFile {
     const { column } = pending
     const part = this.context.part
@@ -462,16 +458,19 @@ export type PullState =
 export const READING: PullState = { _tag: "Reading" }
 export const DONE: PullState = { _tag: "Done" }
 
-/** Rows of a worksheet part, given its byte stream. Re-runnable when the input is. */
+/**
+ * Rows of a worksheet part, given its byte stream. Re-runnable when the
+ * input is. The tokenizer hands its work to the work meter.
+ */
 export const sheetRows = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,
   context: SheetContext
 ): Stream.Stream<Row, SpreadsheetError> =>
   Stream.transformPull(bytes, (upstream) =>
-    Effect.sync(() => {
+    Effect.map(WorkMeter, (meter) => {
       const rows = new SheetRows(context)
       const decoder = new XmlDecoder(context.part)
-      const tokenizer = new XmlTokenizer(rows, context.limits, context.part)
+      const tokenizer = new XmlTokenizer(rows, context.limits, context.part, meter)
       const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
       let state: PullState = READING
       const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {

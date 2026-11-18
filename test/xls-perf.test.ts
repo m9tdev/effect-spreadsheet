@@ -2,16 +2,17 @@
  * A 65 536-row XLS (BIFF8's maximum) streams with bounded work between
  * event-loop turns, in work linear in its size. Checked without wall-clock
  * limits: the rows and cells per turn as counts; linearity as the reader's
- * own step counter (`work`, exact whatever the load) from n to 16n rows,
+ * own step count (on a work meter, exact whatever the load) from n to 16n rows,
  * and, for work outside its loops, as the scaling of its CPU time, with a
  * margin for load.
  */
 import { Effect, Stream } from "effect"
 import { describe, expect, it } from "vitest"
-import { BATCH_CELLS, BATCH_RECORDS, work } from "../src/internal/xls/sheet.ts"
+import { BATCH_CELLS, BATCH_RECORDS } from "../src/internal/xls/sheet.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xls from "../src/xls/index.ts"
 import { bigXls } from "./helpers/big-xls.ts"
+import { counter, metered } from "./helpers/meter.ts"
 import * as X from "./helpers/xls.ts"
 import { countYields } from "./helpers/yields.ts"
 
@@ -30,6 +31,12 @@ const MAX_SCALING = 2.2
 const MAX_STEP_SCALING = 1.01
 /** Rounds of interleaved measurements at most (the best of each size counts). */
 const ROUNDS = 8
+
+/** Drains a sheet's rows: event-loop turns, and the most reader steps between two of them. */
+const drainSteps = (wb: Workbook.Workbook, sheet: number) => {
+  const steps = counter("steps")
+  return countYields(() => Effect.runPromise(metered(steps, Stream.runDrain(Workbook.rows(wb, sheet)))), steps.total)
+}
 
 /** One RK cell per row, no ROW records: the least work per row, so extra work per row shows most. */
 const leanXls = (rows: number) => X.xls({ sheets: [{ name: "Lean", records: Array.from({ length: rows }, (_, r) => X.rk(r, 0, 0, X.rkInt(r))) }] })
@@ -108,7 +115,7 @@ describe("xls: 65 536 rows", () => {
     }
     // and so does reading: a batch ends once its cells pass BATCH_CELLS (a
     // MULBLANK adds at most 4 109), a step per cell plus a few per record and row
-    const steps = await countYields(() => Effect.runPromise(Stream.runDrain(Workbook.rows(wb, 0))), () => work.steps)
+    const steps = await drainSteps(wb, 0)
     expect(steps.maxPerTurn).toBeLessThanOrEqual(BATCH_CELLS + 4109 + 4 * BATCH_RECORDS)
   }, 300_000)
 
@@ -126,7 +133,7 @@ describe("xls: 65 536 rows", () => {
       sheets: [{ name: "One by one", records: oneByOne }, { name: "Together", records: together }, { name: "Repeated", records: repeated }]
     })))
     for (const sheet of [0, 1, 2]) {
-      const steps = await countYields(() => Effect.runPromise(Stream.runDrain(Workbook.rows(wb, sheet))), () => work.steps)
+      const steps = await drainSteps(wb, sheet)
       // a batch: BATCH_CELLS of reading and sorting, then at most one more
       // record (4 109 cells) or one more row sorted (32 768), plus a few
       // steps per record and row
@@ -152,31 +159,34 @@ describe("xls: 65 536 rows", () => {
     for (const sheet of [0, 1]) {
       let rows = 0
       let inOrder = 0
-      const before = work.steps
+      const counted = counter("steps")
       const steps = await countYields(
         () =>
-          Effect.runPromise(Stream.runForEach(Workbook.rows(wb, sheet), (row) =>
-            Effect.sync(() => {
-              if (row.index === rows++) inOrder++
-            }))),
-        () => work.steps
+          Effect.runPromise(metered(
+            counted,
+            Stream.runForEach(Workbook.rows(wb, sheet), (row) =>
+              Effect.sync(() => {
+                if (row.index === rows++) inOrder++
+              }))
+          )),
+        counted.total
       )
       expect([rows, inOrder], `sheet ${sheet}`).toEqual([ROWS, ROWS])
       // a batch: BATCH_CELLS of cells read and rows emitted, then at most
       // one more record (4 109 cells), plus a few steps per record and row
       expect(steps.maxPerTurn, `sheet ${sheet}`).toBeLessThanOrEqual(BATCH_CELLS + 4109 + 4 * BATCH_RECORDS)
       // the flood: a step to scan and one to read each record, about two per row out
-      if (sheet === 0) expect(work.steps - before).toBeLessThan(2 * 16 * ROWS + 3 * ROWS)
+      if (sheet === 0) expect(counted.total()).toBeLessThan(2 * 16 * ROWS + 3 * ROWS)
     }
   }, 300_000)
 
   it("read in linear work: 16x the rows take 16x the reader's steps", async () => {
     const steps = async (rows: number) => {
       const wb = await Effect.runPromise(Xls.read(mixedXls(rows)))
-      const before = work.steps
-      const out = Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, 0))))
+      const counted = counter("steps")
+      const out = Array.from(await Effect.runPromise(metered(counted, Stream.runCollect(Workbook.rows(wb, 0)))))
       expect(out.map((r) => r.index)).toEqual(Array.from({ length: rows }, (_, r) => r))
-      return work.steps - before
+      return counted.total()
     }
     const small = await steps(SMALL)
     const big = await steps(ROWS)

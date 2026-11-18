@@ -22,6 +22,7 @@
  */
 import { LimitExceeded, MalformedFile } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
+import { type Meter, noMeter } from "../meter.ts"
 
 const SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 const ENDOFCHAIN = 0xFFFFFFFE
@@ -58,8 +59,6 @@ export interface Cfb {
   readonly find: (path: string) => CfbEntry | undefined
   /** A stream's bytes (copied out of its sectors). */
   readonly read: (entry: CfbEntry) => Uint8Array | MalformedFile | LimitExceeded
-  /** Sectors (and mini sectors) visited so far: a work counter. */
-  readonly sectorsVisited: () => number
 }
 
 const malformed = (reason: string, offset?: number) =>
@@ -71,7 +70,7 @@ const malformed = (reason: string, offset?: number) =>
  * Progress: each step moves to a sector not visited in this walk (checked
  * with a stamp per walk), so a walk ends after at most `table.length`
  * steps; it also ends at `maxSteps` (the sectors the caller needs, or
- * `maxSectorChain`).
+ * `maxSectorChain`). The sectors each walk visits go to the work meter.
  */
 class Chains {
   /**
@@ -83,19 +82,20 @@ class Chains {
   private readonly owners: Int32Array
   private readonly stamps: Uint32Array
   private stamp = 0
-  visited = 0
   private readonly table: Uint32Array
   private readonly limitSectors: number
   private readonly maxChain: number
   private readonly what: string
+  private readonly meter: Meter
 
-  constructor(table: Uint32Array, limitSectors: number, maxChain: number, what: string) {
+  constructor(table: Uint32Array, limitSectors: number, maxChain: number, what: string, meter: Meter) {
     this.table = table
     this.stamps = new Uint32Array(table.length)
     this.owners = new Int32Array(table.length)
     this.limitSectors = limitSectors
     this.maxChain = maxChain
     this.what = what
+    this.meter = meter
   }
 
   /** Marks a sector as the container's own (FAT, DIFAT). */
@@ -111,6 +111,13 @@ class Chains {
   walk(start: number, count: number | undefined, owner: number): Array<number> | MalformedFile | LimitExceeded {
     const out: Array<number> = []
     if (count === 0) return out
+    const result = this.follow(start, count, owner, out)
+    this.meter.add("sectors", out.length)
+    return result
+  }
+
+  /** `walk`'s loop: collects the chain's sectors in `out`. */
+  private follow(start: number, count: number | undefined, owner: number, out: Array<number>): Array<number> | MalformedFile | LimitExceeded {
     this.stamp++
     let sector = start
     // progress: every step adds one new (unvisited) sector, see the class doc
@@ -127,7 +134,6 @@ class Chains {
       this.owners[sector] = owner
       this.stamps[sector] = this.stamp
       out.push(sector)
-      this.visited++
       if (count !== undefined && out.length === count) return out
       sector = this.table[sector]!
     }
@@ -144,8 +150,8 @@ const consecutive = (sectors: ReadonlyArray<number>): boolean => {
   return true
 }
 
-/** Opens a compound file. */
-export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | LimitExceeded => {
+/** Opens a compound file. The sectors it visits, opening and reading streams, go to `meter`. */
+export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter): Cfb | MalformedFile | LimitExceeded => {
   if (bytes.length < 512) return malformed("file shorter than a CFB header")
   // progress: k up to 8
   for (let k = 0; k < 8; k++) if (bytes[k] !== SIGNATURE[k]) return malformed("not a CFB file (bad signature)", 0)
@@ -240,7 +246,8 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
     // a partial last sector leaves the rest free
     for (let i = words; i < perSector; i++) fat[k * perSector + i] = FREESECT
   }
-  const chains = new Chains(fat, fileSectors, maxChain, "FAT")
+  meter.add("sectors", visited)
+  const chains = new Chains(fat, fileSectors, maxChain, "FAT", meter)
   const OWN_FAT = -1
   const OWN_DIRECTORY = -2
   const OWN_MINIFAT = -3
@@ -366,7 +373,7 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
     if (data instanceof MalformedFile) return (mini = data)
     // a last, partial mini sector counts (its stream reads only what it has)
     const miniSectors = Math.ceil(data.length / MINI_SECTOR)
-    return (mini = { data, chains: new Chains(table, miniSectors, maxChain, "miniFAT") })
+    return (mini = { data, chains: new Chains(table, miniSectors, maxChain, "miniFAT", meter) })
   }
 
   const byPath = new Map<string, CfbEntry>()
@@ -399,10 +406,6 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
       const at = sectors.length > 0 ? (sectors[0]! + 1) * sectorSize : 0
       if (sectors.length * sectorSize >= size && at + size <= bytes.length && consecutive(sectors)) return bytes.subarray(at, at + size)
       return gather(sectors, size, sectorSize, sectorAt)
-    },
-    sectorsVisited: () => {
-      const m = mini !== undefined && "data" in mini ? mini.chains.visited : 0
-      return visited + chains.visited + m
     }
   }
 }

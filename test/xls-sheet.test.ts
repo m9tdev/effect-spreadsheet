@@ -7,12 +7,15 @@
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
-import { BATCH_RECORDS, caps, Rows, type SheetContext, work } from "../src/internal/xls/sheet.ts"
+import { type Meter, noMeter } from "../src/internal/meter.ts"
+import { readGlobals } from "../src/internal/xls/globals.ts"
+import { BATCH_RECORDS, Rows, type SheetContext, sheetRows } from "../src/internal/xls/sheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xls from "../src/xls/index.ts"
 import { writeCfb } from "./helpers/cfb.ts"
+import { counter, metered } from "./helpers/meter.ts"
 import { failureOf } from "./helpers/run.ts"
 import { countYields } from "./helpers/yields.ts"
 import * as X from "./helpers/xls.ts"
@@ -40,6 +43,20 @@ const readOk = async (book: X.TestBook, limits?: LimitOverrides) => {
   return exit.value
 }
 const errorOf = async (book: X.TestBook, limits?: LimitOverrides) => failureOf(await readExit(X.xls(book), limits))
+/** The rows of a book's first sheet, read with `heldCells` as the cap on held cells. */
+const rowsHolding = (book: X.TestBook, heldCells: number) =>
+  Effect.runPromise(Effect.exit(Effect.gen(function*() {
+    const stream = X.workbookStream(book)
+    const limits = SpreadsheetLimits.defaults
+    const globals = yield* readGlobals(stream, limits)
+    const { offset, end } = globals.sheets[0]!
+    return Array.from(yield* Stream.runCollect(sheetRows({ stream, offset, end, part: "sheet", globals, limits, heldCells })))
+  })))
+const rowsHeld = async (book: X.TestBook, heldCells: number) => {
+  const exit = await rowsHolding(book, heldCells)
+  if (Exit.isFailure(exit)) throw new Error(`read failed: ${JSON.stringify(failureOf(exit))}`)
+  return exit.value
+}
 const one = (records: ReadonlyArray<Uint8Array>, globals: ReadonlyArray<Uint8Array> = [], biff: 5 | 8 = 8): X.TestBook => ({ biff, globals, sheets: [{ name: "S", records }] })
 
 const values = (rows: ReadonlyArray<Workbook.Row>) => rows.map((r) => [r.index, r.hidden, r.cells.map((c) => [c.column, c._tag, Cell.value(c)])])
@@ -291,21 +308,15 @@ describe("xls sheet: rows whose cells come in several places", () => {
   })
 
   it("ROW records after the cells hold no row back: they don't count against the held-cell cap", async () => {
-    const saved = caps.heldCells
-    try {
-      caps.heldCells = 10
-      // 20 rows of cells, then a ROW record for an empty row before them
-      const empty = [...Array.from({ length: 20 }, (_, r) => X.number(r + 1, 0, 0, r)), X.row(0)]
-      expect((await readOk(one(empty))).sheets[0]!.map((r) => [r.index, r.hidden, r.cells.length])).toEqual([
-        [0, false, 0],
-        ...Array.from({ length: 20 }, (_, r) => [r + 1, false, 1])
-      ])
-      // a hiding ROW record for the first row with cells, and a visible one repeated, both after all the cells
-      const late = [X.row(0), ...Array.from({ length: 21 }, (_, r) => X.number(r, 0, 0, r)), X.row(0, true), X.row(1)]
-      expect((await readOk(one(late))).sheets[0]!.map((r) => [r.index, r.hidden])).toEqual(Array.from({ length: 21 }, (_, r) => [r, r === 0]))
-    } finally {
-      caps.heldCells = saved
-    }
+    // 20 rows of cells, then a ROW record for an empty row before them
+    const empty = [...Array.from({ length: 20 }, (_, r) => X.number(r + 1, 0, 0, r)), X.row(0)]
+    expect((await rowsHeld(one(empty), 10)).map((r) => [r.index, r.hidden, r.cells.length])).toEqual([
+      [0, false, 0],
+      ...Array.from({ length: 20 }, (_, r) => [r + 1, false, 1])
+    ])
+    // a hiding ROW record for the first row with cells, and a visible one repeated, both after all the cells
+    const late = [X.row(0), ...Array.from({ length: 21 }, (_, r) => X.number(r, 0, 0, r)), X.row(0, true), X.row(1)]
+    expect((await rowsHeld(one(late), 10)).map((r) => [r.index, r.hidden])).toEqual(Array.from({ length: 21 }, (_, r) => [r, r === 0]))
   })
 
   it("rows declared only by ROW records come out in row order among the others, whatever the record order", async () => {
@@ -342,22 +353,14 @@ describe("xls sheet: rows whose cells come in several places", () => {
   it("rows held back by a row split far apart are capped: past the cap the sheet is MalformedFile", async () => {
     // a BLANK in row 0, rows 1-20 of 100 cells each, then row 0's second BLANK: rows 1-20 wait for row 0
     const records = [X.blank(0, 0, 0), ...Array.from({ length: 20 }, (_, r) => X.mulrk(r + 1, 0, Array.from({ length: 100 }, (_, c) => [0, X.rkInt(c)] as const))), X.blank(0, 1, 0)]
-    const saved = caps.heldCells
-    try {
-      caps.heldCells = 1000
-      const error = await errorOf(one(records))
-      expect(error).toMatchObject({ _tag: "MalformedFile", reason: "rows split too far apart: over 1000 cells held for rows not complete" })
-      // at 1 000 cells (row 0's first BLANK and rows 1-10), not before: the record that passes it
-      expect((error as { offset: number }).offset).toBeGreaterThan(0)
-      // all 2 002 cells are held when the last BLANK comes: a cap of 2 002 reads, 2 001 doesn't
-      caps.heldCells = 2001
-      expect(await errorOf(one(records))).toMatchObject({ reason: "rows split too far apart: over 2001 cells held for rows not complete" })
-      caps.heldCells = 2002
-      const { sheets } = await readOk(one(records))
-      expect(sheets[0]!.map((r) => [r.index, r.cells.length])).toEqual([[0, 2], ...Array.from({ length: 20 }, (_, r) => [r + 1, 100])])
-    } finally {
-      caps.heldCells = saved
-    }
+    const error = failureOf(await rowsHolding(one(records), 1000))
+    expect(error).toMatchObject({ _tag: "MalformedFile", reason: "rows split too far apart: over 1000 cells held for rows not complete" })
+    // at 1 000 cells (row 0's first BLANK and rows 1-10), not before: the record that passes it
+    expect((error as { offset: number }).offset).toBeGreaterThan(0)
+    // all 2 002 cells are held when the last BLANK comes: a cap of 2 002 reads, 2 001 doesn't
+    expect(failureOf(await rowsHolding(one(records), 2001))).toMatchObject({ reason: "rows split too far apart: over 2001 cells held for rows not complete" })
+    const rows = await rowsHeld(one(records), 2002)
+    expect(rows.map((r) => [r.index, r.cells.length])).toEqual([[0, 2], ...Array.from({ length: 20 }, (_, r) => [r + 1, 100])])
   })
 
   it("held cells are exactly the cells of rows not emitted, through compaction and emitting", async () => {
@@ -667,8 +670,10 @@ const layout = (subs: ReadonlyArray<Sub>, listed: ReadonlyArray<number> = subs.m
   return concat([X.bof(0x0005), ...listing, X.eof(), ...bodies])
 }
 const fromStream = (stream: Uint8Array) => writeCfb([{ name: "Workbook", data: stream }]).bytes
-const rowsOf = (wb: Workbook.Workbook, sheet: number) => Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, sheet))))
-const detailsOf = (wb: Workbook.Workbook, sheet: number) => Effect.runPromise(Effect.exit(Workbook.sheetDetails(wb, sheet)))
+const rowsOf = (wb: Workbook.Workbook, sheet: number, meter: Meter = noMeter) =>
+  Effect.runPromise(Effect.exit(metered(meter, Stream.runCollect(Workbook.rows(wb, sheet)))))
+const detailsOf = (wb: Workbook.Workbook, sheet: number, meter: Meter = noMeter) =>
+  Effect.runPromise(Effect.exit(metered(meter, Workbook.sheetDetails(wb, sheet))))
 const sheet = (name: string, records: ReadonlyArray<Uint8Array>, eof = true): Sub => ({ name, records: [X.bof(0x0010), ...records, ...(eof ? [X.eof()] : [])] })
 /** Many records that are no cells (a filler record type the reader ignores). */
 const filler = (n: number) => Array.from({ length: n }, () => X.record(0x0225, X.u16(0)))
@@ -706,11 +711,11 @@ describe("xls sheet: each sheet reads its own substream once", () => {
     ]
     for (const [label, a] of cases) {
       const wb = await Effect.runPromise(Xls.read(fromStream(layout([a, sheet("B", big)]))))
-      const before = work.steps
-      expect(failureOf(await rowsOf(wb, 0)), label).toMatchObject({ _tag: "MalformedFile", reason: "the sheet has no EOF" })
-      expect(failureOf(await detailsOf(wb, 0)), label).toMatchObject({ _tag: "MalformedFile", reason: "the sheet has no EOF" })
+      const steps = counter("steps")
+      expect(failureOf(await rowsOf(wb, 0, steps)), label).toMatchObject({ _tag: "MalformedFile", reason: "the sheet has no EOF" })
+      expect(failureOf(await detailsOf(wb, 0, steps)), label).toMatchObject({ _tag: "MalformedFile", reason: "the sheet has no EOF" })
       // a few steps per record of A, none for B's 20 000
-      expect(work.steps - before, label).toBeLessThan(100)
+      expect(steps.total(), label).toBeLessThan(100)
     }
     // the last sheet ends at the stream's end
     const wb = await Effect.runPromise(Xls.read(fromStream(layout([sheet("A", [X.number(0, 0, 0, 1), X.bof(0x0020)])]))))
@@ -731,9 +736,9 @@ describe("xls sheet: each sheet reads its own substream once", () => {
     const stream = layout([sheet("A", [X.number(0, 0, 0, 1)], false), module((_, offsets) => offsets[1]!), sheet("B", [X.number(0, 0, 0, 2)])])
     const wb = await Effect.runPromise(Xls.read(fromStream(stream)))
     expect(wb.sheets.map((s) => s.name)).toEqual(["A", "B"])
-    const before = work.steps
-    expect(failureOf(await rowsOf(wb, 0))).toMatchObject({ reason: "the sheet has no EOF" })
-    expect(work.steps - before).toBeLessThan(100)
+    const steps = counter("steps")
+    expect(failureOf(await rowsOf(wb, 0, steps))).toMatchObject({ reason: "the sheet has no EOF" })
+    expect(steps.total()).toBeLessThan(100)
     // a module at offset 0 or inside the globals is no error and no substream start
     const stale = layout([sheet("A", [X.number(0, 0, 0, 1)]), { name: "Module1", dt: 6, records: [], at: () => 0 }, sheet("B", [X.number(0, 0, 0, 2)])])
     const ok = await Effect.runPromise(Xls.read(fromStream(stale)))
@@ -747,14 +752,14 @@ describe("xls sheet: each sheet reads its own substream once", () => {
     const stream = layout(subs)
     const wb = await Effect.runPromise(Xls.read(fromStream(stream)))
     const records = 512 * 21
-    const before = work.steps
+    const steps = counter("steps")
     // progress: one sheet per iteration
     for (let k = 0; k < 512; k++) {
-      expect(failureOf(await rowsOf(wb, k))).toMatchObject({ reason: "the sheet has no EOF" })
-      expect(failureOf(await detailsOf(wb, k))).toMatchObject({ reason: "the sheet has no EOF" })
+      expect(failureOf(await rowsOf(wb, k, steps))).toMatchObject({ reason: "the sheet has no EOF" })
+      expect(failureOf(await detailsOf(wb, k, steps))).toMatchObject({ reason: "the sheet has no EOF" })
     }
     // rows: the header pass and the main pass, details: one pass (each step at most once per record)
-    expect(work.steps - before).toBeLessThanOrEqual(3 * records)
+    expect(steps.total()).toBeLessThanOrEqual(3 * records)
   })
 
   it("the rows reader's header pass yields in bounded batches before the first row", async () => {
@@ -779,11 +784,11 @@ describe("xls sheet: the rows reader's phases", () => {
 
   it("the header scan runs over several pulls, and the first row comes only once it has read the whole sheet", async () => {
     const wb = await Effect.runPromise(Xls.read(X.xls(one([X.number(0, 0, 0, 1), ...filler(3 * BATCH_RECORDS)]))))
-    const before = work.steps
-    const run = await countYields(() => Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 1))))
+    const steps = counter("steps")
+    const run = await countYields(() => Effect.runPromise(metered(steps, Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 1)))))
     expect(Array.from(run.value).map((r) => r.index)).toEqual([0])
     expect(run.yields).toBeGreaterThanOrEqual(3)
-    expect(work.steps - before).toBeGreaterThan(3 * BATCH_RECORDS)
+    expect(steps.total()).toBeGreaterThan(3 * BATCH_RECORDS)
   })
 
   it("rows left at the EOF beyond a batch's budget come out over several pulls, then the rows end", async () => {

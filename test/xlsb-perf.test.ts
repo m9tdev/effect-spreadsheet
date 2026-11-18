@@ -2,7 +2,7 @@
  * A 200 000-row XLSB streams with bounded work between event-loop turns,
  * in work linear in its size. Checked without wall-clock limits: records
  * and rows per turn as counts; linearity as the reader's own record
- * counter (`work`, exact whatever the load) from n to 16n rows, and as the
+ * count (on a work meter, exact whatever the load) from n to 16n rows, and as the
  * scaling of its CPU time, with a margin for load. The record counter only
  * shows that records aren't read twice: work per record growing with the
  * sheet (quadratic work) shows in the CPU-time test alone.
@@ -10,11 +10,12 @@
 import { Effect, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import { NO_STYLES } from "../src/internal/xlsb/parts.ts"
-import { sheetDetails, sheetRows, work } from "../src/internal/xlsb/sheet.ts"
+import { sheetDetails, sheetRows } from "../src/internal/xlsb/sheet.ts"
 import { SLICE_BYTES } from "../src/internal/xlsb/slices.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xlsb from "../src/xlsb/index.ts"
+import { counter, metered } from "./helpers/meter.ts"
 import * as B from "./helpers/xlsb.ts"
 import { countYields } from "./helpers/yields.ts"
 
@@ -68,20 +69,25 @@ describe("xlsb: 200 000 rows", () => {
       const wb = await Effect.runPromise(Xlsb.read(await bigXlsb(ROWS, method)))
       let rows = 0
       let hidden = 0
+      const records = counter("records")
       const run = await countYields(
         () =>
-          Effect.runPromise(Stream.runForEach(Workbook.rows(wb, 0), (row) =>
-            Effect.sync(() => {
-              rows++
-              if (row.hidden) hidden++
-            }))),
-        () => work.records
+          Effect.runPromise(metered(
+            records,
+            Stream.runForEach(Workbook.rows(wb, 0), (row) =>
+              Effect.sync(() => {
+                rows++
+                if (row.hidden) hidden++
+              }))
+          )),
+        records.total
       )
       expect([rows, hidden]).toEqual([ROWS, ROWS / 10])
       expect([B.rk(0, 0).length, SLICE_BYTES]).toEqual([MIN_RECORD_BYTES, SLICE])
       expect(run.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
       expect(run.yields).toBeGreaterThanOrEqual(ROWS / (SLICE_BYTES / 2))
-      const details = await countYields(() => Effect.runPromise(Workbook.sheetDetails(wb, 0)), () => work.records)
+      const detailRecords = counter("records")
+      const details = await countYields(() => Effect.runPromise(metered(detailRecords, Workbook.sheetDetails(wb, 0))), detailRecords.total)
       expect(details.value.merges).toHaveLength(1)
       expect(details.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
     }, 300_000)
@@ -95,13 +101,15 @@ describe("xlsb: 200 000 rows", () => {
     const limits = SpreadsheetLimits.defaults
     const context = { part: "one.bin", strings: undefined, styles: NO_STYLES, date1904: false, limits }
     let rows = 0
+    const records = counter("records")
     const run = await countYields(
-      () => Effect.runPromise(Stream.runForEach(sheetRows(Stream.make(part), context), () => Effect.sync(() => void rows++))),
-      () => work.records
+      () => Effect.runPromise(metered(records, Stream.runForEach(sheetRows(Stream.make(part), context), () => Effect.sync(() => void rows++)))),
+      records.total
     )
     expect(rows).toBe(ROWS)
     expect(run.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
-    const details = await countYields(() => Effect.runPromise(sheetDetails(Stream.make(part), "one.bin", limits)), () => work.records)
+    const detailRecords = counter("records")
+    const details = await countYields(() => Effect.runPromise(metered(detailRecords, sheetDetails(Stream.make(part), "one.bin", limits))), detailRecords.total)
     expect(details.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
   }, 300_000)
 
@@ -109,10 +117,10 @@ describe("xlsb: 200 000 rows", () => {
   it("read in linear work: 16x the rows take 16x the records", async () => {
     const records = async (rows: number) => {
       const wb = await Effect.runPromise(Xlsb.read(await bigXlsb(rows)))
-      const before = work.records
-      const out = Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, 0))))
+      const counted = counter("records")
+      const out = Array.from(await Effect.runPromise(metered(counted, Stream.runCollect(Workbook.rows(wb, 0)))))
       expect(out.map((r) => r.index)).toEqual(Array.from({ length: rows }, (_, r) => r))
-      return work.records - before
+      return counted.total()
     }
     const small = await records(SMALL)
     const big = await records(ROWS)

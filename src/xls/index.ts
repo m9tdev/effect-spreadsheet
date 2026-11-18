@@ -37,6 +37,7 @@
  */
 import { Effect, Stream } from "effect"
 import { open as openCfb } from "../internal/cfb/cfb.ts"
+import { type Meter, WorkMeter } from "../internal/meter.ts"
 import { readGlobals } from "../internal/xls/globals.ts"
 import { sheetDetails, sheetRows } from "../internal/xls/sheet.ts"
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../SpreadsheetError.ts"
@@ -66,9 +67,9 @@ const oldBiff = (stream: Uint8Array): UnsupportedFormat | undefined => {
 }
 
 /** The workbook stream: from a compound file, or the bytes themselves when they are a bare BIFF stream. */
-const workbookStream = (bytes: Uint8Array, limits: SpreadsheetLimits.Limits): Uint8Array | SpreadsheetError => {
+const workbookStream = (bytes: Uint8Array, limits: SpreadsheetLimits.Limits, meter: Meter): Uint8Array | SpreadsheetError => {
   if (CFB_MAGIC.every((b, k) => bytes[k] === b)) {
-    const cfb = openCfb(bytes, limits)
+    const cfb = openCfb(bytes, limits, meter)
     if ("_tag" in cfb) return cfb
     const entry = cfb.find("Workbook") ?? cfb.find("Book")
     if (entry === undefined || entry.type !== "stream") {
@@ -102,7 +103,7 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     if (bytes.length > limits.maxInputBytes) {
       return yield* new LimitExceeded({ limit: "maxInputBytes", max: limits.maxInputBytes, actual: bytes.length })
     }
-    const stream = workbookStream(bytes, limits)
+    const stream = workbookStream(bytes, limits, yield* WorkMeter)
     if ("_tag" in stream) return yield* Effect.fail(stream)
     const globals = yield* readGlobals(stream, limits)
 

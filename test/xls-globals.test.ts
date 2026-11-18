@@ -4,7 +4,7 @@ import { Effect, Exit, Stream } from "effect"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { readString, type Text, textDecoder } from "../src/internal/xls/fields.ts"
-import { BATCH_BYTES, batches, readGlobals } from "../src/internal/xls/globals.ts"
+import { BATCH_BYTES, readGlobals } from "../src/internal/xls/globals.ts"
 import { BATCH_RECORDS } from "../src/internal/xls/sheet.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
@@ -12,6 +12,7 @@ import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xls from "../src/xls/index.ts"
 import { writeCfb } from "./helpers/cfb.ts"
+import { counter, metered } from "./helpers/meter.ts"
 import { failureOf } from "./helpers/run.ts"
 import { countYields } from "./helpers/yields.ts"
 import * as X from "./helpers/xls.ts"
@@ -472,9 +473,9 @@ describe("xls globals: long work yields", () => {
    */
   const turns = async (globals: ReadonlyArray<Uint8Array>, records: ReadonlyArray<Uint8Array> = []) => {
     const bytes = X.workbookStream({ globals, sheets: [{ name: "S", records }] })
-    const before = batches.count
-    const result = await countYields(() => Effect.runPromise(Xls.read(bytes)), () => batches.count)
-    return { ...result, batches: batches.count - before }
+    const batches = counter("batches")
+    const result = await countYields(() => Effect.runPromise(metered(batches, Xls.read(bytes))), batches.total)
+    return { ...result, batches: batches.total() }
   }
 
   it("a flood of small records (XF) is read in batches of BATCH_RECORDS, yielding between them", async () => {

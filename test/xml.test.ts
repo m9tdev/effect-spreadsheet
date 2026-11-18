@@ -7,6 +7,7 @@ import { parse, XmlDecoder } from "../src/internal/xml/parse.ts"
 import { isName, type XmlHandler, XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
 import { isSpreadsheetError, type SpreadsheetError } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
+import { counter, metered } from "./helpers/meter.ts"
 import { failureOf } from "./helpers/run.ts"
 
 const limits = SpreadsheetLimits.defaults
@@ -32,14 +33,15 @@ const tokenize = (
       else events.push(["text", value])
     }
   }
-  const tokenizer = new XmlTokenizer(handler, l)
+  const characters = counter("characters")
+  const tokenizer = new XmlTokenizer(handler, l, undefined, characters)
   let error: SpreadsheetError | undefined
   for (const piece of pieces) {
     error = tokenizer.feed(piece)
     if (error !== undefined) break
   }
   error ??= tokenizer.end()
-  return { events, error, work: tokenizer.work, total: pieces.reduce((n, p) => n + p.length, 0) }
+  return { events, error, work: characters.total(), total: pieces.reduce((n, p) => n + p.length, 0) }
 }
 
 const one = (doc: string, l?: SpreadsheetLimits.Limits) => tokenize([doc], l)
@@ -512,9 +514,10 @@ describe("xml bytes", () => {
         if ("_tag" in archive) throw new Error(`${name}: ${archive._tag}`)
         for (const entry of archive.entries.filter((e) => /\.(xml|rels)$/.test(e.name))) {
           const handler: XmlHandler = { open: () => undefined, close: () => undefined, text: () => undefined }
-          const exit = await Effect.runPromise(Effect.exit(parse(archive.read(entry), handler, limits, entry.name)))
+          const characters = counter("characters")
+          const exit = await Effect.runPromise(Effect.exit(metered(characters, parse(archive.read(entry), handler, limits, entry.name))))
           expect(Exit.isSuccess(exit), `${name}: ${entry.name}: ${JSON.stringify(failureOf(exit))}`).toBe(true)
-          if (Exit.isSuccess(exit)) expect(exit.value.work).toBeLessThanOrEqual(6 * entry.uncompressedSize + 64)
+          expect(characters.total()).toBeLessThanOrEqual(6 * entry.uncompressedSize + 64)
           parts++
         }
       }

@@ -3,9 +3,11 @@ import { afterAll, describe, expect, it } from "vitest"
 import { FuzzHost } from "./fuzz/host.ts"
 import { RecordReader, readBof, EOF } from "../src/internal/biff/records.ts"
 import { type Cfb, type CfbEntry, open } from "../src/internal/cfb/cfb.ts"
+import type { Meter } from "../src/internal/meter.ts"
 import { MalformedFile } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import { type CfbItem, patch32, sectorOffset, writeCfb } from "./helpers/cfb.ts"
+import { counter } from "./helpers/meter.ts"
 
 const limits = SpreadsheetLimits.defaults
 
@@ -19,8 +21,8 @@ const pseudoRandom = (n: number, seed = 1): Uint8Array => {
   return out
 }
 
-const openOk = (bytes: Uint8Array, l = limits): Cfb => {
-  const cfb = open(bytes, l)
+const openOk = (bytes: Uint8Array, l = limits, meter?: Meter): Cfb => {
+  const cfb = open(bytes, l, meter)
   if ("_tag" in cfb) throw new Error(`open failed: ${cfb._tag} ${(cfb as { reason?: string }).reason}`)
   return cfb
 }
@@ -46,7 +48,8 @@ const SAMPLE: ReadonlyArray<CfbItem> = [
 describe("cfb: reading", () => {
   it("reads big, mini, empty and nested streams back exactly", () => {
     const { bytes } = writeCfb(SAMPLE)
-    const cfb = openOk(bytes)
+    const sectors = counter("sectors")
+    const cfb = openOk(bytes, limits, sectors)
     expect(cfb.entries.map((e) => [e.path, e.type])).toEqual([
       ["Workbook", "stream"],
       ["\u0005SummaryInformation", "stream"],
@@ -65,7 +68,7 @@ describe("cfb: reading", () => {
     expect(readOk(cfb, "_vba_project_cur/vba/DIR")).toEqual(pseudoRandom(700, 5))
     expect(reasonOf(cfb.read(cfb.find("_VBA_PROJECT_CUR")!))).toMatch(/not a stream/)
     // work: every sector at most a few times
-    expect(cfb.sectorsVisited()).toBeLessThanOrEqual(3 * (bytes.length / 512))
+    expect(sectors.total()).toBeLessThanOrEqual(3 * (bytes.length / 512))
   })
 
   it("a stream in consecutive sectors is a view of the file; a fragmented one is gathered", () => {

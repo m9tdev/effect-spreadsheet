@@ -21,6 +21,7 @@
 import { Effect, Stream } from "effect"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
+import { WorkMeter } from "../meter.ts"
 
 export interface Biff12Record {
   readonly type: number
@@ -42,7 +43,7 @@ const BODY = 2
 export class RecordSplitter {
   /** Offset in the part of the next byte to consume. */
   offset = 0
-  /** Records completed so far: a work counter. */
+  /** Records completed so far: the work meter's units. */
   records = 0
   private readonly part: string
   private readonly maxRecordBytes: number
@@ -168,43 +169,30 @@ export class RecordSplitter {
   }
 }
 
-/** The result of `readRecords`: the records read, for cost checks. */
-export interface RecordStats {
-  readonly records: number
-}
-
 /**
  * Reads a part's records from its byte stream, calling `onRecord` for each.
  * Fails with the first error (from the stream, the record layer or the
  * handler). Each chunk is at most one inflate piece, so the work between
- * the stream's turns is bounded.
+ * the stream's turns is bounded. The records of each chunk go to the work
+ * meter.
  */
 export const readRecords = <E, R>(
   bytes: Stream.Stream<Uint8Array, E, R>,
   onRecord: RecordHandler,
   limits: Pick<Limits, "maxRecordBytes">,
   part: string
-): Effect.Effect<RecordStats, E | SpreadsheetError, R> =>
-  Effect.suspend(() => {
+): Effect.Effect<void, E | SpreadsheetError, R> =>
+  Effect.flatMap(WorkMeter, (meter) => {
     const splitter = new RecordSplitter(part, limits.maxRecordBytes)
     return Stream.runForEach(bytes, (chunk) => {
+      const before = splitter.records
       const error = splitter.feed(chunk, onRecord)
+      meter.add("records", splitter.records - before)
       return error === undefined ? Effect.void : Effect.fail(error)
     }).pipe(
       Effect.flatMap(() => {
         const error = splitter.end()
-        return error === undefined ? Effect.succeed({ records: splitter.records }) : Effect.fail(error)
+        return error === undefined ? Effect.void : Effect.fail(error)
       })
     )
   })
-
-/** Every record of a whole part (for tests and small parts). */
-export const splitAll = (bytes: Uint8Array, part: string, maxRecordBytes: number): Array<Biff12Record> | SpreadsheetError => {
-  const out: Array<Biff12Record> = []
-  const splitter = new RecordSplitter(part, maxRecordBytes)
-  const error = splitter.feed(bytes, (record) => {
-    out.push(record)
-    return undefined
-  }) ?? splitter.end()
-  return error ?? out
-}
