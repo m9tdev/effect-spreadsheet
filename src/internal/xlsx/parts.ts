@@ -169,7 +169,7 @@ export const readWorkbookPart = (
           }
           const state = attr(attributes, "state")
           sheets.push({
-            name: attr(attributes, "name") ?? `Sheet${sheets.length + 1}`,
+            name: unescapeXstring(attr(attributes, "name") ?? `Sheet${sheets.length + 1}`),
             visibility: state === "hidden" ? "hidden" : state === "veryHidden" ? "veryHidden" : "visible",
             relationshipId: relationshipId(attributes)
           })
@@ -182,7 +182,7 @@ export const readWorkbookPart = (
           }
           const local = attr(attributes, "localSheetId")
           const scope = local !== undefined && /^\d{1,9}$/.test(local) ? Number(local) : undefined
-          name = { name: attr(attributes, "name") ?? "", scope, hidden: isTrue(attr(attributes, "hidden")), text: [], length: 0 }
+          name = { name: unescapeXstring(attr(attributes, "name") ?? ""), scope, hidden: isTrue(attr(attributes, "hidden")), text: [], length: 0 }
           return
         }
       }
@@ -191,7 +191,7 @@ export const readWorkbookPart = (
     close: (element) => {
       if (element === "sheets") inSheets = false
       else if (element === "definedName" && name !== undefined) {
-        definedNames.push({ name: name.name, formula: name.text.join(""), scope: name.scope, hidden: name.hidden })
+        definedNames.push({ name: name.name, formula: unescapeXstring(name.text.join("")), scope: name.scope, hidden: name.hidden })
         name = undefined
       }
     },
