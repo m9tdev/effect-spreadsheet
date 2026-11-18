@@ -136,9 +136,10 @@ export const makeCounted = (header: Iterable<HeaderEntry>): CountedRecordKeys =>
  *  Sparse: only the cells present. Never a dense array up to the max column.
  *  Doesn't throw on a violated precondition: a repeated column keeps its
  *  last entry (also an empty one), like the cells a reader keeps for a row
- *  and like the data row's own values; descending entries are put in column
- *  order, and entries whose column isn't a non-negative safe integer are
- *  ignored. */
+ *  and like a data row in `toRecords`, whose last cell in a column (also an
+ *  Empty one) gives that column's value; descending entries are put in
+ *  column order, and entries whose column isn't a non-negative safe integer
+ *  are ignored. */
 export const make = (header: Iterable<HeaderEntry>): RecordKeys => {
   const { named, headerKey, key } = makeCounted(header)
   return { named, headerKey, key }

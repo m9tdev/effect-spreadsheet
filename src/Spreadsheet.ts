@@ -166,7 +166,9 @@ export const readCsv: (
  * (plus `options.limits`), not from the workbook the rows came from.
  *
  * Values are `Cell.value`s (text, number, boolean, Date, error code).
- * Rows without values are skipped unless `blankRows: true`.
+ * Rows without values are skipped unless `blankRows: true`. A row with more
+ * than one cell in a column (the readers never make one) takes the last,
+ * also when it is Empty, like the cells the readers keep.
  *
  * On a stream it works lazily, keeping the stream's error and context; on
  * an iterable of rows it gives an Effect of the array.
