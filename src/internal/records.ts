@@ -220,6 +220,9 @@ export class RecordBuilder {
   /** The record for a data row, once the header is known. */
   private record(row: Row, phase: Ready): Record<string, unknown> | undefined | LimitExceeded {
     const namer = phase.namer
+    const explicit = phase.explicit
+    // One cell per column: the last one, also when it is Empty.
+    const cells = lastPerColumn(row.cells)
     const record: Record<string, unknown> = {}
     let empty = true
     const defval = this.options.defval
@@ -228,21 +231,20 @@ export class RecordBuilder {
       // Only header-named columns without a value in this row are fills;
       // count them before writing anything. progress: one cell per iteration.
       let valued = 0
-      for (const cell of row.cells) {
+      for (const cell of cells) {
         if (cell._tag !== "Empty" && namer.headerKey(cell.column) !== undefined) valued++
       }
-      const over = this.countFills(Math.max(0, named.length - valued))
+      const over = this.countFills(named.length - valued)
       if (over !== undefined) return over
       // every header key is written once below (values overwrite): batch by writes
-      this.keys += Math.min(valued, named.length)
+      this.keys += valued
       // progress: one header-named column per iteration
       for (const [, key] of named) set(record, key, defval)
     }
     const over = this.countCells(row.cells.length)
     if (over !== undefined) return over
-    const explicit = phase.explicit
     // progress: one cell per iteration
-    for (const cell of row.cells) {
+    for (const cell of cells) {
       if (explicit !== undefined && (cell.column >= explicit.length || explicit.dropped.has(cell.column))) continue
       const v = Cell.value(cell)
       // An Empty cell is not data: a header-named column already holds its
@@ -254,6 +256,31 @@ export class RecordBuilder {
     if (empty && !this.options.blankRows) return undefined
     return record
   }
+}
+
+/**
+ * A row's cells with one cell per column: the last cell of a repeated
+ * column, also when it is Empty, as the readers keep it. A column stays at
+ * the place of its first cell. Rows whose columns strictly ascend (all rows
+ * the readers make) are returned as they are.
+ */
+const lastPerColumn = (cells: ReadonlyArray<Cell.Cell>): ReadonlyArray<Cell.Cell> => {
+  let previous = -1
+  let ascending = true
+  // progress: one cell per iteration
+  for (const cell of cells) {
+    if (!(cell.column > previous)) {
+      ascending = false
+      break
+    }
+    previous = cell.column
+  }
+  if (ascending) return cells
+  // Map.set on a column already present keeps its place and replaces its cell.
+  const byColumn = new Map<number, Cell.Cell>()
+  // progress: one cell per iteration
+  for (const cell of cells) byColumn.set(cell.column, cell)
+  return Array.from(byColumn.values())
 }
 
 /** Keys written per emitted batch: the stream yields between batches. */

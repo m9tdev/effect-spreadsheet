@@ -277,7 +277,8 @@ Why it can't hang, and why the total cost is O(n) expected:
 
 `make` must not throw on a violated precondition (repeated or descending column
 in the entries). If a column repeats, the last entry wins (also an empty one),
-like the cells the readers keep for a row and like the data row's own values.
+like the cells the readers keep for a row and like a data row in `toRecords`,
+where the last cell of a column (also an Empty one) gives its value.
 Every loop stays bounded regardless.
 
 ## 7. Existing tests that must keep passing (unchanged)

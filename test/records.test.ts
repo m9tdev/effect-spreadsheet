@@ -451,4 +451,74 @@ describe("toRecords header phase", () => {
     }))
     assert.deepStrictEqual(fromFile, [{ y: 2 }])
   })
+
+  it("a data row with two cells in one column takes the last, also an empty one, like the readers' rows", async () => {
+    const rows: Array<Row> = [
+      { index: 0, hidden: false, cells: [Cell.text(0, "x")] },
+      { index: 1, hidden: false, cells: [Cell.number(0, 1), Cell.empty(0)] },
+      { index: 2, hidden: false, cells: [Cell.number(0, 9)] }
+    ]
+    assert.deepStrictEqual(recs(rows, { header: "first-row" }), [{ x: 9 }])
+    assert.deepStrictEqual(recs(rows, { header: 0 }), [{ x: 9 }])
+    assert.deepStrictEqual(recs(rows.slice(1), { header: ["x"] }), [{ x: 9 }])
+    assert.deepStrictEqual(recs(rows, { header: "first-row", defval: null }), [{ x: 9 }])
+    assert.deepStrictEqual(recs(rows, { header: "first-row", defval: null, blankRows: true }), [{ x: null }, { x: 9 }])
+    assert.deepStrictEqual(recs(rows, { header: "first-row", blankRows: true }), [{}, { x: 9 }])
+    // a later value still replaces an earlier one, and an earlier empty cell
+    const later: Array<Row> = [rows[0]!, { index: 1, hidden: false, cells: [Cell.empty(0), Cell.number(0, 2)] }]
+    assert.deepStrictEqual(recs(later, { header: "first-row" }), [{ x: 2 }])
+    // the XLSX reader keeps the last cell of a column, so its rows give the same records
+    const bytes = await buildXlsx({
+      sheets: [{
+        name: "S",
+        data: `<row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c></row>` +
+          `<row r="2"><c r="A2"><v>1</v></c><c r="A2"/></row>` +
+          `<row r="3"><c r="A3"><v>9</v></c></row>`
+      }]
+    })
+    const fromFile = await Effect.runPromise(Effect.gen(function*() {
+      const wb = yield* Xlsx.read(bytes)
+      return Array.from(yield* Stream.runCollect(Spreadsheet.toRecords(Workbook.rows(wb, 0), { header: "first-row" })))
+    }))
+    assert.deepStrictEqual(fromFile, [{ x: 9 }])
+  })
+
+  it("an unnamed column whose last cell in a row is empty takes no __EMPTY key in that row", () => {
+    const rows: Array<Row> = [
+      { index: 0, hidden: false, cells: [Cell.text(0, "x")] },
+      { index: 1, hidden: false, cells: [Cell.text(1, "a"), Cell.empty(1), Cell.number(0, 1)] },
+      { index: 2, hidden: false, cells: [Cell.text(2, "b")] }
+    ]
+    const records = recs(rows, { header: "first-row" })
+    assert.deepStrictEqual(records, [{ x: 1 }, { __EMPTY: "b" }])
+    // key order stays the order in which the row's columns first appear
+    const order: Array<Row> = [
+      { index: 0, hidden: false, cells: [Cell.text(0, "x"), Cell.text(1, "y")] },
+      { index: 1, hidden: false, cells: [Cell.text(1, "v"), Cell.number(0, 1), Cell.text(1, "w")] }
+    ]
+    expect(Object.entries(recs(order, { header: "first-row" })[0]!)).toEqual([["y", "w"], ["x", 1]])
+  })
+
+  it.effect("defval fills of a row that repeats a named column count against maxRecordFields", () =>
+    Effect.gen(function*() {
+      // header a, b; the row has two values in column a and none in b: one fill
+      const rows: Array<Row> = [
+        { index: 0, hidden: false, cells: [Cell.text(0, "a"), Cell.text(1, "b")] },
+        { index: 1, hidden: false, cells: [Cell.text(0, "1"), Cell.text(0, "2")] }
+      ]
+      const ok = yield* Spreadsheet.toRecords(rows, { header: "first-row", defval: 0, limits: { maxRecordFields: 1 } })
+      assert.deepStrictEqual(ok, [{ a: "2", b: 0 }])
+      const over = yield* Effect.flip(
+        Spreadsheet.toRecords(rows, { header: "first-row", defval: 0, limits: { maxRecordFields: 0 } })
+      )
+      assert(over._tag === "LimitExceeded")
+      assert.deepStrictEqual([over.limit, over.max, over.actual], ["maxRecordFields", 0, 1])
+      // a value then an empty cell in column a leaves a filled too: two fills
+      const emptied: Array<Row> = [rows[0]!, { index: 1, hidden: false, cells: [Cell.text(0, "1"), Cell.empty(0)] }]
+      const both = yield* Effect.flip(
+        Spreadsheet.toRecords(emptied, { header: "first-row", defval: 0, limits: { maxRecordFields: 1 } })
+      )
+      assert(both._tag === "LimitExceeded")
+      assert.deepStrictEqual([both.limit, both.actual], ["maxRecordFields", 2])
+    }))
 })
