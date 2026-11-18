@@ -103,6 +103,21 @@ const kindOf = (entry: ZipEntry): EntryKind => {
 const names = new TextDecoder("utf-8")
 
 /**
+ * Whether the `length` name bytes at `start` decode (as UTF-8) to `name`.
+ * ASCII bytes equal to `name`'s characters are compared directly, without
+ * decoding; anything else is decoded.
+ */
+const sameName = (bytes: Uint8Array, start: number, length: number, name: string): boolean => {
+  if (length === name.length) {
+    let i = 0
+    // progress: i increases up to length
+    while (i < length && bytes[start + i]! < 0x80 && bytes[start + i] === name.charCodeAt(i)) i++
+    if (i === length) return true
+  }
+  return names.decode(bytes.subarray(start, start + length)) === name
+}
+
+/**
  * Checks one entry's local header against its directory entry (signature,
  * compression method, name) and that its data lies in the buffer, before
  * the central directory; the entry with where its data is, and how it
@@ -136,7 +151,7 @@ const locateIn = (
   if (end > directory.directoryStart) return fail("entry data overlaps the central directory", entry.name, at)
   // The local name must be the directory's name (decoded the same way); a
   // mismatch means the directory points at the wrong data.
-  if (names.decode(bytes.subarray(at + 30, at + 30 + nameLength)) !== entry.name) {
+  if (!sameName(bytes, at + 30, nameLength, entry.name)) {
     return fail("local header name differs from the directory", entry.name, at)
   }
   return Result.succeed({ ...entry, data: { start, end }, kind: kindOf(entry) })

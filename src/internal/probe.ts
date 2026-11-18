@@ -43,7 +43,7 @@ import { contentType, lookup, type Named, packageRels } from "./opc.ts"
 import { fixedWorkbook } from "./package.ts"
 import { biffBof, CFB_MAGIC, plainFormat, startsWith, ZIP_MAGICS } from "./sniff.ts"
 import { type Archive, locateEntry, openDirectory } from "./zip/archive.ts"
-import { type Directory, normalizeName, readDirectory } from "./zip/directory.ts"
+import { type Directory, normalizeName, readDirectory, type ZipEntry } from "./zip/directory.ts"
 
 /**
  * A BIFF5/8 workbook stream. One in a compound file is read from it only
@@ -199,15 +199,15 @@ const probePackage = (archive: Archive, limits: Limits): Effect.Effect<Package |
   })
 
 /**
- * Whether a zip's `mimetype` entry names an ODF spreadsheet (or template).
- * The entry must be stored, with the local header the archive would
- * accept, and short.
+ * Whether one of a zip's `mimetype` entries names an ODF spreadsheet (or
+ * template); the last one that reads decides. An entry reads if it is
+ * stored, with the local header the archive would accept, and short.
  */
-const isOds = (bytes: Uint8Array, directory: Directory): boolean => {
+const isOds = (bytes: Uint8Array, directory: Directory, mimetypes: ReadonlyArray<ZipEntry>): boolean => {
   let mimetype: string | undefined
   // progress: one entry per iteration, entries bounded by maxZipEntries
-  for (const entry of directory.entries) {
-    if (normalizeName(entry.name) !== "mimetype") continue
+  for (const entry of mimetypes) {
+    if (entry.method !== 0) continue // not stored: no need to look at its local header
     const located = locateEntry(bytes, directory, entry)
     if (Result.isFailure(located) || located.success.kind !== "stored") continue
     const { start, end } = located.success.data
@@ -215,13 +215,6 @@ const isOds = (bytes: Uint8Array, directory: Directory): boolean => {
   }
   return mimetype === ODS_MIME || mimetype === `${ODS_MIME}-template`
 }
-
-/** Whether a central directory has a name that makes the zip look like an OOXML package. */
-const looksLikePackage = (directory: Directory): boolean =>
-  directory.entries.some((entry) => {
-    const name = normalizeName(entry.name)
-    return name === "_rels/.rels" || name === fixedWorkbook.xlsx || name === fixedWorkbook.xlsb
-  })
 
 /**
  * What a zip is: a package (opened), an ODF spreadsheet or just a zip. A
@@ -231,8 +224,20 @@ const probeZip = (bytes: Uint8Array, limits: Limits): Effect.Effect<Package | De
   const read = readDirectory(bytes, limits)
   if (Result.isFailure(read)) return Effect.fail(read.failure)
   const directory = read.success
-  const other = (): Detected => ({ _tag: "Detected", format: isOds(bytes, directory) ? "ods" : "zip" })
-  if (!looksLikePackage(directory)) return Effect.succeed(other())
+  // whether a name makes it look like an OOXML package, and the `mimetype` entries
+  let looksLikePackage = false
+  const mimetypes: Array<ZipEntry> = []
+  // progress: one entry per iteration, entries bounded by maxZipEntries
+  for (const entry of directory.entries) {
+    const name = normalizeName(entry.name)
+    if (name === "_rels/.rels" || name === fixedWorkbook.xlsx || name === fixedWorkbook.xlsb) looksLikePackage = true
+    else if (name === "mimetype") mimetypes.push(entry)
+  }
+  const other = (): Detected => ({
+    _tag: "Detected",
+    format: mimetypes.length > 0 && isOds(bytes, directory, mimetypes) ? "ods" : "zip"
+  })
+  if (!looksLikePackage) return Effect.succeed(other())
   const opened = openDirectory(bytes, directory, limits)
   if (Result.isFailure(opened)) return Effect.fail(opened.failure)
   return Effect.map(probePackage(opened.success, limits), (found) => found ?? other())
