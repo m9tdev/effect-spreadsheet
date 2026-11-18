@@ -27,9 +27,10 @@
  * @since 0.1.0
  */
 import { Effect, Stream } from "effect"
-import { validateEncoding } from "../internal/csv/decode.ts"
-import { rowsFromByteStream, validateDelimiter } from "../internal/csv/reader.ts"
-import { LimitExceeded, type SpreadsheetError } from "../SpreadsheetError.ts"
+import { readCsvWorkbook, resolved, toStream } from "../internal/csv/read.ts"
+import { rowsFromByteStream } from "../internal/csv/reader.ts"
+import { accept, resolveLimits } from "../internal/input.ts"
+import { type SpreadsheetError } from "../SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../SpreadsheetLimits.ts"
 import * as Workbook from "../Workbook.ts"
 
@@ -76,17 +77,6 @@ export interface ReadOptions {
   readonly limits?: SpreadsheetLimits.LimitOverrides | undefined
 }
 
-const resolved = (options: ReadOptions | undefined, limits: SpreadsheetLimits.Limits) => ({
-  encoding: options?.encoding ?? "auto",
-  delimiter: options?.delimiter,
-  inferTypes: options?.inferTypes ?? false,
-  strict: options?.strict ?? false,
-  limits
-})
-
-const toStream = <E, R>(input: Uint8Array | Stream.Stream<Uint8Array, E, R>): Stream.Stream<Uint8Array, E, R> =>
-  input instanceof Uint8Array ? Stream.succeed(input) as Stream.Stream<Uint8Array, E, R> : input
-
 /**
  * Streams the rows of delimited text. A `Uint8Array` is read in 64 KiB
  * pieces; a byte stream may be chunked anyhow (chunk boundaries may split
@@ -124,18 +114,9 @@ export const read = (
   input: Uint8Array | Stream.Stream<Uint8Array, SpreadsheetError>,
   options?: ReadOptions
 ): Effect.Effect<Workbook.Workbook, SpreadsheetError> =>
-  Effect.gen(function*() {
-    const limits = yield* SpreadsheetLimits.resolve(options?.limits)
-    if (input instanceof Uint8Array && input.length > limits.maxInputBytes) {
-      return yield* new LimitExceeded({ limit: "maxInputBytes", max: limits.maxInputBytes, actual: input.length })
-    }
-    const invalid = validateDelimiter(options?.delimiter) ?? validateEncoding(options?.encoding ?? "auto")
-    if (invalid !== undefined) return yield* invalid
-    const sheet: Workbook.SheetInfo = { name: options?.sheetName ?? "Sheet1", index: 0, visibility: "visible" }
-    return Workbook.make({
-      format: "csv",
-      sheets: [sheet],
-      limits,
-      rows: (_, effective) => rowsFromByteStream(toStream(input), resolved(options, effective))
-    })
-  })
+  // suspend: the options are read when the effect runs, each time it runs
+  Effect.suspend(() =>
+    input instanceof Uint8Array
+      ? accept(input, options?.limits, (accepted) => readCsvWorkbook(input, accepted.limits, options))
+      : Effect.flatMap(resolveLimits(options?.limits), (limits) => readCsvWorkbook(input, limits, options))
+  )

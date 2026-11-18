@@ -35,12 +35,9 @@
  * @since 0.1.0
  */
 import { Effect } from "effect"
-import { type PackageFormat, readPackage } from "../internal/package.ts"
-import { readSharedStrings, readStyles } from "../internal/xlsb/parts.ts"
-import { sheetDetails, sheetRows } from "../internal/xlsb/sheet.ts"
-import { definedNames, malformed, readExternalBooks, readWorkbookBin, type WorkbookBin } from "../internal/xlsb/workbook.ts"
-import { open } from "../internal/zip/archive.ts"
-import { LimitExceeded, type SpreadsheetError } from "../SpreadsheetError.ts"
+import { accept } from "../internal/input.ts"
+import { readXlsb } from "../internal/xlsb/read.ts"
+import { type SpreadsheetError } from "../SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../SpreadsheetLimits.ts"
 import * as Workbook from "../Workbook.ts"
 
@@ -67,33 +64,5 @@ export interface ReadOptions {
  * @category readers
  */
 export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Workbook.Workbook, SpreadsheetError> =>
-  Effect.gen(function*() {
-    const limits = yield* SpreadsheetLimits.resolve(options?.limits)
-    if (bytes.length > limits.maxInputBytes) {
-      return yield* new LimitExceeded({ limit: "maxInputBytes", max: limits.maxInputBytes, actual: bytes.length })
-    }
-    const archive = yield* Effect.fromResult(open(bytes, limits))
-
-    return yield* readPackage(archive, limits, XLSB)
-  })
-
-const XLSB: PackageFormat<WorkbookBin> = {
-  format: "xlsb",
-  fallbackWorkbook: "xl/workbook.bin",
-  malformed,
-  readWorkbook: readWorkbookBin,
-  readStrings: readSharedStrings,
-  readStyles,
-  // the sheet names of external workbooks that defined names point into
-  // (each external link part read once, however many books share it; a missing one leaves #REF!)
-  definedNames: (workbook, rels, archive, limits) =>
-    Effect.map(
-      readExternalBooks(archive, workbook, (id) => {
-        const target = rels.byId(id)?.target
-        return target?._tag === "Part" ? target.entry : undefined
-      }, limits),
-      (externalSheets) => definedNames(workbook, externalSheets)
-    ),
-  rows: sheetRows,
-  details: sheetDetails
-}
+  // suspend: the options are read when the effect runs, each time it runs
+  Effect.suspend(() => accept(bytes, options?.limits, readXlsb))
