@@ -25,9 +25,8 @@ const read = async (data: string, limits?: LimitOverrides) => {
   return exit.value.map((r) => [r.index, r.cells.map((c) => [c.column, c._tag, Cell.value(c) ?? null])])
 }
 
-/** Cells the reader holds for its open row (read from its private state). */
-const heldCells = (rows: SheetRows): number =>
-  (rows as unknown as { readonly row: { readonly cells: ReadonlyArray<unknown> } | undefined }).row?.cells.length ?? 0
+/** Cells the reader holds for its open row. */
+const heldCells = (rows: SheetRows): number => rows.rows.held
 
 /** A SheetRows fed by a tokenizer, one piece of XML at a time. */
 const driver = (maxColumns: number) => {
@@ -54,8 +53,9 @@ describe("xlsx sheet: repeated columns", () => {
     expect(most).toBeLessThanOrEqual(2 * 8 + 1)
     feed(`</row></sheetData></worksheet>`)
     end()
-    expect(rows.out).toHaveLength(1)
-    expect(rows.out[0]!.cells.map((c) => [c.column, Cell.value(c)])).toEqual(
+    const out = rows.take()
+    expect(out).toHaveLength(1)
+    expect(out[0]!.cells.map((c) => [c.column, Cell.value(c)])).toEqual(
       Array.from({ length: 8 }, (_, c) => [c, 8000 - 8 + 7 - c])
     )
   })
@@ -70,7 +70,7 @@ describe("xlsx sheet: repeated columns", () => {
     // the last held cell (D), so the row is unsorted again and C1 = 100 wins
     feed(`<c><v>100</v></c></row></sheetData></worksheet>`)
     end()
-    expect(rows.out[0]!.cells.map((c) => [c.column, Cell.value(c)])).toEqual([[0, 5], [1, 8], [2, 100], [3, 6]])
+    expect(rows.take()[0]!.cells.map((c) => [c.column, Cell.value(c)])).toEqual([[0, 5], [1, 8], [2, 100], [3, 6]])
   })
 
   it("duplicate columns: the last cell of a column wins, as before compaction existed", async () => {

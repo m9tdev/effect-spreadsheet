@@ -46,7 +46,7 @@ import { type Biff12Record, readRecords, recordDecoder } from "../biff12/records
 import { decoded, step } from "../decode.ts"
 import { type CellStyles, numberCell } from "../numFmt.ts"
 import { LayoutBuilder } from "../sheet/layout.ts"
-import { IGNORED, RowBuilder } from "../sheet/rows.ts"
+import { RowBuilder } from "../sheet/rows.ts"
 import { malformed, tooLong } from "./workbook.ts"
 
 export interface SheetContext {
@@ -145,7 +145,9 @@ export class SheetRows {
     const part = context.part
     this.rows = new RowBuilder<Biff12Record>(context.limits, {
       cellOutsideRow: (record) => malformed(`cell record 0x${record.type.toString(16)} outside a row`, part, record.offset),
-      malformed: (reason, record) => malformed(reason, part, record.offset)
+      malformed: (reason, record) => malformed(reason, part, record.offset),
+      // cell records don't name their row: never reached
+      cellInOtherRow: (row, record) => malformed(`cell record 0x${record.type.toString(16)} outside row ${row + 1}`, part, record.offset)
     })
   }
 
@@ -184,8 +186,8 @@ export class SheetRows {
   private cell(record: Biff12Record): SpreadsheetError | undefined {
     const { part, limits } = this.context
     const rows = this.rows
-    const outside = rows.beginCell(record)
-    if (outside !== undefined) return outside === IGNORED ? undefined : outside
+    const start = rows.beginCell(record)
+    if (start !== "read") return start === "skip" ? undefined : start
     const type = record.type
     const data = record.data
     const f = new Fields(data)
@@ -196,7 +198,7 @@ export class SheetRows {
     const at = short ? 4 : 8
     const truncated = () => malformed(`truncated cell record 0x${type.toString(16)}`, part, record.offset)
     if (column === undefined || style === undefined) return truncated()
-    const placed = rows.placeCell(column)
+    const placed = rows.placeCell(column, record)
     if (placed !== undefined) return placed
     let cell: Cell.Cell
     switch (type) {
