@@ -235,4 +235,35 @@ describe("xlsb: external books by relationship target", () => {
     const wb = await Effect.runPromise(Xlsb.read(bytes))
     expect(wb.definedNames.map((n) => n.formula)).toEqual(["[1]Rates!$A$1", "#REF!$A$1", "#REF!$A$1", "#REF!$A$1", "[5]Rates!$A$1"])
   })
+
+  it("reads each external link part for its own books", async () => {
+    const B = await import("./helpers/xlsb.ts")
+    const link = (sheet: string) => B.concat([B.record(0x168, [...B.u16(0), ...B.wide("rId1"), ...B.u32(0xFFFFFFFF)]), B.supTabs([sheet])])
+    const books = ["x1", "x2", "x3"]
+    const globals = [
+      B.supSelf(),
+      ...books.map((id) => B.supBookSrc(id)),
+      B.externSheet(books.map((_, k) => [k + 1, 0, 0] as const)),
+      ...books.map((_, k) => B.name(`N${k}`, B.ref3d(k, 0, 0)))
+    ]
+    const bytes = await xlsbPackage({
+      sheets: [{ name: "S", relationshipId: "a" }],
+      workbookPath: "xl/workbook.bin",
+      packageRels: [{ id: "r", kind: "officeDocument", target: "xl/workbook.bin" }],
+      workbookRels: [
+        { id: "a", kind: "worksheet", target: "worksheets/sheet1.bin" },
+        { id: "x1", kind: "externalLink", target: "externalLinks/externalLink1.bin" },
+        { id: "x2", kind: "externalLink", target: "externalLinks/externalLink2.bin" },
+        { id: "x3", kind: "externalLink", target: "externalLinks/externalLink1.bin" }
+      ],
+      parts: [
+        { name: "xl/worksheets/sheet1.bin", data: worksheet("xlsb", 1) },
+        { name: "xl/externalLinks/externalLink1.bin", data: link("Rates") },
+        { name: "xl/externalLinks/externalLink2.bin", data: link("Prices") }
+      ],
+      globals
+    })
+    const wb = await Effect.runPromise(Xlsb.read(bytes))
+    expect(wb.definedNames.map((n) => n.formula)).toEqual(["[1]Rates!$A$1", "[2]Prices!$A$1", "[3]Rates!$A$1"])
+  })
 })
