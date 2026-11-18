@@ -59,7 +59,7 @@ export interface SheetEntry {
 export type Book =
   | { readonly kind: "self" }
   | { readonly kind: "addin" }
-  | { readonly kind: "external"; readonly link: number; readonly relationshipId: string }
+  | { readonly kind: "external"; readonly link: number; readonly relationshipId: string | undefined }
 
 const SELF_BOOK: Book = { kind: "self" }
 const ADDIN_BOOK: Book = { kind: "addin" }
@@ -179,9 +179,11 @@ export const readWorkbookBin = (
           // numbered whether kept or not, as Excel numbers external links
           const link = ++externals
           if (books.length >= MAX_BOOKS) return undefined
-          const rel = readWideString(record.data, 0, max)
+          // a null id is a complete record: the book has no link part, so its references are #REF!
+          const rel = readNullableWideString(record.data, 0, max)
+          if (rel === undefined) return malformed("truncated external book record", part, record.offset)
           if (typeof rel === "number") return tooLong(limits, rel)
-          books.push({ kind: "external", link, relationshipId: rel?.value ?? "" })
+          books.push({ kind: "external", link, relationshipId: rel.value })
           return undefined
         }
         case BRT_EXTERN_SHEET: {
@@ -278,7 +280,7 @@ export const readExternalBooks = (
     // progress: one book per iteration (books are at most MAX_BOOKS)
     for (const book of referencedBooks(workbook)) {
       const entry = workbook.books[book]!
-      const part = entry.kind === "external" ? partOf(entry.relationshipId) : undefined
+      const part = entry.kind === "external" && entry.relationshipId !== undefined ? partOf(entry.relationshipId) : undefined
       const linkEntry = part === undefined ? undefined : archive.find(part)
       if (linkEntry === undefined) continue
       let names = byPart.get(linkEntry.name)

@@ -467,6 +467,26 @@ describe("xlsb defined names", () => {
     expect(await errorOf({ sheets, globals: [B.record(0x16A, [...B.u32(2), ...B.u32(0), ...B.u32(0), ...B.u32(0)])] })).toMatchObject({ _tag: "MalformedFile", reason: "truncated external sheet record" })
   })
 
+  it("an empty or truncated external book record fails instead of turning its references into #REF!", async () => {
+    const withBook = (book: Uint8Array) => ({
+      sheets,
+      externalLinks: [external],
+      globals: [B.supSelf(), book, B.externSheet([[1, 1, 1]]), B.name("Rate", B.ref3d(0, 0, 0))]
+    })
+    const { wb } = await readOk(withBook(B.supBookSrc("rIdX1")))
+    expect(wb.definedNames).toEqual([{ name: "Rate", formula: "[1]Rates!$A$1", hidden: false }])
+    // a null id is a complete record: a book with no link part, so #REF!
+    const nullId = await readOk(withBook(B.record(0x163, B.nullableWide(undefined))))
+    expect(nullId.wb.definedNames).toEqual([{ name: "Rate", formula: "#REF!$A$1", hidden: false }])
+    const empty = B.record(0x163, [])
+    // a relationship id of 5 characters with only 4 present
+    const truncated = B.record(0x163, [...B.u32(5), ...B.wide("rIdX").slice(4)])
+    // both start at byte 171 of the workbook part, after the book header, the four sheets and the self book
+    for (const book of [empty, truncated]) {
+      expect(await errorOf(withBook(book))).toMatchObject({ _tag: "MalformedFile", reason: "truncated external book record", part: "xl/workbook.bin", offset: 171 })
+    }
+  })
+
   it("an external link part shared by many books is read once, and only up to its sheet list", async () => {
     const books = 200
     // a sheet list, then 1 MiB of other records the reader has no need of
