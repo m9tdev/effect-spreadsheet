@@ -98,7 +98,7 @@ export const readWorkbookPart = (
     close: (element) => {
       if (element === "sheets") inSheets = false
       else if (element === "definedName" && name !== undefined) {
-        definedNames.push({ name: name.name, formula: unescapeXstring(name.text.join("")), scope: name.scope, hidden: name.hidden })
+        definedNames.push({ name: name.name, formula: unescapeXstring(name.text.join("")), hidden: name.hidden, scope: name.scope })
         name = undefined
       }
     },

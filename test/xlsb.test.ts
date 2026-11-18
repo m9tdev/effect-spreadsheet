@@ -593,6 +593,47 @@ describe("xlsb defined names", () => {
     expect(definedNames(workbook, new Map())).toEqual([{ name: "N", formula: "S!$A$1", hidden: false }])
   })
 
+  it("each external book's references use that book's sheets, whatever its position among the books", async () => {
+    // books: this workbook, an add-in, then two external ones; their positions (2, 3) differ from their link numbers (1, 2)
+    const other = B.concat([B.record(0x168, [...B.u16(0), ...B.wide("rId1"), ...B.u32(0xFFFFFFFF)]), B.supTabs(["Other"])])
+    const { wb } = await readOk({
+      sheets,
+      externalLinks: [external, other],
+      globals: [
+        B.supSelf(),
+        B.supAddin(),
+        B.supBookSrc("rIdX1"),
+        B.supBookSrc("rIdX2"),
+        B.externSheet([[3, 0, 0], [2, 1, 1], [0, 1, 1]]),
+        B.name("Second", B.ref3d(0, 0, 0)),
+        B.name("First", B.ref3d(1, 0, 0)),
+        B.name("Own", B.ref3d(2, 0, 0))
+      ]
+    })
+    expect(wb.definedNames).toEqual([
+      { name: "Second", formula: "[2]Other!$A$1", hidden: false },
+      { name: "First", formula: "[1]Rates!$A$1", hidden: false },
+      { name: "Own", formula: "'My Sheet'!$A$1", hidden: false }
+    ])
+  })
+
+  it("with two broken external link parts, the error is the one of the book the first name points into", async () => {
+    // both link parts end inside their sheet list's count; the first name points into the second book
+    const broken = B.record(0x167, [1, 0])
+    expect(await errorOf({
+      sheets,
+      externalLinks: [broken, broken],
+      globals: [
+        B.supSelf(),
+        B.supBookSrc("rIdX1"),
+        B.supBookSrc("rIdX2"),
+        B.externSheet([[2, 0, 0], [1, 0, 0]]),
+        B.name("Second", B.ref3d(0, 0, 0)),
+        B.name("First", B.ref3d(1, 0, 0))
+      ]
+    })).toMatchObject({ _tag: "MalformedFile", reason: "truncated external sheet list", part: "xl/externalLinks/externalLink2.bin" })
+  })
+
   it("an external link's sheet list over maxSheets fails", async () => {
     const big = B.concat([B.supTabs(["a", "b", "c", "d", "e"])])
     expect(await errorOf({ sheets: [{ name: "S" }], externalLinks: [big], globals: [B.supSelf(), B.supBookSrc("rIdX1"), B.externSheet([[1, 0, 0]]), B.name("N", B.ref3d(0, 0, 0))] }, { maxSheets: 4 }))

@@ -65,14 +65,43 @@ const ADDIN_BOOK: Book = { kind: "addin" }
 export const MAX_BOOKS = 65_536
 export const MAX_XTIS = 65_536
 
-/** A 3-D reference token of a defined name: its XTI and cells. */
+/**
+ * Where a name's XTI points, resolved once after the workbook part:
+ * sheets `first`..`last` of this workbook, or of the external book at
+ * index `book` (one with a link relationship); `noBook` for an add-in, a
+ * book that isn't there or an external one without a link relationship
+ * (`#REF!`); `missing` when there is no such XTI (`""`).
+ */
+export type Xti =
+  | { readonly kind: "missing" }
+  | { readonly kind: "noBook" }
+  | { readonly kind: "self"; readonly first: number; readonly last: number }
+  | {
+    readonly kind: "external"
+    readonly book: number
+    readonly link: number
+    readonly relationshipId: string
+    readonly first: number
+    readonly last: number
+  }
+
+const MISSING_XTI: Xti = { kind: "missing" }
+const NO_BOOK: Xti = { kind: "noBook" }
+
+/** A single 3-D reference or area of a defined name: its XTI, where that points, and its cells. */
 export interface NameRef {
   readonly kind: "ref" | "area" | "refErr" | "areaErr"
   readonly ixti: number
+  readonly xti: Xti
   readonly r1: number
   readonly r2: number
   readonly c1: number
   readonly c2: number
+}
+
+/** A reference as it is read: its XTI is resolved once the whole part is read. */
+interface RefBuilder extends Omit<NameRef, "xti"> {
+  xti: Xti
 }
 
 export interface NameEntry {
@@ -89,6 +118,7 @@ export interface WorkbookBin {
   readonly books: ReadonlyArray<Book>
   /** XTIs as triples: book, first sheet, last sheet (sheets -1 and -2: no sheet). */
   readonly xtis: Int32Array
+  /** The defined names, each reference's XTI resolved. */
   readonly names: ReadonlyArray<NameEntry>
 }
 
@@ -99,7 +129,7 @@ const REF_ERR_3D = new Set([0x3C, 0x5C, 0x7C])
 const AREA_ERR_3D = new Set([0x3D, 0x5D, 0x7D])
 
 /** The reference of a name formula's tokens (`rgce`, `cce` bytes at `at`), when it is a single 3-D one. */
-const nameRef = (f: Fields, at: number, cce: number): NameRef | undefined => {
+const nameRef = (f: Fields, at: number, cce: number): RefBuilder | undefined => {
   const ptg = f.u8(at)
   if (ptg === undefined) return undefined
   const ixti = f.u16(at + 1)!
@@ -107,13 +137,28 @@ const nameRef = (f: Fields, at: number, cce: number): NameRef | undefined => {
   if (cce === 9 && (REF_3D.has(ptg) || REF_ERR_3D.has(ptg))) {
     const r = f.u32(at + 3)!
     const c = f.u16(at + 7)!
-    return { kind: REF_3D.has(ptg) ? "ref" : "refErr", ixti, r1: r, r2: r, c1: c, c2: c }
+    return { kind: REF_3D.has(ptg) ? "ref" : "refErr", ixti, xti: MISSING_XTI, r1: r, r2: r, c1: c, c2: c }
   }
   // PtgArea3d: ixti, first row u32, last row u32, first column u16, last column u16
   if (cce === 15 && (AREA_3D.has(ptg) || AREA_ERR_3D.has(ptg))) {
-    return { kind: AREA_3D.has(ptg) ? "area" : "areaErr", ixti, r1: f.u32(at + 3)!, r2: f.u32(at + 7)!, c1: f.u16(at + 11)!, c2: f.u16(at + 13)! }
+    return { kind: AREA_3D.has(ptg) ? "area" : "areaErr", ixti, xti: MISSING_XTI, r1: f.u32(at + 3)!, r2: f.u32(at + 7)!, c1: f.u16(at + 11)!, c2: f.u16(at + 13)! }
   }
   return undefined
+}
+
+/** Where XTI `ixti` points (see `Xti`). */
+const resolveXti = (books: ReadonlyArray<Book>, xtis: Int32Array, ixti: number): Xti => {
+  if (3 * ixti + 2 >= xtis.length) return MISSING_XTI
+  const bookIndex = xtis[3 * ixti]!
+  const first = xtis[3 * ixti + 1]!
+  const last = xtis[3 * ixti + 2]!
+  // writers that leave the books out mean this workbook
+  const book: Book | undefined = books.length === 0 && bookIndex === 0 ? SELF_BOOK : books[bookIndex]
+  if (book === undefined || book.kind === "addin") return NO_BOOK
+  if (book.kind === "self") return { kind: "self", first, last }
+  // a null id: the book has no link part, so its references are #REF!
+  if (book.relationshipId === undefined) return NO_BOOK
+  return { kind: "external", book: bookIndex, link: book.link, relationshipId: book.relationshipId, first, last }
 }
 
 /** Reads the workbook part. Sheet names are made unique (`uniqueSheetNames`). */
@@ -125,7 +170,7 @@ export const readWorkbookBin = (
   Effect.suspend(() => {
     const part = entry.name
     const sheets: Array<SheetEntry> = []
-    const names: Array<NameEntry> = []
+    const names: Array<Omit<NameEntry, "ref"> & { readonly ref: RefBuilder | undefined }> = []
     const books: Array<Book> = []
     let externals = 0
     // XTIs of every BrtExternSheet (Excel writes one), appended: a growing array, not a copy per record
@@ -214,7 +259,14 @@ export const readWorkbookBin = (
       Effect.filterOrFail(() => records > 0, () => malformed("empty workbook part", part)),
       Effect.map((): WorkbookBin => {
         const unique = uniqueSheetNames(sheets.map((s) => s.name))
-        return { sheets: sheets.map((s, k) => ({ ...s, name: unique[k]! })), date1904, books, xtis: Int32Array.from(xtis), names }
+        const xtiTable = Int32Array.from(xtis)
+        // each XTI that names use is resolved once (an XTI index is a u16), and shared by them
+        const resolved: Array<Xti | undefined> = []
+        // progress: one name per iteration (at most maxDefinedNames)
+        for (const { ref } of names) {
+          if (ref !== undefined) ref.xti = resolved[ref.ixti] ??= resolveXti(books, xtiTable, ref.ixti)
+        }
+        return { sheets: sheets.map((s, k) => ({ ...s, name: unique[k]! })), date1904, books, xtis: xtiTable, names }
       })
     )
   })
@@ -271,17 +323,20 @@ export const readExternalBooks = (
   Effect.gen(function*() {
     const byPart = new Map<ZipEntry, ReadonlyArray<string>>()
     const out = new Map<number, ReadonlyArray<string>>()
-    // progress: one book per iteration (books are at most MAX_BOOKS)
-    for (const book of referencedBooks(workbook)) {
-      const entry = workbook.books[book]!
-      const linkEntry = entry.kind === "external" && entry.relationshipId !== undefined ? partOf(entry.relationshipId) : undefined
+    const seen = new Set<number>()
+    // progress: one name per iteration (at most maxDefinedNames); each book is looked at once
+    for (const n of workbook.names) {
+      const xti = n.ref?.xti
+      if (xti?.kind !== "external" || seen.has(xti.book)) continue
+      seen.add(xti.book)
+      const linkEntry = partOf(xti.relationshipId)
       if (linkEntry === undefined) continue
       let names = byPart.get(linkEntry)
       if (names === undefined) {
         names = yield* readExternalSheets(archive, linkEntry, limits)
         byPart.set(linkEntry, names)
       }
-      out.set(book, names)
+      out.set(xti.book, names)
     }
     return out
   })
@@ -299,25 +354,20 @@ export const definedNames = (
   externalSheets: ReadonlyMap<number, ReadonlyArray<string>>
 ): Array<DefinedName> => {
   const sheetNames = workbook.sheets.map((s) => s.name)
-  const { books, xtis } = workbook
-  const prefix = (ixti: number): string | undefined => {
-    if (3 * ixti + 2 >= xtis.length) return undefined
-    const bookIndex = xtis[3 * ixti]!
-    const first = xtis[3 * ixti + 1]!
-    const last = xtis[3 * ixti + 2]!
-    // writers that leave the books out mean this workbook
-    const book: Book | undefined = books.length === 0 && bookIndex === 0 ? SELF_BOOK : books[bookIndex]
-    if (book === undefined || book.kind === "addin") return "#REF!"
-    const names = book.kind === "self" ? sheetNames : externalSheets.get(bookIndex)
+  const prefix = (xti: Xti): string | undefined => {
+    if (xti.kind === "missing") return undefined
+    if (xti.kind === "noBook") return "#REF!"
+    const names = xti.kind === "self" ? sheetNames : externalSheets.get(xti.book)
+    const { first, last } = xti
     if (names === undefined || first < 0 || last < first) return "#REF!"
     const a = names[first]
     const b = names[last]
     if (a === undefined || b === undefined) return "#REF!"
-    return sheetPrefix(book.kind === "self" ? "" : `[${book.link}]`, first === last ? [a] : [a, b])
+    return sheetPrefix(xti.kind === "self" ? "" : `[${xti.link}]`, first === last ? [a] : [a, b])
   }
   const formula = (ref: NameRef | undefined): string => {
     if (ref === undefined) return ""
-    const sheet = prefix(ref.ixti)
+    const sheet = prefix(ref.xti)
     if (sheet === undefined) return ""
     switch (ref.kind) {
       case "ref":
@@ -333,16 +383,4 @@ export const definedNames = (
     workbook.names.map((n) => ({ name: n.name, formula: formula(n.ref), hidden: n.hidden, scope: n.scope })),
     sheetNames.length
   )
-}
-
-/** External books that some name's reference points into, by book index. */
-export const referencedBooks = (workbook: WorkbookBin): Array<number> => {
-  const out = new Set<number>()
-  // progress: one name per iteration
-  for (const n of workbook.names) {
-    if (n.ref === undefined || 3 * n.ref.ixti + 2 >= workbook.xtis.length) continue
-    const book = workbook.xtis[3 * n.ref.ixti]!
-    if (workbook.books[book]?.kind === "external") out.add(book)
-  }
-  return [...out]
 }
