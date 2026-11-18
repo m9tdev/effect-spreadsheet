@@ -429,6 +429,11 @@ describe("zip archive: hostile input", () => {
       { name: "short.xml", data: enc("xyz"), method: "store", uncompressedSize: 9 }
     ])
     const archive = openOk(zip)
+    // find returns the entry itself, not a copy: the inflate budget is kept per entry object
+    for (const entry of archive.entries) {
+      expect(archive.find(entry.name)).toBe(entry)
+      expect(archive.find(entry.name.toUpperCase())).toBe(entry)
+    }
     expect(Object.fromEntries(archive.entries.map((e) => [e.name, e.kind]))).toEqual({
       "plain.xml": "stored",
       "packed.xml": "deflate",

@@ -28,6 +28,7 @@
  */
 import { Cause, Effect, Scope, Stream } from "effect"
 import * as Channel from "effect/Channel"
+import { absurd } from "effect/Function"
 import * as Result from "effect/Result"
 import type * as Arr from "effect/Array"
 import type * as Pull from "effect/Pull"
@@ -214,13 +215,28 @@ const archive = (
 
   const read = (entry: LocatedEntry, readLimits: Limits = limits): Stream.Stream<Uint8Array, SpreadsheetError> => {
     const kind = entry.kind
-    if (kind === "encrypted") return Stream.fail(new Encrypted({ format: "zip" }))
     if (typeof kind === "object") {
       return Stream.fail(new UnsupportedFormat({ format: "zip", reason: `compression method ${kind.unsupported} in ${entry.name}` }))
     }
-    if (kind === "bad-stored-size") {
-      return Stream.fail(malformed("stored entry with different compressed and uncompressed sizes", entry.name))
+    switch (kind) {
+      case "encrypted":
+        return Stream.fail(new Encrypted({ format: "zip" }))
+      case "bad-stored-size":
+        return Stream.fail(malformed("stored entry with different compressed and uncompressed sizes", entry.name))
+      case "stored":
+      case "deflate":
+        return readData(entry, kind, readLimits)
+      default:
+        return absurd(kind)
     }
+  }
+
+  /** The bytes of a readable entry, stored or deflated. */
+  const readData = (
+    entry: LocatedEntry,
+    kind: "stored" | "deflate",
+    readLimits: Limits
+  ): Stream.Stream<Uint8Array, SpreadsheetError> => {
     const data = bytes.subarray(entry.data.start, entry.data.end)
     return Stream.fromChannel(Channel.fromTransform((_, scope: Scope.Scope) =>
       Effect.gen(function*() {
