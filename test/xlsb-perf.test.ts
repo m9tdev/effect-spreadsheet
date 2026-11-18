@@ -9,15 +9,18 @@
  */
 import { Effect, Stream } from "effect"
 import { describe, expect, it } from "vitest"
+import { SLICE_BYTES } from "../src/internal/bytes.ts"
 import { NO_STYLES } from "../src/internal/xlsb/parts.ts"
 import { sheetDetails, sheetRows } from "../src/internal/xlsb/sheet.ts"
-import { SLICE_BYTES } from "../src/internal/xlsb/slices.ts"
+import { open } from "../src/internal/zip/archive.ts"
+import type { InflateRaw } from "../src/internal/zip/inflate.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xlsb from "../src/xlsb/index.ts"
 import { counter, metered } from "./helpers/meter.ts"
 import * as B from "./helpers/xlsb.ts"
 import { countYields } from "./helpers/yields.ts"
+import { buildZip } from "./helpers/zip.ts"
 
 const ROWS = 200_000
 const SMALL = ROWS / 16
@@ -93,23 +96,37 @@ describe("xlsb: 200 000 rows", () => {
     }, 300_000)
   }
 
-  it("a part handed over in one piece is still read a slice per turn", async () => {
+  it("a part the decompressor hands over in one piece is still read a slice per turn", async () => {
     const body: Array<Uint8Array> = []
     // progress: r up to ROWS
     for (let r = 0; r < ROWS; r++) body.push(B.rowHdr(r), B.rk(0, B.rkInt(r)))
     const part = B.sheetBin(body)
+    const onePiece: InflateRaw = () => {
+      let given = false
+      return {
+        next: async () => {
+          if (given) return undefined
+          given = true
+          return part.slice()
+        },
+        cancel: () => {}
+      }
+    }
     const limits = SpreadsheetLimits.defaults
+    const archive = open(await buildZip([{ name: "one.bin", data: part }]), limits, onePiece)
+    if ("_tag" in archive) throw new Error(archive._tag)
+    const entry = archive.find("one.bin")!
     const context = { part: "one.bin", strings: undefined, styles: NO_STYLES, date1904: false, limits }
     let rows = 0
     const records = counter("records")
     const run = await countYields(
-      () => Effect.runPromise(metered(records, Stream.runForEach(sheetRows(Stream.make(part), context), () => Effect.sync(() => void rows++)))),
+      () => Effect.runPromise(metered(records, Stream.runForEach(sheetRows(archive.read(entry), context), () => Effect.sync(() => void rows++)))),
       records.total
     )
     expect(rows).toBe(ROWS)
     expect(run.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
     const detailRecords = counter("records")
-    const details = await countYields(() => Effect.runPromise(metered(detailRecords, sheetDetails(Stream.make(part), "one.bin", limits))), detailRecords.total)
+    const details = await countYields(() => Effect.runPromise(metered(detailRecords, sheetDetails(archive.read(entry), "one.bin", limits))), detailRecords.total)
     expect(details.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
   }, 300_000)
 

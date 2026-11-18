@@ -17,6 +17,12 @@
  *   against the same archive-wide total.
  *   The CRC-32 is checked at the end. Decompression only runs as far as
  *   the stream is read.
+ * - A read emits one slice of at most `SLICE_BYTES` per pull, after a
+ *   yield to the event loop, whatever size the decompressor's output
+ *   comes in: the readers of an entry's bytes do no slicing or yielding of
+ *   their own. Limits and the CRC-32 are applied to each decompressed (or,
+ *   for stored entries, `SLICE_BYTES`) piece as it is taken, before its
+ *   slices are emitted.
  *
  * @internal
  */
@@ -26,6 +32,7 @@ import type * as Arr from "effect/Array"
 import type * as Pull from "effect/Pull"
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
+import { SLICE_BYTES } from "../bytes.ts"
 import { WorkMeter } from "../meter.ts"
 import { CRC32_START, crc32Final, crc32Update } from "./crc32.ts"
 import { type Directory, normalizeName, readDirectory, type ZipEntry } from "./directory.ts"
@@ -34,9 +41,6 @@ import { type InflateRaw, inflateRawWeb } from "./inflate.ts"
 /** The archive-wide inflate budget for an archive of `archiveBytes` bytes. */
 export const inflateBudget = (archiveBytes: number, limits: Limits): number =>
   Math.min(limits.maxDecompressedBytes, Math.max(limits.inflateFloorBytes, limits.maxInflateRatio * archiveBytes))
-
-/** Stored entries are emitted in slices of this size. */
-const STORED_SLICE = 64 * 1024
 
 const LOCAL = 0x04034b50
 const STORED = 0
@@ -47,7 +51,8 @@ export interface Archive {
   /** The entry with this name (case-insensitive, a leading `/` ignored), if any. */
   readonly find: (name: string) => ZipEntry | undefined
   /**
-   * The entry's uncompressed bytes, chunk by chunk. Re-runnable. `limits`
+   * The entry's uncompressed bytes, one slice of at most `SLICE_BYTES`
+   * per pull, each after a yield. Re-runnable. `limits`
    * (default: the archive's) set this read's inflate budget.
    */
   readonly read: (entry: ZipEntry, limits?: Limits) => Stream.Stream<Uint8Array, SpreadsheetError>
@@ -187,17 +192,27 @@ export const open = (
         let storedAt = 0
         // the work meter counts every output byte, re-reads included
         const meter = yield* WorkMeter
+        /** The piece being handed out, and how far. */
+        let piece: Uint8Array = new Uint8Array(0)
+        let pieceAt = 0
         const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Uint8Array>, SpreadsheetError> = Effect.gen(function*() {
-          // progress: each iteration emits a non-empty chunk, ends, or reads
-          // one more chunk from the decompressor (which consumes input)
+          // progress: each iteration emits a non-empty slice of the piece
+          // (pieceAt grows), ends, or takes one more piece: a stored slice
+          // (storedAt grows) or a chunk from the decompressor (which
+          // consumes input)
           while (true) {
+            if (pieceAt < piece.length) {
+              yield* Effect.yieldNow
+              const slice = piece.subarray(pieceAt, Math.min(piece.length, pieceAt + SLICE_BYTES))
+              pieceAt += slice.length
+              return [slice] as const
+            }
             if (done) return yield* Cause.done()
             let chunk: Uint8Array | undefined
             if (inflater === undefined) {
               if (storedAt < data.length) {
-                chunk = data.subarray(storedAt, Math.min(data.length, storedAt + STORED_SLICE))
+                chunk = data.subarray(storedAt, Math.min(data.length, storedAt + SLICE_BYTES))
                 storedAt += chunk.length
-                yield* Effect.yieldNow
               }
             } else {
               chunk = yield* Effect.tryPromise({
@@ -223,7 +238,8 @@ export const open = (
               return yield* Effect.fail(error)
             }
             crc = crc32Update(crc, chunk)
-            return [chunk] as const
+            piece = chunk
+            pieceAt = 0
           }
         })
         return pull

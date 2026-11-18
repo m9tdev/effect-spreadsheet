@@ -172,9 +172,9 @@ export class RecordSplitter {
 /**
  * Reads a part's records from its byte stream, calling `onRecord` for each.
  * Fails with the first error (from the stream, the record layer or the
- * handler). Each chunk is at most one inflate piece, so the work between
- * the stream's turns is bounded. The records of each chunk go to the work
- * meter.
+ * handler). The archive hands the bytes over in bounded slices, each after
+ * a yield, so the work between the stream's turns is bounded. The records
+ * of each chunk go to the work meter.
  */
 export const readRecords = <E, R>(
   bytes: Stream.Stream<Uint8Array, E, R>,

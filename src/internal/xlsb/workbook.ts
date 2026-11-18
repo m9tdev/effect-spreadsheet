@@ -22,7 +22,6 @@ import { areaText, BIFF12_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
-import { sliced } from "./slices.ts"
 
 export const malformed = (reason: string, part?: string, offset?: number) =>
   new MalformedFile({
@@ -220,7 +219,7 @@ export const readWorkbookBin = (
           return undefined
       }
     }
-    return readRecords(sliced(archive.read(entry)), handle, limits, part).pipe(
+    return readRecords(archive.read(entry), handle, limits, part).pipe(
       Effect.filterOrFail(() => records > 0, () => malformed("empty workbook part", part)),
       Effect.map((): WorkbookBin => {
         const unique = uniqueSheetNames(sheets.map((s) => s.name))
@@ -259,7 +258,7 @@ export const readExternalSheets = (
       }
       return DONE
     }
-    return readRecords(sliced(archive.read(entry)), handle, limits, entry.name).pipe(
+    return readRecords(archive.read(entry), handle, limits, entry.name).pipe(
       Effect.catchIf((error) => error === DONE, () => Effect.void),
       Effect.as(names)
     )

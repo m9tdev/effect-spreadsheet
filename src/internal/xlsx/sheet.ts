@@ -1,8 +1,8 @@
 /**
  * Worksheet part -> rows, streamed: the part is inflated and tokenized
- * piece by piece, and the rows a piece completes are emitted with it (one
- * inflated piece is at most 64 KiB, so the work between emissions is
- * bounded, and the stream yields to the event loop before each piece).
+ * piece by piece, and the rows a piece completes are emitted with it. The
+ * archive hands the part over in pieces of at most 64 KiB, each after a
+ * yield to the event loop, so the work between emissions is bounded.
  *
  * - Rows come in document order; `<row r>` gives the index, else the first
  *   cell's reference, else the previous row + 1. Rows without cells are
@@ -490,7 +490,6 @@ export const sheetRows = (
             default:
               return absurd(state)
           }
-          yield* Effect.yieldNow
           const chunk = yield* pullUpstream
           let error: SpreadsheetError | undefined
           if (chunk === undefined) {

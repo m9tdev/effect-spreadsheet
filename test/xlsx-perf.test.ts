@@ -10,14 +10,18 @@
 import { Effect, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
+import { NO_STYLES } from "../src/internal/xlsx/parts.ts"
+import { sheetRows } from "../src/internal/xlsx/sheet.ts"
 import { parse } from "../src/internal/xml/parse.ts"
 import { open } from "../src/internal/zip/archive.ts"
+import type { InflateRaw } from "../src/internal/zip/inflate.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
 import * as Xlsx from "../src/xlsx/index.ts"
 import { bigXlsx, MIN_ROW_BYTES } from "./helpers/big-xlsx.ts"
 import { countYields } from "./helpers/yields.ts"
 import { xlsx } from "./helpers/xlsx.ts"
+import { buildZip } from "./helpers/zip.ts"
 
 /** The most bytes of sheet XML one pull handles: one inflated or stored piece. */
 const PIECE_BYTES = 64 * 1024
@@ -88,6 +92,45 @@ describe("xlsx: 200 000 rows", () => {
     // and the details pass over the same sheet
     const details = await Effect.runPromise(Workbook.sheetDetails(wb, 0))
     expect(details.merges).toEqual([])
+  }, 300_000)
+})
+
+describe("xlsx: a sheet part in one piece", () => {
+  it("is still read one piece of rows per pull, after a yield, when the decompressor hands it over whole", async () => {
+    const xml = `<worksheet><sheetData>${
+      Array.from({ length: ROWS }, (_, r) => `<row r="${r + 1}"><c r="A${r + 1}"><v>${r}</v></c></row>`).join("")
+    }</sheetData></worksheet>`
+    const part = new TextEncoder().encode(xml)
+    const onePiece: InflateRaw = () => {
+      let given = false
+      return {
+        next: async () => {
+          if (given) return undefined
+          given = true
+          return part.slice()
+        },
+        cancel: () => {}
+      }
+    }
+    const limits = SpreadsheetLimits.defaults
+    const archive = open(await buildZip([{ name: "sheet1.xml", data: part }]), limits, onePiece)
+    if ("_tag" in archive) throw new Error(archive._tag)
+    const context = { part: "sheet1.xml", strings: undefined, styles: NO_STYLES, date1904: false, limits }
+    let rows = 0
+    let maxPerPull = 0
+    const run = await countYields(() =>
+      Effect.runPromise(Stream.runForEachArray(sheetRows(archive.read(archive.find("sheet1.xml")!), context), (pulled) =>
+        Effect.sync(() => {
+          rows += pulled.length
+          maxPerPull = Math.max(maxPerPull, pulled.length)
+        })))
+    )
+    expect(rows).toBe(ROWS)
+    // each pull tokenizes one piece and emits its rows, after a yield; the
+    // shortest row here is 39 bytes of XML
+    const perPiece = Math.ceil(PIECE_BYTES / 39) + 1
+    expect(maxPerPull).toBeLessThanOrEqual(perPiece)
+    expect(run.yields).toBeGreaterThanOrEqual(ROWS / perPiece)
   }, 300_000)
 })
 
