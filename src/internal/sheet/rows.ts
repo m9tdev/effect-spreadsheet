@@ -149,13 +149,14 @@ export class RowBuilder<At> {
 
   /** Numbers the open row (or the one opening) `index`: it must be below `maxRows` and above the previous row. */
   private number(index: number, at: At): SpreadsheetError | undefined {
-    const tooHigh = this.belowMaxRows(index)
+    const tooHigh = this.pastMaxRows(index)
     if (tooHigh !== undefined) return tooHigh
     if (index <= this.previousRow) return this.rules.malformed(`row ${index + 1} after row ${this.previousRow + 1}`, at)
     return this.counted(index)
   }
 
-  private belowMaxRows(index: number): SpreadsheetError | undefined {
+  /** The maxRows error, if row `index` is at or past `maxRows`. */
+  private pastMaxRows(index: number): SpreadsheetError | undefined {
     const max = this.limits.maxRows
     return index >= max ? new LimitExceeded({ limit: "maxRows", max, actual: index + 1 }) : undefined
   }
@@ -181,7 +182,7 @@ export class RowBuilder<At> {
     if (index === undefined) {
       // a row without an index or cells: the previous row + 1, above it by construction
       index = this.previousRow + 1
-      const numbered = this.belowMaxRows(index) ?? this.counted(index)
+      const numbered = this.pastMaxRows(index) ?? this.counted(index)
       if (numbered !== undefined) return numbered
     }
     this.out.push({ index, hidden: this.hidden, cells: this.sorted ? this.cells : compact(this.cells) })
