@@ -42,10 +42,30 @@ export const sheetDetails = (
     let colElements = 0
     let dimension: Range | undefined
     let inSheetData = false
+    let inRow = false
+    /**
+     * Elements open in the open cell, the cell itself included: 0 outside a
+     * cell. As in the rows reader, a cell's content is skipped whatever its
+     * names, and only the cell's own end tag closes it.
+     */
+    let cellDepth = 0
     const handler: XmlHandler = {
       open: (name, attributes) => {
-        if (name === "sheetData") inSheetData = true
-        if (inSheetData) return undefined
+        if (cellDepth > 0) {
+          cellDepth++
+          return undefined
+        }
+        if (name === "sheetData") {
+          // a nested one would end the sheet data at its end tag, reading what follows as layout
+          if (inSheetData) return malformed("<sheetData> inside a <sheetData>", part)
+          inSheetData = true
+          return undefined
+        }
+        if (inSheetData) {
+          if (name === "row") inRow = true
+          else if (name === "c" && inRow) cellDepth = 1
+          return undefined
+        }
         if (name === "dimension") {
           const ref = attr(attributes, "ref")
           const range = ref === undefined ? undefined : parseRange(ref)
@@ -76,7 +96,9 @@ export const sheetDetails = (
         return undefined
       },
       close: (name) => {
-        if (name === "sheetData") inSheetData = false
+        if (cellDepth > 0) cellDepth--
+        else if (name === "row") inRow = false
+        else if (name === "sheetData") inSheetData = false
         return undefined
       },
       text: () => undefined

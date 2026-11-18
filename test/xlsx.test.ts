@@ -496,6 +496,41 @@ describe("xlsx: sheet details", () => {
     expect(failureOf(await details(await withLayout(`<col min="1" max="1"/>`.repeat(5)), { maxColumns: 4 }))).toMatchObject({ limit: "maxColumns" })
     expect(failureOf(await details(await withLayout(""), { maxCellsPerSheet: 1 }))).toMatchObject({ limit: "maxCellsPerSheet" })
   })
+
+  it("a <sheetData> inside the sheet data is MalformedFile, as for rows, not the end of the sheet data", async () => {
+    const malformed = { _tag: "MalformedFile", format: "xlsx", reason: "<sheetData> inside a <sheetData>", part: "xl/worksheets/sheet1.xml" }
+    // layout after the inner end tag is still inside the outer sheet data
+    const nested = await xlsx({
+      sheets: [{
+        name: "S",
+        raw: `<worksheet xmlns="x"><sheetData><sheetData/><cols><col min="1" max="1" hidden="1"/></cols><mergeCells><mergeCell ref="A1:B2"/></mergeCells></sheetData></worksheet>`
+      }]
+    })
+    expect(failureOf(await details(nested))).toMatchObject(malformed)
+    const wb = await Effect.runPromise(Xlsx.read(nested))
+    expect(failureOf(await Effect.runPromiseExit(Stream.runCollect(Workbook.rows(wb, 0))))).toMatchObject(malformed)
+    // also inside a row
+    expect(failureOf(await details(await withLayout("", `<row r="1"><sheetData/></row>`)))).toMatchObject(malformed)
+  })
+
+  it("a cell's content is skipped, as for rows, whatever its element names", async () => {
+    // a <sheetData> (in any namespace) and a <mergeCell> in a cell's extension are neither nesting nor layout
+    const bytes = await withLayout(
+      `<col min="2" max="2" hidden="1"/>`,
+      `<row r="1"><c r="A1"><v>1</v><extLst><ext uri="x" xmlns:y="y"><y:sheetData/><mergeCell ref="E5:F6"/><col min="1" max="1" hidden="1"/></ext></extLst></c></row>`
+    )
+    const exit = await details(bytes)
+    expect(Exit.isSuccess(exit) && exit.value).toEqual({
+      hiddenColumns: [{ first: 1, last: 1 }],
+      merges: [
+        { firstRow: 0, firstColumn: 0, lastRow: 0, lastColumn: 2 },
+        { firstRow: 2, firstColumn: 1, lastRow: 3, lastColumn: 1 }
+      ],
+      dimension: { firstRow: 1, firstColumn: 1, lastRow: 8, lastColumn: 3 }
+    })
+    const read = await readExit(bytes)
+    expect(Exit.isSuccess(read) && values(read.value.sheets[0]!)).toEqual([[0, false, [[0, "Number", 1]]]])
+  })
 })
 
 describe("xlsx: hostile and broken files", () => {
