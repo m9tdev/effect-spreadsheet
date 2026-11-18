@@ -486,6 +486,22 @@ describe("xlsx: sheet details", () => {
     expect(failureOf(await details(await withLayout(`<col min="1" max="1"/>`.repeat(5)), { maxColumns: 4 }))).toMatchObject({ limit: "maxColumns" })
     expect(failureOf(await details(await withLayout(""), { maxCellsPerSheet: 1 }))).toMatchObject({ limit: "maxCellsPerSheet" })
   })
+
+  it("a <sheetData> inside the sheet data is MalformedFile, as for rows, not the end of the sheet data", async () => {
+    const malformed = { _tag: "MalformedFile", format: "xlsx", reason: "<sheetData> inside a <sheetData>", part: "xl/worksheets/sheet1.xml" }
+    // layout after the inner end tag is still inside the outer sheet data
+    const nested = await xlsx({
+      sheets: [{
+        name: "S",
+        raw: `<worksheet xmlns="x"><sheetData><sheetData/><cols><col min="1" max="1" hidden="1"/></cols><mergeCells><mergeCell ref="A1:B2"/></mergeCells></sheetData></worksheet>`
+      }]
+    })
+    expect(failureOf(await details(nested))).toMatchObject(malformed)
+    const wb = await Effect.runPromise(Xlsx.read(nested))
+    expect(failureOf(await Effect.runPromiseExit(Stream.runCollect(Workbook.rows(wb, 0))))).toMatchObject(malformed)
+    // also inside a row
+    expect(failureOf(await details(await withLayout("", `<row r="1"><sheetData/></row>`)))).toMatchObject(malformed)
+  })
 })
 
 describe("xlsx: hostile and broken files", () => {

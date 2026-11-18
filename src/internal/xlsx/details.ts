@@ -44,7 +44,12 @@ export const sheetDetails = (
     let inSheetData = false
     const handler: XmlHandler = {
       open: (name, attributes) => {
-        if (name === "sheetData") inSheetData = true
+        if (name === "sheetData") {
+          // a nested one would end the sheet data at its end tag, reading what follows as layout
+          if (inSheetData) return malformed("<sheetData> inside a <sheetData>", part)
+          inSheetData = true
+          return undefined
+        }
         if (inSheetData) return undefined
         if (name === "dimension") {
           const ref = attr(attributes, "ref")
