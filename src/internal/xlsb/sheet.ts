@@ -2,11 +2,12 @@
  * A worksheet part of an XLSB package -> rows, streamed; and its layout
  * (`sheetDetails`).
  *
- * The part is inflated and split into records slice by slice (at most
- * `SLICE_BYTES`, 64 KiB, so at most 32 768 records, see `slices.ts`), and
- * the rows a slice completes are emitted with it; the stream yields to
- * the event loop before each slice. So the work and the rows between
- * event-loop turns are bounded, however the input is cut.
+ * The part is inflated and split into records slice by slice, and the
+ * rows a slice completes are emitted with it. The archive hands the part
+ * over in slices of at most `SLICE_BYTES` (64 KiB, so at most 32 768
+ * records), each after a yield to the event loop, so the work and the
+ * rows between event-loop turns are bounded, however the decompressor
+ * cuts its output.
  *
  * - Rows: each BrtRowHdr starts a row (index, hidden flag `fDyZero`); its
  *   cell records follow it. A row is emitted when the next row starts or
@@ -49,7 +50,6 @@ import { mergeSpans } from "../xlsx/details.ts"
 import { serialToDate } from "../xlsx/numFmt.ts"
 import { compact, DONE, type PullState, READING } from "../xlsx/sheet.ts"
 import type { CellStyles } from "./parts.ts"
-import { sliced } from "./slices.ts"
 import { malformed, tooLong } from "./workbook.ts"
 
 export interface SheetContext {
@@ -329,7 +329,7 @@ export const sheetRows = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,
   context: SheetContext
 ): Stream.Stream<Row, SpreadsheetError> =>
-  Stream.transformPull(sliced(bytes), (upstream) =>
+  Stream.transformPull(bytes, (upstream) =>
     Effect.map(WorkMeter, (meter) => {
       const rows = new SheetRows(context)
       const splitter = new RecordSplitter(context.part, context.limits.maxRecordBytes)
@@ -352,7 +352,6 @@ export const sheetRows = (
             default:
               return absurd(state)
           }
-          yield* Effect.yieldNow
           const chunk = yield* pullUpstream
           let error: SpreadsheetError | undefined
           if (chunk === undefined) {
@@ -441,7 +440,7 @@ export const sheetDetails = (
           return undefined
       }
     }
-    return Effect.flatMap(readRecords(sliced(bytes), handle, limits, part), () => {
+    return Effect.flatMap(readRecords(bytes, handle, limits, part), () => {
       const error = scope.end(part)
       if (error !== undefined) return Effect.fail(error)
       return Effect.succeed<SheetDetails>({

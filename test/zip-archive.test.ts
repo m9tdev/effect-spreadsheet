@@ -6,9 +6,11 @@ import { type Archive, inflateBudget, open } from "../src/internal/zip/archive.t
 import { crc32, CRC32_START, crc32Final, crc32Update } from "../src/internal/zip/crc32.ts"
 import { readDirectory, type ZipEntry } from "../src/internal/zip/directory.ts"
 import type { Inflater, InflateRaw } from "../src/internal/zip/inflate.ts"
+import { SLICE_BYTES } from "../src/internal/bytes.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import { type Counter, counter } from "./helpers/meter.ts"
 import { failureOf } from "./helpers/run.ts"
+import { countYields } from "./helpers/yields.ts"
 import { buildZip, concat, deflateRaw, readAll, testCrc32 } from "./helpers/zip.ts"
 
 const limits = SpreadsheetLimits.defaults
@@ -149,6 +151,47 @@ describe("zip archive: reading entries", () => {
     expect(pulls).toBe(2)
     expect(cancelled).toBeGreaterThanOrEqual(1)
   })
+})
+
+describe("zip archive: bounded slices", () => {
+  const SIZE = 1024 * 1024 + 123
+  const data = pseudoRandom(SIZE, 7)
+  /** An inflater that hands the whole entry over in one chunk. */
+  const onePiece: InflateRaw = () => {
+    let given = false
+    return {
+      next: async () => {
+        if (given) return undefined
+        given = true
+        return data.slice()
+      },
+      cancel: () => {}
+    }
+  }
+
+  const slicesOf = async (archive: Archive, name: string) => {
+    const pulls = await Effect.runPromise(Stream.runCollect(Stream.chunks(archive.read(archive.find(name)!))))
+    return Array.from(pulls)
+  }
+
+  for (const [label, method, inflate] of [
+    ["stored", "store", undefined],
+    ["deflated", "deflate", undefined],
+    ["deflated in one piece", "deflate", onePiece]
+  ] as const) {
+    it(`a ${label} entry is read one slice of at most SLICE_BYTES per pull, each after a yield`, async () => {
+      const zip = await buildZip([{ name: "big.bin", data, method }])
+      const archive = openOk(zip, limits, inflate)
+      const run = await countYields(() => slicesOf(archive, "big.bin"))
+      const pulls = run.value
+      expect(pulls.every((pull) => pull.length === 1)).toBe(true)
+      const slices = pulls.map((pull) => pull[0]!)
+      expect(slices.every((slice) => slice.length > 0 && slice.length <= SLICE_BYTES)).toBe(true)
+      expect(Buffer.from(concat(slices)).equals(data)).toBe(true)
+      expect(slices.length).toBeGreaterThanOrEqual(Math.ceil(SIZE / SLICE_BYTES))
+      expect(run.yields).toBeGreaterThanOrEqual(slices.length / 2)
+    })
+  }
 })
 
 describe("zip64 extra field bounds", () => {

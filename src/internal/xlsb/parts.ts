@@ -12,7 +12,6 @@ import { type Biff12Record, readRecords } from "../biff12/records.ts"
 import { formatFor, isDateCode, type NumberFormat } from "../xlsx/numFmt.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
-import { sliced } from "./slices.ts"
 import { malformed, tooLong } from "./workbook.ts"
 
 const BRT_SST_ITEM = 0x0013
@@ -45,7 +44,7 @@ export const readSharedStrings = (
       strings.push(text.value)
       return undefined
     }
-    return Effect.as(readRecords(sliced(archive.read(entry)), handle, limits, entry.name), strings)
+    return Effect.as(readRecords(archive.read(entry), handle, limits, entry.name), strings)
   })
 
 /**
@@ -154,5 +153,5 @@ export const readStyles = (
           return undefined
       }
     }
-    return Effect.map(readRecords(sliced(archive.read(entry)), handle, limits, entry.name), () => cellStyles(ids, count, custom))
+    return Effect.map(readRecords(archive.read(entry), handle, limits, entry.name), () => cellStyles(ids, count, custom))
   })
