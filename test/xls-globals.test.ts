@@ -540,14 +540,16 @@ describe("xls globals: long work yields", () => {
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
   })
 
-  it("XFs whose number formats have long codes end their batch by the codes' length, not only by count", async () => {
-    // 4 * BATCH_BYTES of codes, one XF per id: far fewer XFs than BATCH_RECORDS, yet each code is parsed once
+  it("FORMAT codes are classified as they are read, their length counted in the batch: the XFs using them add no scan", async () => {
+    // 4 * BATCH_BYTES of codes, counted once as bytes read and once as characters classified
     const ids = Math.ceil((4 * BATCH_BYTES) / 8000)
     const formats = Array.from({ length: ids }, (_, k) => X.format(164 + k, "0".repeat(8000)))
     const alone = await turns(formats)
     const run = await turns([...formats, ...Array.from({ length: ids }, (_, k) => X.xf(164 + k))])
     expect(ids).toBeLessThan(BATCH_RECORDS)
-    expect(run.batches - alone.batches).toBeGreaterThanOrEqual(4)
+    expect(alone.batches).toBeGreaterThanOrEqual(8)
+    // fewer XFs than a batch holds: at most one more batch, whatever their codes' length
+    expect(run.batches - alone.batches).toBeLessThanOrEqual(1)
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
   })
 
@@ -611,8 +613,8 @@ describe("xls globals: number formats of cell styles", () => {
       sheets: [{ name: "S", records: [] }]
     })
     const globals = await Effect.runPromise(readGlobals(stream, SpreadsheetLimits.defaults))
-    expect(globals.formats).toHaveLength(1000)
-    expect(globals.formats[0]).toMatchObject({ date: true })
-    expect(new Set(globals.formats).size).toBe(2)
+    expect(globals.styles.count).toBe(1000)
+    expect(globals.styles.format(0)).toMatchObject({ date: true })
+    expect(new Set(Array.from({ length: 1000 }, (_, k) => globals.styles.format(k))).size).toBe(2)
   })
 })

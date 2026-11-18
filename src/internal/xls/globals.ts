@@ -22,7 +22,7 @@ import { type BiffRecord, BOF_BIFF5_8, EOF, type Gathering, RecordReader, readBo
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { Fields } from "../binary.ts"
 import { WorkMeter } from "../meter.ts"
-import { formatFor, type NumberFormat } from "../numFmt.ts"
+import { cellStyles, type CellStyles, classify, type NumberFormat } from "../numFmt.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import { codepageLabel, readString, type Text, textDecoder } from "./fields.ts"
@@ -63,8 +63,8 @@ export interface Globals {
   readonly text: Text
   readonly date1904: boolean
   readonly sheets: ReadonlyArray<SheetEntry>
-  /** Number format by XF index (a cell's `ixfe`). */
-  readonly formats: ReadonlyArray<NumberFormat>
+  /** Number formats by XF index (a cell's `ixfe`). */
+  readonly styles: CellStyles
   readonly strings: ReadonlyArray<string>
   readonly definedNames: ReadonlyArray<DefinedNameEntry>
 }
@@ -231,7 +231,8 @@ class GlobalsWalk {
   readonly sheets: Array<Omit<SheetEntry, "end">> = []
   /** Offsets of VB module BOUNDSHEETs: not sheets, but they may start a substream. */
   readonly modules: Array<number> = []
-  readonly custom = new Map<number, string>()
+  /** Custom number formats by id, classified as their FORMAT is read. */
+  readonly custom = new Map<number, NumberFormat>()
   readonly xfFormats: Array<number> = []
   strings: Array<string> = []
   readonly names: Array<{ name: string; hidden: boolean; scope: number | undefined; rgce: Uint8Array }> = []
@@ -359,7 +360,12 @@ class GlobalsWalk {
         const id = f.u16(0)
         const code = readString(record.data, 2, this.text, biff8 ? 2 : 1)
         if (code === null) return tooLong(limits)
-        if (id !== undefined && code !== undefined) this.custom.set(id, code.value)
+        if (id !== undefined && code !== undefined) {
+          // classified here, once per FORMAT (a later one with the same id
+          // wins); the scan counts in the batch, by the code's length
+          this.custom.set(id, classify(code.value))
+          this.bytes += code.value.length
+        }
         return undefined
       }
       case XF:
@@ -533,7 +539,7 @@ class GlobalsWalk {
 /**
  * Reads the globals of a workbook stream (its first substream), in batches
  * of bounded work with a yield to the event loop between them, and so are
- * its number formats and defined names. Sheet names are made unique
+ * its defined names. Sheet names are made unique
  * (`uniqueSheetNames`). Each batch counts one unit of work on the meter.
  */
 export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<Globals, SpreadsheetError> =>
@@ -555,31 +561,8 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
     const ended = sheetEnds(stream, walk.reader.offset, sheets.map((s, k) => ({ ...s, name: unique[k]! })), walk.modules)
     if (ended instanceof MalformedFile) return yield* Effect.fail(ended)
 
-    // one NumberFormat per format id, not per XF (an id's code is parsed once)
-    const byId = new Map<number, NumberFormat>()
-    const formats: Array<NumberFormat> = []
-    // a batch is BATCH_RECORDS XFs, or ends sooner once the codes parsed
-    // in it (each id's once) reach BATCH_BYTES characters
-    let units = 0
-    let cost = 0
-    // progress: k up to xfFormats.length, yielding between batches
-    for (let k = 0; k < walk.xfFormats.length; k++) {
-      if (k === 0 || units >= BATCH_RECORDS || cost >= BATCH_BYTES) {
-        if (k > 0) yield* Effect.yieldNow
-        meter.add("batches", 1)
-        units = 0
-        cost = 0
-      }
-      units++
-      const id = walk.xfFormats[k]!
-      let format = byId.get(id)
-      if (format === undefined) {
-        cost += custom.get(id)?.length ?? 0
-        format = formatFor(id, custom)
-        byId.set(id, format)
-      }
-      formats.push(format)
-    }
+    // a lookup per cell: the codes were classified as their FORMATs were read
+    const styles = cellStyles(walk.xfFormats, walk.xfFormats.length, custom)
     const definedNames: Array<DefinedNameEntry> = []
     const sheetNames = ended.map((s) => s.name) // once, not per name
     // progress: k up to names.length (at most maxDefinedNames), yielding every BATCH_RECORDS
@@ -596,5 +579,5 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
           : { name: n.name, formula, hidden: n.hidden }
       )
     }
-    return { biff8: walk.biff8, text: walk.text, date1904: walk.date1904, sheets: ended, formats, strings: walk.strings, definedNames }
+    return { biff8: walk.biff8, text: walk.text, date1904: walk.date1904, sheets: ended, styles, strings: walk.strings, definedNames }
   })

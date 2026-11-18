@@ -32,9 +32,10 @@
  * @since 0.1.0
  */
 import { Effect, Stream } from "effect"
+import { type CellStyles, NO_STYLES } from "../internal/numFmt.ts"
 import { open } from "../internal/zip/archive.ts"
 import { readRelationships, relationshipKind } from "../internal/opc.ts"
-import { malformed, NO_STYLES, readSharedStrings, readStyles, readWorkbookPart, type Styles } from "../internal/xlsx/parts.ts"
+import { malformed, readSharedStrings, readStyles, readWorkbookPart } from "../internal/xlsx/parts.ts"
 import { sheetDetails } from "../internal/xlsx/details.ts"
 import { sheetRows } from "../internal/xlsx/sheet.ts"
 import { LimitExceeded, type SpreadsheetError } from "../SpreadsheetError.ts"
@@ -106,7 +107,7 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     const stringsEntry = partEntry("sharedStrings")
     const stylesEntry = partEntry("styles")
     const strings = stringsEntry === undefined ? undefined : yield* readSharedStrings(archive, stringsEntry, limits)
-    const styles: Styles = stylesEntry === undefined ? NO_STYLES : yield* readStyles(archive, stylesEntry, limits)
+    const styles: CellStyles = stylesEntry === undefined ? NO_STYLES : yield* readStyles(archive, stylesEntry, limits)
 
     const sheets: Array<Workbook.SheetInfo> = workbook.sheets.map((s, index) => ({
       name: s.name,

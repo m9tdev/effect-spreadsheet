@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { RecordSplitter } from "../src/internal/biff12/records.ts"
 import { readRelationships } from "../src/internal/opc.ts"
-import { NO_STYLES, readStyles } from "../src/internal/xlsb/parts.ts"
+import { NO_STYLES } from "../src/internal/numFmt.ts"
+import { readStyles } from "../src/internal/xlsb/parts.ts"
 import { SheetRows } from "../src/internal/xlsb/sheet.ts"
 import { definedNames, MAX_BOOKS, MAX_XTIS, readExternalBooks, readWorkbookBin } from "../src/internal/xlsb/workbook.ts"
 import { open } from "../src/internal/zip/archive.ts"
@@ -122,6 +123,23 @@ describe("xlsb reader", () => {
     expect([styles.format(1)?.date, styles.format(2)?.code, styles.format(5)]).toEqual([true, "0.000", undefined])
     const capped = await read(2)
     expect([capped.count, capped.format(1)?.date, capped.format(2)]).toEqual([2, true, undefined])
+  })
+
+  it("a custom number format given twice with the same id: the last one wins", async () => {
+    const stylesPart = B.concat([
+      B.record(0x116),
+      B.record(0x267, B.u32(2)),
+      B.fmt(164, "0.00"),
+      B.fmt(164, "yyyy-mm-dd"),
+      B.record(0x268),
+      B.record(0x269, B.u32(2)),
+      B.xf(0),
+      B.xf(164),
+      B.record(0x26A),
+      B.record(0x117)
+    ])
+    const { sheets } = await readOk(one([B.rowHdr(0), B.real(0, 45000, 1)], { stylesPart }))
+    expect(sheets[0]![0]!.cells[0]).toEqual(Cell.date(0, new Date("2023-03-15T00:00:00.000Z"), { numFmt: "yyyy-mm-dd" }))
   })
 
   it("dates in the 1904 system; serials outside Excel's dates stay numbers", async () => {

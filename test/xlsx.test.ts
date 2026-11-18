@@ -1,7 +1,7 @@
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
-import { formatFor, isDateCode, serialToDate } from "../src/internal/numFmt.ts"
+import { cellStyles, classify, isDateCode, serialToDate } from "../src/internal/numFmt.ts"
 import { resolvePart } from "../src/internal/opc.ts"
 import { columnName, parseCellRef, parseRange } from "../src/internal/refs.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
@@ -46,6 +46,8 @@ describe("number formats and serial dates", () => {
   })
 
   it("built-in format ids, custom codes winning, locale date ids", () => {
+    const formatFor = (id: number, custom: ReadonlyMap<number, string>) =>
+      cellStyles([id], 1, new Map(Array.from(custom, ([k, code]) => [k, classify(code)]))).format(0)!
     expect(formatFor(0, new Map())).toEqual({ code: undefined, date: false })
     expect(formatFor(14, new Map())).toEqual({ code: "mm-dd-yy", date: true })
     expect(formatFor(4, new Map())).toEqual({ code: "#,##0.00", date: false })
@@ -56,6 +58,16 @@ describe("number formats and serial dates", () => {
     expect(formatFor(70, new Map()).date).toBe(false)
     expect(formatFor(82, new Map()).date).toBe(false)
     expect(formatFor(500, new Map())).toEqual({ code: undefined, date: false })
+  })
+
+  it("cell styles: a lookup by style index, undefined past the styles", () => {
+    const styles = cellStyles(new Uint16Array([0, 14, 164, 0]), 3, new Map([[164, classify("0.000")]]))
+    expect([styles.count, styles.format(0), styles.format(1)?.date, styles.format(2)]).toEqual([3, { code: undefined, date: false }, true, { code: "0.000", date: false }])
+    // the id array may be longer than the styles kept
+    expect(styles.format(3)).toBeUndefined()
+    // a format is shared, not built per lookup
+    expect(styles.format(2)).toBe(styles.format(2))
+    expect(styles.format(1)).toBe(styles.format(1))
   })
 
   it("1900 system: 1 is 1900-01-01, the fictional day 60 has no date, 61 is 1900-03-01; 1904 system: 0 is 1904-01-01", () => {
@@ -165,6 +177,16 @@ describe("xlsx: cells and rows", () => {
       sheets: [{ name: "S", data: `<row><c s="1"><v>45000</v></c></row>` }]
     })
     expect(sheets[0]![0]!.cells[0]).toEqual(Cell.number(0, 45000, { numFmt: "0.00" }))
+  })
+
+  it("a custom number format given twice with the same id: the last one wins", async () => {
+    const { sheets } = await readOk({
+      xfs: [0, 164],
+      numFmts: { 164: "0.00" },
+      stylesExtra: `<numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts>`,
+      sheets: [{ name: "S", data: `<row><c s="1"><v>45000</v></c></row>` }]
+    })
+    expect(sheets[0]![0]!.cells[0]).toEqual(Cell.date(0, new Date("2023-03-15T00:00:00.000Z"), { numFmt: "yyyy-mm-dd" }))
   })
 
   it("rows and cells without references, out-of-order cells, hidden rows", async () => {
