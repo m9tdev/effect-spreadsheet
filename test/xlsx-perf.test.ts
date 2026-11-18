@@ -10,7 +10,7 @@
 import { Effect, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
-import { NO_STYLES } from "../src/internal/xlsx/parts.ts"
+import { NO_STYLES } from "../src/internal/numFmt.ts"
 import { sheetRows } from "../src/internal/xlsx/sheet.ts"
 import { parse } from "../src/internal/xml/parse.ts"
 import { open } from "../src/internal/zip/archive.ts"

@@ -39,7 +39,7 @@ import { BOF_BIFF5_8, type BiffRecord, CONTINUE, type ContinuedRecord, EOF, Reco
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { decodeRk, ERROR_CODES, Fields } from "../binary.ts"
 import { WorkMeter } from "../meter.ts"
-import { serialToDate } from "../numFmt.ts"
+import { numberCell } from "../numFmt.ts"
 import { compact, mergeSpans } from "../sheet.ts"
 import { readString } from "./fields.ts"
 import type { Globals } from "./globals.ts"
@@ -410,17 +410,8 @@ export class Rows {
 }
 
 /** A number cell, a Date when its XF has a date format. */
-const numberCell = (globals: Globals, column: number, xf: number, value: number): Cell.Cell => {
-  const format = globals.formats[xf]
-  const meta: Cell.Meta | undefined = format?.code === undefined ? undefined : { numFmt: format.code }
-  if (format?.date === true) {
-    const date = serialToDate(value, globals.date1904)
-    if (date !== undefined) return Cell.date(column, date, meta)
-  }
-  // NaN and infinities aren't Excel numbers: #NUM!, as for a formula result
-  if (!Number.isFinite(value)) return Cell.error(column, "#NUM!", meta)
-  return Cell.number(column, value === 0 ? 0 : value, meta)
-}
+const xfNumber = (globals: Globals, column: number, xf: number, value: number): Cell.Cell =>
+  numberCell(column, value, globals.styles.format(xf), globals.date1904)
 
 /** Handles one record of the substream; `true` at its EOF. */
 const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: SheetContext): SpreadsheetError | boolean => {
@@ -493,13 +484,13 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
       const at = rc()
       const value = f.f64(6)
       if (at === undefined || value === undefined) return truncated()
-      return rows.cell(at[0], numberCell(globals, at[1], at[2], value)) ?? false
+      return rows.cell(at[0], xfNumber(globals, at[1], at[2], value)) ?? false
     }
     case RK: {
       const at = rc()
       const rk = f.u32(6)
       if (at === undefined || rk === undefined) return truncated()
-      return rows.cell(at[0], numberCell(globals, at[1], at[2], decodeRk(rk))) ?? false
+      return rows.cell(at[0], xfNumber(globals, at[1], at[2], decodeRk(rk))) ?? false
     }
     case MULRK:
     case MULBLANK: {
@@ -516,7 +507,7 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
       for (let k = 0; k < count; k++) {
         const xf = f.u16(4 + width * k)!
         const cell = record.type === MULRK
-          ? numberCell(globals, first + k, xf, decodeRk(f.u32(6 + width * k)!))
+          ? xfNumber(globals, first + k, xf, decodeRk(f.u32(6 + width * k)!))
           : Cell.empty(first + k)
         const error = rows.cell(row, cell)
         if (error !== undefined) return error
@@ -555,7 +546,7 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
         return rows.cell(at[0], Cell.text(at[1], "")) ?? false
       }
       const value = f.f64(6)!
-      return rows.cell(at[0], numberCell(globals, at[1], at[2], value)) ?? false
+      return rows.cell(at[0], xfNumber(globals, at[1], at[2], value)) ?? false
     }
     case STRING: {
       const pending = rows.wait

@@ -44,17 +44,17 @@ import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../Sprea
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
 import { decoded, step } from "../decode.ts"
-import { serialToDate } from "../numFmt.ts"
+import { type CellStyles, numberCell, type NumberFormat, withNumFmt } from "../numFmt.ts"
 import { parseCellRef } from "../refs.ts"
 import { compact, NO_ROWS } from "../sheet.ts"
 import { xmlDecoder } from "../xml/parse.ts"
 import { attr, type XmlAttributes, type XmlHandler } from "../xml/tokenizer.ts"
-import { isTrue, malformed, RichText, type Styles, unescapeXstring } from "./parts.ts"
+import { isTrue, malformed, RichText, unescapeXstring } from "./parts.ts"
 
 export interface SheetContext {
   readonly part: string
   readonly strings: ReadonlyArray<string> | undefined
-  readonly styles: Styles
+  readonly styles: CellStyles
   readonly date1904: boolean
   readonly limits: Limits
 }
@@ -378,7 +378,7 @@ export class SheetRows implements XmlHandler {
         if (v === "") return Cell.empty(column, meta)
         const time = ISO_DATE.test(v) ? Date.parse(/[zZ]|[+-]\d{2}:\d{2}$/.test(v) || !v.includes("T") ? v : `${v}Z`) : NaN
         if (Number.isNaN(time)) return malformed(`bad date ${JSON.stringify(v.slice(0, 40))}`, part)
-        return Cell.date(column, new Date(time), this.withFormat(pending, meta))
+        return Cell.date(column, new Date(time), withNumFmt(meta, this.format(pending)))
       }
       case undefined:
       case "n": {
@@ -386,24 +386,17 @@ export class SheetRows implements XmlHandler {
         if (v === "") return Cell.empty(column, meta)
         if (!DOUBLE.test(v)) return malformed(`bad number ${JSON.stringify(v.slice(0, 40))}`, part)
         const n = Number(v)
+        // XLSX's own rule: text out of the double range is a malformed file (not #NUM!)
         if (!Number.isFinite(n)) return malformed(`number out of range ${JSON.stringify(v.slice(0, 40))}`, part)
-        const format = pending.style === undefined ? undefined : this.context.styles.formats[pending.style]
-        const withFormat = this.withFormat(pending, meta)
-        if (format?.date === true) {
-          const date = serialToDate(n, this.context.date1904)
-          if (date !== undefined) return Cell.date(column, date, withFormat)
-        }
-        return Cell.number(column, n === 0 ? 0 : n, withFormat)
+        return numberCell(column, n, this.format(pending), this.context.date1904, meta)
       }
       default:
         return malformed(`unknown cell type ${JSON.stringify(pending.type.slice(0, 20))}`, part)
     }
   }
 
-  private withFormat(pending: PendingCell, meta: Cell.Meta | undefined): Cell.Meta | undefined {
-    const code = pending.style === undefined ? undefined : this.context.styles.formats[pending.style]?.code
-    if (code === undefined) return meta
-    return { ...meta, numFmt: code }
+  private format(pending: PendingCell): NumberFormat | undefined {
+    return pending.style === undefined ? undefined : this.context.styles.format(pending.style)
   }
 
   /** A row whose index (0-based) isn't above the previous row's. */

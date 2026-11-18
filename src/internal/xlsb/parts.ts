@@ -10,7 +10,7 @@ import type { Limits } from "../../SpreadsheetLimits.ts"
 import { Fields } from "../binary.ts"
 import { readRichStr, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords } from "../biff12/records.ts"
-import { formatFor, isDateCode, type NumberFormat } from "../numFmt.ts"
+import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
 import { malformed, tooLong } from "./workbook.ts"
@@ -48,55 +48,16 @@ export const readSharedStrings = (
     return Effect.as(readRecords(archive.read(entry), handle, limits, entry.name), strings)
   })
 
-/**
- * The number formats of the cell styles: a cell's style index (u24) is an
- * index into the BrtXF records of BrtBeginCellXFs. Kept as one u16 format
- * id per style (at most `MAX_CELL_XFS` styles, the u24 range): a flood of
- * tiny BrtXF records costs 2 bytes each. Custom formats are classified
- * when their BrtFmt record is read, so a lookup never scans a code (a code
- * can be as long as `maxStringLength`, and the rows stream doesn't yield
- * between the cells of a row); a built-in format gets its `NumberFormat`
- * when a cell first uses it, at constant cost.
- */
-export interface CellStyles {
-  /** The number format of a cell style; `undefined` past the styles. */
-  readonly format: (style: number) => NumberFormat | undefined
-  /** Styles kept. */
-  readonly count: number
-}
-
 /** Cell styles kept at most: a cell's style index is 24 bits. */
 export const MAX_CELL_XFS = 0x1000000
-
-const NO_CUSTOM: ReadonlyMap<number, string> = new Map()
-
-/** `custom`: the workbook's own formats, already classified. */
-const cellStyles = (ids: Uint16Array, count: number, custom: ReadonlyMap<number, NumberFormat>): CellStyles => {
-  const builtin = new Map<number, NumberFormat>()
-  return {
-    count,
-    format: (style) => {
-      if (style >= count) return undefined
-      const id = ids[style]!
-      const own = custom.get(id)
-      if (own !== undefined) return own
-      let format = builtin.get(id)
-      if (format === undefined) {
-        format = formatFor(id, NO_CUSTOM)
-        builtin.set(id, format)
-      }
-      return format
-    }
-  }
-}
-
-export const NO_STYLES: CellStyles = cellStyles(new Uint16Array(0), 0, new Map())
 
 /**
  * Reads the number formats (BrtFmt in BrtBeginFmts) and the cell styles
  * that use them (BrtXF in BrtBeginCellXFs), as for XLSX. BrtXF records
- * elsewhere (cell style XFs, differential formats) don't count. Styles
- * past `maxCellXfs` (tests lower it) aren't kept.
+ * elsewhere (cell style XFs, differential formats) don't count. Kept as one
+ * u16 format id per style: a flood of tiny BrtXF records costs 2 bytes
+ * each. Styles past `maxCellXfs` (at most `MAX_CELL_XFS`, the u24 range;
+ * tests lower it) aren't kept.
  */
 export const readStyles = (
   archive: Archive,
@@ -131,8 +92,10 @@ export const readStyles = (
           const code = readWideString(record.data, 2, limits.maxStringLength)
           if (id === undefined || code === undefined) return malformed("truncated number format", entry.name, record.offset)
           if (typeof code === "number") return tooLong(limits, code)
-          // classified here, a slice per event-loop turn, not on the cells' turn
-          custom.set(id, { code: code.value, date: isDateCode(code.value) })
+          // classified here, a slice per event-loop turn, not on the cells'
+          // turn (the rows stream doesn't yield between the cells of a row);
+          // a later BrtFmt with the same id wins
+          addFormat(custom, id, code.value)
           return undefined
         }
         case BRT_XF: {

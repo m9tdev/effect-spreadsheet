@@ -1,7 +1,7 @@
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
-import { NO_STYLES } from "../src/internal/xlsx/parts.ts"
+import { NO_STYLES } from "../src/internal/numFmt.ts"
 import { SheetRows } from "../src/internal/xlsx/sheet.ts"
 import { XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"

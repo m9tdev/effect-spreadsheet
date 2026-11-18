@@ -9,7 +9,7 @@
 import { Effect } from "effect"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import { builtinFormat, isDateCode, type NumberFormat } from "../numFmt.ts"
+import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import { parsePart } from "../opc.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import { attr, type XmlAttributes, type XmlHandler } from "../xml/tokenizer.ts"
@@ -219,19 +219,12 @@ export const readSharedStrings = (
   return Effect.as(parsePart(archive, entry, handler, limits), strings)
 }
 
-/** Number formats by cell style (`<c s="...">` is an index into `cellXfs`). */
-export interface Styles {
-  readonly formats: ReadonlyArray<NumberFormat>
-}
-
-export const NO_STYLES: Styles = { formats: [] }
-
-/** Reads the number formats and the cell styles that use them. */
+/** Reads the number formats and the cell styles that use them (`<c s="...">` is an index into `cellXfs`). */
 export const readStyles = (
   archive: Archive,
   entry: ZipEntry,
   limits: Limits
-): Effect.Effect<Styles, SpreadsheetError> => {
+): Effect.Effect<CellStyles, SpreadsheetError> => {
   // each custom code is classified once, here in the parse (which yields
   // between pieces), not once per cell style after it: one code is at most
   // maxStringLength characters
@@ -248,7 +241,8 @@ export const readStyles = (
         const id = attr(attributes, "numFmtId")
         const code = attr(attributes, "formatCode")
         if (id !== undefined && code !== undefined && /^\d{1,9}$/.test(id)) {
-          custom.set(Number(id), { code, date: isDateCode(code) })
+          // a later <numFmt> with the same id wins
+          addFormat(custom, Number(id), code)
         }
       } else if (name === "cellXfs") inCellXfs = true
       else if (name === "xf" && inCellXfs) {
@@ -262,8 +256,5 @@ export const readStyles = (
     },
     text: () => undefined
   }
-  return Effect.map(parsePart(archive, entry, handler, limits), () => ({
-    // shared formats: custom ones from the parse, built-in ones from a fixed table
-    formats: xfIds.map((id) => custom.get(id) ?? builtinFormat(id))
-  }))
+  return Effect.map(parsePart(archive, entry, handler, limits), () => cellStyles(xfIds, xfIds.length, custom))
 }

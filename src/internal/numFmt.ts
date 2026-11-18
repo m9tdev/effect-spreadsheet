@@ -1,9 +1,11 @@
 /**
  * Number formats: the built-in codes (ECMA-376 Part 1, §18.8.30), whether a
- * code formats dates or times, and serial dates.
+ * code formats dates or times, the cell-style table shared by the XLSX, XLSB
+ * and XLS readers, number cells, and serial dates.
  *
  * @internal
  */
+import * as Cell from "../Cell.ts"
 
 /** Built-in number formats with a fixed code (ECMA-376 Part 1, §18.8.30). */
 export const BUILTIN_FORMATS: ReadonlyMap<number, string> = new Map([
@@ -98,13 +100,86 @@ const BUILTIN: ReadonlyMap<number, NumberFormat> = new Map(
 )
 
 /** The format for a numFmtId with no custom code: shared, never classified again. */
-export const builtinFormat = (id: number): NumberFormat =>
+const builtinFormat = (id: number): NumberFormat =>
   id === 0 ? GENERAL : BUILTIN.get(id) ?? (LOCALE_DATE_IDS.has(id) ? LOCALE_DATE : GENERAL)
 
-/** The format for a numFmtId, given the workbook's custom codes. */
-export const formatFor = (id: number, custom: ReadonlyMap<number, string>): NumberFormat => {
-  const own = custom.get(id)
-  return own !== undefined ? { code: own, date: isDateCode(own) } : builtinFormat(id)
+/**
+ * A custom format code, classified: the part readers call this where they
+ * parse the code (`<numFmt>`, BrtFmt, FORMAT), once per code, so the scan's
+ * cost falls in their parse loop, which yields between bounded pieces. A
+ * code is at most `maxStringLength` characters.
+ */
+export const classify = (code: string): NumberFormat => ({ code, date: isDateCode(code) })
+
+/**
+ * Adds the custom format `code` with `id` to `formats`, classified: a later
+ * code with the same id wins, and the same code again changes nothing (so
+ * it isn't scanned again).
+ */
+export const addFormat = (formats: Map<number, NumberFormat>, id: number, code: string): void => {
+  if (formats.get(id)?.code !== code) formats.set(id, classify(code))
+}
+
+/**
+ * The number formats of a workbook's cell styles: a cell's style index is an
+ * index into its cell formats (`cellXfs`, BrtXF, XF), each of which names a
+ * number format id. A lookup only, never a scan: custom codes come
+ * classified, and built-in ids get a shared format, at constant cost.
+ */
+export interface CellStyles {
+  /** The number format of a cell style; `undefined` past the styles. */
+  readonly format: (style: number) => NumberFormat | undefined
+  /** Styles kept. */
+  readonly count: number
+}
+
+/**
+ * The styles of `ids` (the number format id of each style, the first `count`
+ * of them used), given the workbook's custom formats, already classified;
+ * a custom format takes the place of a built-in one with its id.
+ */
+export const cellStyles = (
+  ids: ArrayLike<number>,
+  count: number,
+  formats: ReadonlyMap<number, NumberFormat>
+): CellStyles => ({
+  count,
+  format: (style) => {
+    if (style >= count) return undefined
+    const id = ids[style]!
+    return formats.get(id) ?? builtinFormat(id)
+  }
+})
+
+/** No cell styles: a workbook without them. */
+export const NO_STYLES: CellStyles = cellStyles([], 0, new Map())
+
+/** `meta` with the code of `format`, when it has one. */
+export const withNumFmt = (meta: Cell.Meta | undefined, format: NumberFormat | undefined): Cell.Meta | undefined => {
+  const code = format?.code
+  return code === undefined ? meta : { ...meta, numFmt: code }
+}
+
+/**
+ * A number cell, with its format's code: a `Date` when the format shows
+ * dates and the serial is in Excel's range, else a number (`-0` as `0`).
+ * NaN and the infinities aren't Excel numbers: `#NUM!`, as for a formula
+ * result. (The XLSX reader rejects them earlier, while parsing the text.)
+ */
+export const numberCell = (
+  column: number,
+  value: number,
+  format: NumberFormat | undefined,
+  date1904: boolean,
+  meta?: Cell.Meta
+): Cell.Cell => {
+  const withFormat = withNumFmt(meta, format)
+  if (format?.date === true) {
+    const date = serialToDate(value, date1904)
+    if (date !== undefined) return Cell.date(column, date, withFormat)
+  }
+  if (!Number.isFinite(value)) return Cell.error(column, "#NUM!", withFormat)
+  return Cell.number(column, value === 0 ? 0 : value, withFormat)
 }
 
 const DAY_MS = 86_400_000

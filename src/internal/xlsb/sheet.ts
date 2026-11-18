@@ -45,9 +45,8 @@ import { decodeRk, ERROR_CODES, Fields } from "../binary.ts"
 import { readRichStr, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords, recordDecoder } from "../biff12/records.ts"
 import { decoded, step } from "../decode.ts"
-import { serialToDate } from "../numFmt.ts"
+import { type CellStyles, numberCell } from "../numFmt.ts"
 import { compact, mergeSpans, NO_ROWS } from "../sheet.ts"
-import type { CellStyles } from "./parts.ts"
 import { malformed, tooLong } from "./workbook.ts"
 
 export interface SheetContext {
@@ -315,15 +314,7 @@ export class SheetRows {
 
   /** A number cell, a Date when its style has a date format. */
   private numberCell(column: number, style: number, value: number): Cell.Cell {
-    const format = this.context.styles.format(style)
-    const meta: Cell.Meta | undefined = format?.code === undefined ? undefined : { numFmt: format.code }
-    if (format?.date === true) {
-      const date = serialToDate(value, this.context.date1904)
-      if (date !== undefined) return Cell.date(column, date, meta)
-    }
-    // NaN and infinities aren't Excel numbers: #NUM!, as for a formula result
-    if (!Number.isFinite(value)) return Cell.error(column, "#NUM!", meta)
-    return Cell.number(column, value === 0 ? 0 : value, meta)
+    return numberCell(column, value, this.context.styles.format(style), this.context.date1904)
   }
 }
 

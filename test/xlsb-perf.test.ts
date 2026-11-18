@@ -10,7 +10,7 @@
 import { Effect, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import { SLICE_BYTES } from "../src/internal/bytes.ts"
-import { NO_STYLES } from "../src/internal/xlsb/parts.ts"
+import { NO_STYLES } from "../src/internal/numFmt.ts"
 import { sheetDetails, sheetRows } from "../src/internal/xlsb/sheet.ts"
 import { open } from "../src/internal/zip/archive.ts"
 import type { InflateRaw } from "../src/internal/zip/inflate.ts"

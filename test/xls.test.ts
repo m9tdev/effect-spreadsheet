@@ -60,6 +60,11 @@ describe("xls fields", () => {
 })
 
 describe("xls: cells and rows (BIFF8)", () => {
+  it("a custom number format given twice with the same id: the last one wins", async () => {
+    const { sheets } = await readOk(one([X.row(0), X.number(0, 0, 1, 45000)], [X.format(164, "0.00"), X.format(164, "yyyy-mm-dd"), X.xf(0), X.xf(164)]))
+    expect(sheets[0]![0]!.cells[0]).toEqual(Cell.date(0, new Date("2023-03-15T00:00:00.000Z"), { numFmt: "yyyy-mm-dd" }))
+  })
+
   it("every cell record type, with number formats and dates", async () => {
     const { sheets } = await readOk(one([
       X.row(0), X.row(1),
