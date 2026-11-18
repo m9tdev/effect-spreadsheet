@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest"
 import { open } from "../src/internal/zip/archive.ts"
 import { parse, XmlDecoder } from "../src/internal/xml/parse.ts"
 import { isName, type XmlHandler, XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
-import { isSpreadsheetError, type SpreadsheetError } from "../src/SpreadsheetError.ts"
+import { isSpreadsheetError, MalformedFile, type SpreadsheetError } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import { counter, metered } from "./helpers/meter.ts"
 import { failureOf } from "./helpers/run.ts"
@@ -307,6 +307,99 @@ describe("xml tokenizer: one root element", () => {
     expect(error).toBeUndefined()
     expect(events).toEqual([["open", "a", []], ["close", "a"]])
   })
+})
+
+describe("xml tokenizer: after an error", () => {
+  const stop = new MalformedFile({ format: "xml", reason: "handler stop" })
+
+  /** Handler calls with consecutive text calls joined (a split may cut a text run). */
+  const joinText = (calls: ReadonlyArray<string>): Array<string> => {
+    const out: Array<string> = []
+    for (const call of calls) {
+      const last = out[out.length - 1]
+      if (last !== undefined && last.startsWith("text ") && call.startsWith("text ")) out[out.length - 1] = last + call.slice(5)
+      else out.push(call)
+    }
+    return out
+  }
+
+  /**
+   * Feeds `pieces`, ends, then feeds more and ends again. Records every
+   * handler call (the handler fails on the call `stopAt` names) and every
+   * result.
+   */
+  const run = (pieces: ReadonlyArray<string>, stopAt: string | undefined, l: SpreadsheetLimits.Limits) => {
+    const calls: Array<string> = []
+    const call = (event: string) => {
+      calls.push(event)
+      return event === stopAt ? stop : undefined
+    }
+    const handler: XmlHandler = {
+      open: (name) => call(`open ${name}`),
+      close: (name) => call(`close ${name}`),
+      text: (value) => call(`text ${value}`)
+    }
+    const tokenizer = new XmlTokenizer(handler, l)
+    const results: Array<SpreadsheetError | undefined> = pieces.map((piece) => tokenizer.feed(piece))
+    results.push(tokenizer.end())
+    const settled = calls.length
+    results.push(tokenizer.feed("<a>more</a>"), tokenizer.end(), tokenizer.end())
+    return { calls, settled, results }
+  }
+
+  const cases: ReadonlyArray<{
+    readonly name: string
+    readonly doc: string
+    readonly stopAt?: string
+    readonly limits?: SpreadsheetLimits.Limits
+    readonly error: Partial<{ _tag: string; reason: string; limit: string }>
+  }> = [
+    { name: "a bad entity in text", doc: "<r>a<s/>b &bogus; c</r>", error: { _tag: "MalformedFile" } },
+    { name: "a bad attribute", doc: "<r><s a=1/><t/></r>", error: { _tag: "MalformedFile" } },
+    {
+      name: "text over maxStringLength",
+      doc: `<r><s/>${"x".repeat(40)}<t/></r>`,
+      limits: { ...limits, maxStringLength: 10 },
+      error: { _tag: "LimitExceeded", limit: "maxStringLength" }
+    },
+    {
+      name: "a comment over maxStringLength",
+      doc: `<r><s/><!--${"x".repeat(70 * 1024)}--><t/></r>`,
+      limits: { ...limits, maxStringLength: 10 },
+      error: { _tag: "LimitExceeded", limit: "maxStringLength" }
+    },
+    { name: "the open handler of a self-closing tag", doc: "<r><s/><t/></r>", stopAt: "open s", error: stop },
+    { name: "the text handler", doc: "<r>a<s/>b</r>", stopAt: "text a", error: stop },
+    { name: "the close handler", doc: "<r><s></s><t/></r>", stopAt: "close s", error: stop },
+    { name: "the end of input inside an element", doc: "<r><s>", error: { _tag: "MalformedFile" } }
+  ]
+
+  for (const c of cases) {
+    it(`${c.name}: every later feed and end returns the same error, and no handler runs after it`, () => {
+      const l = c.limits ?? limits
+      const whole = run([c.doc], c.stopAt, l)
+      const at = whole.results.findIndex((r) => r !== undefined)
+      const error = whole.results[at]
+      expect(error).toMatchObject(c.error)
+      for (const later of whole.results.slice(at)) expect(later).toBe(error)
+      expect(whole.calls.length).toBe(whole.settled)
+      if (c.stopAt !== undefined) expect(whole.calls[whole.calls.length - 1]).toBe(c.stopAt)
+      // the same however the input is split, with no handler call after the error
+      // (every cut of a short document, about 500 cuts of a long one)
+      const step = Math.max(1, Math.floor(c.doc.length / 500))
+      for (let cut = 0; cut <= c.doc.length; cut += step) {
+        const split = run([c.doc.slice(0, cut), c.doc.slice(cut)], c.stopAt, l)
+        const first = split.results.findIndex((r) => r !== undefined)
+        const splitError = split.results[first]
+        expect(splitError).toMatchObject(c.error)
+        // (a limit error's `actual` is how far the scan got, which depends on the split)
+        if (splitError?._tag === "MalformedFile") expect(splitError.message).toBe(error?.message)
+        for (const later of split.results.slice(first)) expect(later).toBe(splitError)
+        expect(split.calls.length).toBe(split.settled)
+        expect(joinText(split.calls)).toEqual(joinText(whole.calls))
+      }
+    })
+  }
 })
 
 describe("xml names", () => {
