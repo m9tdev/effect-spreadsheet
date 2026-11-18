@@ -1,13 +1,11 @@
 /**
  * The string forms of BIFF12 record data, bounds-checked against the
  * record and against `maxStringLength`. Fixed-size fields are read with
- * the XLS reader's `Fields` (absolute offsets, `undefined` out of bounds).
+ * the shared `Fields` (absolute offsets, `undefined` out of bounds).
  *
  * @internal
  */
 import { utf16 } from "../biff/segments.ts"
-
-export { Fields } from "../xls/fields.ts"
 
 /** A string read at some offset, and the offset after it. */
 export interface Read<A> {

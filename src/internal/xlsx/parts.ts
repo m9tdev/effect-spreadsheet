@@ -1,6 +1,6 @@
 /**
- * The small XLSX parts read when a workbook is opened: relationships, the
- * workbook part, shared strings and styles. Each is tokenized as a stream
+ * The small XLSX parts read when a workbook is opened: the workbook part,
+ * shared strings and styles. Each is tokenized as a stream
  * with the XML limits, so a huge or hostile part costs work in proportion
  * to its bytes and fails with a typed error.
  *
@@ -9,22 +9,15 @@
 import { Effect } from "effect"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
+import { builtinFormat, isDateCode, type NumberFormat } from "../numFmt.ts"
+import { parsePart } from "../opc.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
-import { parse } from "../xml/parse.ts"
-import type { XmlAttributes, XmlHandler } from "../xml/tokenizer.ts"
+import { attr, type XmlAttributes, type XmlHandler } from "../xml/tokenizer.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
-import { builtinFormat, isDateCode, type NumberFormat } from "./numFmt.ts"
 
 export const malformed = (reason: string, part?: string) =>
   new MalformedFile({ format: "xlsx", reason, ...(part === undefined ? {} : { part }) })
-
-/** The value of attribute `name` (as written, e.g. `name`, `r:id`). */
-export const attr = (attributes: XmlAttributes, name: string): string | undefined => {
-  // progress: one attribute per iteration (bounded by maxXmlAttributes)
-  for (const [key, value] of attributes) if (key === name) return value
-  return undefined
-}
 
 /** A relationship id attribute: `id` with any namespace prefix (`r:id`, `x:id`). */
 export const relationshipId = (attributes: XmlAttributes): string | undefined => {
@@ -38,83 +31,6 @@ export const relationshipId = (attributes: XmlAttributes): string | undefined =>
 
 /** `true`/`1` (xsd:boolean). */
 export const isTrue = (value: string | undefined): boolean => value === "1" || value === "true"
-
-/** Tokenizes one part with `handler`. */
-export const parsePart = (
-  archive: Archive,
-  entry: ZipEntry,
-  handler: XmlHandler,
-  limits: Limits
-): Effect.Effect<void, SpreadsheetError> => parse(archive.read(entry), handler, limits, entry.name)
-
-/**
- * Resolves a relationship target against the directory of its source part
- * (OPC part names: `/` separated, `.`/`..` segments, percent-encoding).
- * `undefined` if it climbs above the package root or isn't decodable.
- */
-export const resolvePart = (sourcePart: string, target: string): string | undefined => {
-  const base = target.startsWith("/") ? [] : sourcePart.split("/").slice(0, -1)
-  const out = [...base]
-  // progress: one segment per iteration
-  for (const raw of target.split("/")) {
-    let segment: string
-    try {
-      segment = decodeURIComponent(raw)
-    } catch {
-      return undefined
-    }
-    if (segment === "" || segment === ".") continue
-    if (segment === "..") {
-      if (out.length === 0) return undefined
-      out.pop()
-      continue
-    }
-    out.push(segment)
-  }
-  return out.length === 0 ? undefined : out.join("/")
-}
-
-/** The relationships part of a part: `xl/workbook.xml` -> `xl/_rels/workbook.xml.rels`. */
-export const relsPartOf = (part: string): string => {
-  const slash = part.lastIndexOf("/")
-  return `${part.slice(0, slash + 1)}_rels/${part.slice(slash + 1)}.rels`
-}
-
-export interface Relationship {
-  readonly id: string
-  /** The type URI. Compared by its last segment, so transitional and strict OOXML both match. */
-  readonly type: string
-  /** The resolved part name; `undefined` for external or unresolvable targets. */
-  readonly part: string | undefined
-}
-
-/** The last path segment of a relationship type URI (`.../officeDocument` -> `officeDocument`). */
-export const relationshipKind = (type: string): string => type.slice(type.lastIndexOf("/") + 1)
-
-/** Reads the relationships of `sourcePart` (an empty list if the part has none). */
-export const readRelationships = (
-  archive: Archive,
-  sourcePart: string,
-  limits: Limits
-): Effect.Effect<ReadonlyArray<Relationship>, SpreadsheetError> => {
-  const entry = archive.find(sourcePart === "" ? "_rels/.rels" : relsPartOf(sourcePart))
-  if (entry === undefined) return Effect.succeed([])
-  const relationships: Array<Relationship> = []
-  const handler: XmlHandler = {
-    open: (name, attributes) => {
-      if (name !== "Relationship") return
-      const id = attr(attributes, "Id")
-      const type = attr(attributes, "Type")
-      const target = attr(attributes, "Target")
-      if (id === undefined || type === undefined || target === undefined) return
-      const external = attr(attributes, "TargetMode") === "External"
-      relationships.push({ id, type, part: external ? undefined : resolvePart(sourcePart, target) })
-    },
-    close: () => undefined,
-    text: () => undefined
-  }
-  return Effect.as(parsePart(archive, entry, handler, limits), relationships)
-}
 
 export type SheetKind = "worksheet" | "chartsheet" | "dialogsheet" | "macrosheet" | "other"
 

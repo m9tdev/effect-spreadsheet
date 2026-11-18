@@ -8,15 +8,7 @@
  *
  * @internal
  */
-import { columnName } from "./xlsx/refs.ts"
-
-/** The column number of letters (`A` 1, `XFD` 16384). */
-const columnNumber = (letters: string): number => {
-  let n = 0
-  // progress: k up to letters.length
-  for (let k = 0; k < letters.length; k++) n = n * 26 + (letters.toUpperCase().charCodeAt(k) - 64)
-  return n
-}
+import { columnName, parseCellRef } from "./refs.ts"
 
 /**
  * Whether a sheet name needs quotes in a reference, as Excel writes them:
@@ -29,7 +21,9 @@ export const needsQuotes = (name: string): boolean => {
   if (!/^[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_.\u0080-\uFFFF]*$/.test(name)) return true
   if (/^(?:R\d*|C\d*|R\d*C\d*)$/i.test(name)) return true
   const a1 = /^([A-Za-z]{1,3})\d+$/.exec(name)
-  return a1 !== null && columnNumber(a1[1]!) <= 16384
+  // the column of the letters alone (0-based; XFD is 16383)
+  const column = a1 === null ? undefined : parseCellRef(a1[1]!)?.column
+  return column !== undefined && column < 16384
 }
 
 /** A sheet prefix (`Sheet!`, `'My Sheet'!`, `Jan:Mar!`, `[1]Data!`): quoted as a whole when any sheet name needs it. */

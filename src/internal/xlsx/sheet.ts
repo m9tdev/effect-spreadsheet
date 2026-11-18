@@ -45,11 +45,12 @@ import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../Sprea
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
 import { WorkMeter } from "../meter.ts"
+import { serialToDate } from "../numFmt.ts"
+import { parseCellRef } from "../refs.ts"
+import { compact, DONE, type PullState, READING } from "../sheet.ts"
 import { XmlDecoder } from "../xml/parse.ts"
-import { type XmlAttributes, type XmlHandler, XmlTokenizer } from "../xml/tokenizer.ts"
-import { serialToDate } from "./numFmt.ts"
-import { attr, isTrue, malformed, RichText, type Styles, unescapeXstring } from "./parts.ts"
-import { parseCellRef } from "./refs.ts"
+import { attr, type XmlAttributes, type XmlHandler, XmlTokenizer } from "../xml/tokenizer.ts"
+import { isTrue, malformed, RichText, type Styles, unescapeXstring } from "./parts.ts"
 
 export interface SheetContext {
   readonly part: string
@@ -105,22 +106,6 @@ interface RowFields {
 type OpenRow =
   | RowFields & { readonly _tag: "Numbered"; readonly index: number }
   | RowFields & { readonly _tag: "Unnumbered"; readonly index: undefined }
-
-/**
- * Sorts a row's cells by column in place, keeping the last cell of each
- * column (`sort` is stable), and returns them.
- */
-export const compact = (cells: Array<Cell.Cell>): Array<Cell.Cell> => {
-  cells.sort((a, b) => a.column - b.column)
-  let kept = 0
-  // progress: k up to cells.length
-  for (let k = 0; k < cells.length; k++) {
-    const next = cells[k + 1]
-    if (next === undefined || next.column !== cells[k]!.column) cells[kept++] = cells[k]!
-  }
-  cells.length = kept
-  return cells
-}
 
 /** Collects rows from tokenizer events. Exported for tests. */
 export class SheetRows implements XmlHandler {
@@ -444,19 +429,6 @@ export class SheetRows implements XmlHandler {
     return undefined
   }
 }
-
-/**
- * Where a sheet's row stream is: reading input; failing, with the rows
- * completed before the error already emitted; or done (the input ended,
- * or the error was raised). Shared with the XLSB reader.
- */
-export type PullState =
-  | { readonly _tag: "Reading" }
-  | { readonly _tag: "Failing"; readonly error: SpreadsheetError }
-  | { readonly _tag: "Done" }
-
-export const READING: PullState = { _tag: "Reading" }
-export const DONE: PullState = { _tag: "Done" }
 
 /**
  * Rows of a worksheet part, given its byte stream. Re-runnable when the

@@ -36,10 +36,12 @@ import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../Sprea
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { ColumnSpan, Range, Row, SheetDetails } from "../../Workbook.ts"
 import { BOF_BIFF5_8, type BiffRecord, CONTINUE, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
-import { WorkMeter } from "../meter.ts"
-import { serialToDate } from "../xlsx/numFmt.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
-import { decodeRk, ERROR_CODES, Fields, readString } from "./fields.ts"
+import { decodeRk, ERROR_CODES, Fields } from "../binary.ts"
+import { WorkMeter } from "../meter.ts"
+import { serialToDate } from "../numFmt.ts"
+import { compact, mergeSpans } from "../sheet.ts"
+import { readString } from "./fields.ts"
 import type { Globals } from "./globals.ts"
 
 /** Records handled per pull: bounded work between event-loop turns. */
@@ -186,22 +188,6 @@ class RowScan {
     }
     return max
   }
-}
-
-/**
- * Sorts a row's cells by column in place, keeping the last cell of each
- * column (`sort` is stable), and returns them.
- */
-const compact = (cells: Array<Cell.Cell>): Array<Cell.Cell> => {
-  cells.sort((a, b) => a.column - b.column)
-  let kept = 0
-  // progress: k up to cells.length
-  for (let k = 0; k < cells.length; k++) {
-    const next = cells[k + 1]
-    if (next === undefined || next.column !== cells[k]!.column) cells[kept++] = cells[k]!
-  }
-  cells.length = kept
-  return cells
 }
 
 /**
@@ -702,19 +688,6 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
     // the steps of the last batch count also when the pull fails
     return Effect.ensuring(pull, report)
   }))
-
-/** Merges sorted spans that overlap or touch. */
-const mergeSpans = (spans: ReadonlyArray<ColumnSpan>): Array<ColumnSpan> => {
-  const sorted = [...spans].sort((a, b) => a.first - b.first)
-  const out: Array<{ first: number; last: number }> = []
-  // progress: one span per iteration
-  for (const span of sorted) {
-    const last = out[out.length - 1]
-    if (last !== undefined && span.first <= last.last + 1) last.last = Math.max(last.last, span.last)
-    else out.push({ first: span.first, last: span.last })
-  }
-  return out
-}
 
 /**
  * Hidden columns (COLINFO), merges (MERGECELLS) and the declared dimension
