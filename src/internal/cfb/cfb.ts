@@ -179,10 +179,10 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
 
   // FAT sector numbers: 109 in the header, the rest in the DIFAT chain.
   // Some writers (pyExcelerator) declare more FAT sectors than the file has
-  // (109 in an 8-sector file) and list only the real ones, the rest free:
-  // when the count can't be true, the FAT is the in-use entries listed.
+  // (109 in an 8-sector file) and list only the real ones, the rest free.
+  // The declared count only bounds how many numbers are collected; the FAT
+  // is the listed entries, which must cover the sectors the file has.
   const declaredFat = u32(44)
-  const countLies = declaredFat > fileSectors
   const numFatWanted = Math.min(declaredFat, fileSectors)
   const fatSectors: Array<number> = []
   let headerEnded = false
@@ -219,16 +219,17 @@ export const open = (bytes: Uint8Array, limits: Limits): Cfb | MalformedFile | L
     difat = sectorU32(difat, perSector - 1)
   }
   if (fatSectors.length === 0) return malformed("no FAT sectors")
-  if (fatSectors.length < declaredFat && !countLies) {
-    return malformed(`found ${fatSectors.length} of ${declaredFat} FAT sectors`)
-  }
-  // the FAT itself. FAT sector k describes sectors k * perSector onwards, so
-  // only the first ceil(fileSectors / perSector) can describe sectors the
-  // file has; walks reject sectors past the file before using the FAT, so the
-  // rest are never consulted and are not read. (pyExcelerator lists FAT
-  // sectors past the end of a small file; those must not fail it, while a
-  // FAT sector a chain could need and the file lacks still does.)
-  const numFat = Math.min(fatSectors.length, Math.ceil(fileSectors / perSector))
+  // FAT sector k describes sectors k * perSector onwards, so only the first
+  // ceil(fileSectors / perSector) can describe sectors the file has; walks
+  // reject sectors past the file before using the FAT, so the rest are never
+  // consulted and are not read. (pyExcelerator lists FAT sectors past the end
+  // of a small file; those must not fail it, while a FAT sector a chain could
+  // need and the file lacks still does.)
+  const usableFat = Math.ceil(fileSectors / perSector)
+  const neededFat = Math.min(declaredFat, usableFat)
+  if (fatSectors.length < neededFat) return malformed(`found ${fatSectors.length} of ${neededFat} FAT sectors`)
+  // the FAT itself
+  const numFat = Math.min(fatSectors.length, usableFat)
   const fat = new Uint32Array(numFat * perSector)
   // progress: one FAT sector per iteration
   for (let k = 0; k < numFat; k++) {

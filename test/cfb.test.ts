@@ -174,13 +174,47 @@ describe("cfb: reading", () => {
     const cfb = openOk(lying)
     expect(readOk(cfb, "Workbook")).toEqual(pseudoRandom(10_000, 1))
     expect(readOk(cfb, "Edge")).toEqual(pseudoRandom(4095, 3))
-    // a count within the file that the listed sectors don't reach is still MalformedFile
-    const short = layout.bytes.slice()
-    patch32(short, 44, 3)
-    expect(reasonOf(open(short, limits))).toBe("found 1 of 3 FAT sectors")
     const none = layout.bytes.slice()
     patch32(none, 76, 0xFFFFFFFF)
     expect(reasonOf(open(none, limits))).toBe("no FAT sectors")
+  })
+
+  it("any overstated FAT count reads when the listed FAT sectors cover the file, small or large", () => {
+    // one FAT sector (128 entries) covers a file of up to 128 sectors, so
+    // every declared count from 1 up reads, whether or not it exceeds the
+    // file's sector count
+    const layout = writeCfb(SAMPLE)
+    expect(layout.fatSectors.length).toBe(1)
+    const fileSectors = layout.bytes.length / 512 - 1
+    expect(fileSectors).toBeLessThan(128)
+    for (const declared of [1, 2, 13, 14, 50, fileSectors - 1, fileSectors, fileSectors + 1, 109]) {
+      const overstated = layout.bytes.slice()
+      patch32(overstated, 44, declared)
+      const cfb = open(overstated, limits)
+      expect(reasonOf(cfb), String(declared)).toBe("ok")
+      expect(readOk(cfb as Cfb, "Workbook"), String(declared)).toEqual(pseudoRandom(10_000, 1))
+      expect(readOk(cfb as Cfb, "Edge"), String(declared)).toEqual(pseudoRandom(4095, 3))
+    }
+  })
+
+  it("too few listed FAT sectors to cover the file is MalformedFile, whatever the declared count", () => {
+    // 200 sectors of data need two FAT sectors; only the first stays listed
+    const big = writeCfb([{ name: "Workbook", data: pseudoRandom(200 * 512, 9) }])
+    expect(big.fatSectors.length).toBe(2)
+    const fileSectors = big.bytes.length / 512 - 1
+    for (const declared of [2, 50, fileSectors, fileSectors + 1, 1_000_000]) {
+      const short = big.bytes.slice()
+      patch32(short, 44, declared)
+      patch32(short, 80, 0xFFFFFFFF)
+      expect(reasonOf(open(short, limits)), String(declared)).toBe("found 1 of 2 FAT sectors")
+    }
+    // a declared count of one bounds the FAT to one sector: a chain reaching
+    // past what it describes (here the directory's) is MalformedFile
+    const one = big.bytes.slice()
+    patch32(one, 44, 1)
+    const result = open(one, limits)
+    expect(result).toBeInstanceOf(MalformedFile)
+    expect(reasonOf(result)).toMatch(/^FAT chain points at sector \d+$/)
   })
 
   it("FAT sectors listed past the end of the file that only describe missing sectors are not read (as pyExcelerator writes)", () => {
