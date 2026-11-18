@@ -18,9 +18,8 @@
  * however often the file repeats a column.
  *
  * Where the formats differ, the rule is a parameter (`RowRules`), never
- * unified here: when a row counts against `maxRows` (which decides the
- * `actual` of that error), what a cell outside a row is, and how a
- * malformed row order is reported.
+ * unified here: what a cell outside a row is, and how a malformed row
+ * order is reported.
  *
  * @internal
  */
@@ -32,11 +31,6 @@ import { compact, NO_ROWS } from "../sheet.ts"
 
 /** A format's own rules. `At` is where a row or cell sits in the source (a record, say), for errors. */
 export interface RowRules<At> {
-  /**
-   * When a row counts against `maxRows`: as it opens (so the error comes
-   * at the row past the limit, before its cells) or as it closes.
-   */
-  readonly countRowsAt: "open" | "close"
   /** A cell with no open row: skipped (`beginCell` gives `IGNORED`), or this error. */
   readonly cellOutsideRow: "ignore" | ((at: At) => SpreadsheetError)
   /** A MalformedFile with this reason, at `at`. */
@@ -50,7 +44,7 @@ export const IGNORED: unique symbol = Symbol("IGNORED")
 export class RowBuilder<At> {
   /** Completed rows not yet taken. */
   private out: Array<Row> = []
-  /** Cells read so far, repeats included (for maxCellsPerSheet), and rows counted (for maxRows). */
+  /** Cells read so far, repeats included (for maxCellsPerSheet), and rows opened (for maxRows). */
   private cellCount = 0
   private rowCount = 0
   /** The last row's index, -1 before the first row. */
@@ -99,8 +93,7 @@ export class RowBuilder<At> {
 
   /**
    * Opens row `index` (0-based), closing the open row first, if any. Fails
-   * on an index at or past `maxRows`, one not above the previous row's, and
-   * (when rows count as they open) a row past `maxRows` rows.
+   * on an index at or past `maxRows`, or one not above the previous row's.
    */
   openRow(index: number, hidden: boolean, at: At): SpreadsheetError | undefined {
     const closed = this.closeRow()
@@ -108,7 +101,9 @@ export class RowBuilder<At> {
     const limits = this.limits
     if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
     if (index <= this.previousRow) return this.rules.malformed(`row ${index + 1} after row ${this.previousRow + 1}`, at)
-    if (this.rules.countRowsAt === "open" && ++this.rowCount > limits.maxRows) {
+    // a guard: whole-number indexes go up and stay below maxRows, so they
+    // never number more rows than that; only a fractional index reaches it
+    if (++this.rowCount > limits.maxRows) {
       return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: this.rowCount })
     }
     this.previousRow = index
@@ -123,14 +118,10 @@ export class RowBuilder<At> {
 
   /**
    * Closes the open row, if any: it is complete, and goes out with its cells
-   * sorted and compacted. Fails (when rows count as they close) on a row
-   * past `maxRows` rows.
+   * sorted and compacted.
    */
   closeRow(): SpreadsheetError | undefined {
     if (!this.open) return undefined
-    if (this.rules.countRowsAt === "close" && ++this.rowCount > this.limits.maxRows) {
-      return new LimitExceeded({ limit: "maxRows", max: this.limits.maxRows, actual: this.rowCount })
-    }
     this.out.push({ index: this.index, hidden: this.hidden, cells: this.sorted ? this.cells : compact(this.cells) })
     this.open = false
     return undefined
@@ -143,7 +134,10 @@ export class RowBuilder<At> {
     return outside === "ignore" ? IGNORED : outside(at)
   }
 
-  /** The cell begun is in `column`: fails at or past `maxColumns`. */
+  /**
+   * The cell begun is in `column`: fails at or past `maxColumns`. Sets the
+   * row's last column (`nextColumn`) before the cell's value is decoded.
+   */
   placeCell(column: number): SpreadsheetError | undefined {
     const max = this.limits.maxColumns
     if (column >= max) return new LimitExceeded({ limit: "maxColumns", max, actual: column + 1 })

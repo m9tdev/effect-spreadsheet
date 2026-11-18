@@ -7,7 +7,6 @@ import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 
 const malformed = (reason: string, at: number) => new MalformedFile({ format: "xlsx", reason, offset: at })
 const rules = (overrides: Partial<RowRules<number>> = {}): RowRules<number> => ({
-  countRowsAt: "open",
   cellOutsideRow: (at) => malformed("cell outside a row", at),
   malformed,
   ...overrides
@@ -53,23 +52,14 @@ describe("row builder", () => {
     expect(add(rows, Cell.number(0, 3))).toMatchObject({ _tag: "LimitExceeded", limit: "maxCellsPerSheet", max: 2, actual: 3 })
   })
 
-  // indexes go up, so the index check catches a row past maxRows first; a
-  // fractional index reaches the row count itself
-  it("rows counted at open fail at the header past maxRows; counted at close, at that row's end", () => {
-    const atOpen = new RowBuilder(limits({ maxRows: 2 }), rules({ countRowsAt: "open" }))
-    expect(atOpen.openRow(0, false, 0)).toBeUndefined()
-    expect(atOpen.openRow(1, false, 0)).toBeUndefined()
-    expect(atOpen.openRow(1.5, false, 0)).toMatchObject({ limit: "maxRows", actual: 3 })
-    // the rows before the error are out
-    expect(atOpen.take().map((r) => r.index)).toEqual([0, 1])
-
-    const atClose = new RowBuilder(limits({ maxRows: 2 }), rules({ countRowsAt: "close" }))
-    expect(atClose.openRow(0, false, 0)).toBeUndefined()
-    expect(atClose.openRow(1, false, 0)).toBeUndefined()
-    expect(atClose.closeRow()).toBeUndefined()
-    expect(atClose.openRow(1.5, false, 0)).toBeUndefined()
-    expect(atClose.closeRow()).toMatchObject({ limit: "maxRows", actual: 3 })
-    expect(atClose.take().map((r) => r.index)).toEqual([0, 1])
+  // indexes go up, so the index check catches a row past maxRows first; only
+  // a fractional index reaches the row-count guard
+  it("a row past maxRows rows fails at its header, after the rows before it", () => {
+    const rows = new RowBuilder(limits({ maxRows: 2 }), rules())
+    expect(rows.openRow(0, false, 0)).toBeUndefined()
+    expect(rows.openRow(1, false, 0)).toBeUndefined()
+    expect(rows.openRow(1.5, false, 0)).toMatchObject({ limit: "maxRows", actual: 3 })
+    expect(rows.take().map((r) => r.index)).toEqual([0, 1])
   })
 
   it("a cell outside a row is the format's error, or ignored", () => {

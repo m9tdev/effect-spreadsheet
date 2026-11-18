@@ -136,10 +136,7 @@ const errorCode = (code: number): string => ERROR_CODES.get(code) ?? "#N/A"
 
 /** Collects rows from a worksheet's records. Exported for tests. */
 export class SheetRows {
-  /**
-   * The rows: XLSB counts a row against maxRows at its BrtRowHdr, and a
-   * cell record outside a row is MalformedFile.
-   */
+  /** The rows: in XLSB a cell record outside a row is MalformedFile. */
   readonly rows: RowBuilder<Biff12Record>
   private readonly context: SheetContext
 
@@ -147,7 +144,6 @@ export class SheetRows {
     this.context = context
     const part = context.part
     this.rows = new RowBuilder<Biff12Record>(context.limits, {
-      countRowsAt: "open",
       cellOutsideRow: (record) => malformed(`cell record 0x${record.type.toString(16)} outside a row`, part, record.offset),
       malformed: (reason, record) => malformed(reason, part, record.offset)
     })
