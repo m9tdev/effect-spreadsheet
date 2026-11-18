@@ -4,7 +4,8 @@
  *
  * @internal
  */
-import { compressed, readRichString, SegmentReader, segmentsOf, utf16 } from "../biff/segments.ts"
+import { compressed, utf16 } from "../biff/segments.ts"
+import { ok, type StringRead, tooLongString, TRUNCATED } from "../binary/layout.ts"
 
 /**
  * Text decoding for the workbook's code page (CODEPAGE record). BIFF5
@@ -53,40 +54,63 @@ export interface Text {
   readonly maxLength: number
 }
 
-/**
- * A BIFF8 XLUnicodeString (u16 count, flags, characters, optional run and
- * phonetic data) or a BIFF5 string (u16 or u8 count, code-page bytes) at
- * `at`. Returns the text and the offset after it; `undefined` if it runs
- * past the data, `null` if it is longer than the limit.
+/*
+ * Little-endian reads in a string's header, at offsets the caller checked
+ * against the data's length (a string sits at a variable offset in its
+ * record, so it checks its own bounds rather than a declared layout's).
  */
-export const readString = (
-  data: Uint8Array,
-  at: number,
-  text: Text,
-  countBytes: 1 | 2
-): { readonly value: string; readonly end: number } | undefined | null => {
-  if (at > data.length) return undefined
-  const rest = data.subarray(at)
+const u8At = (data: Uint8Array, at: number): number => data[at]!
+const u16At = (data: Uint8Array, at: number): number => data[at]! | (data[at + 1]! << 8)
+const u32At = (data: Uint8Array, at: number): number => (u16At(data, at) | (u16At(data, at + 2) << 16)) >>> 0
+
+/** The characters of a BIFF8 string, 16-bit when `wide`, else 8-bit (UTF-16 low bytes). */
+const chars8 = (bytes: Uint8Array, wide: boolean): string => (wide ? utf16.decode(bytes) : compressed(bytes))
+
+/**
+ * A BIFF8 XLUnicodeString (u16 count, flags, optional run count and
+ * phonetic block size, characters, then the run and phonetic data) or
+ * ShortXLUnicodeString (u8 count, flags, characters), or a BIFF5 string (u16
+ * or u8 count, code-page bytes) at `at`, within one record's data. Returns
+ * the text and the offset after it; `Truncated` if it runs past the data,
+ * `TooLong` with its character count if that is over the limit. Each check
+ * comes in the order the fields are read: a count over the limit is found
+ * before the characters, and a cut header before the count is looked at.
+ */
+export const readString = (data: Uint8Array, at: number, text: Text, countBytes: 1 | 2): StringRead => {
+  if (at > data.length) return TRUNCATED
+  const left = data.length - at
   if (text.biff8) {
     if (countBytes === 2) {
-      const reader = new SegmentReader(segmentsOf([rest]))
-      const value = readRichString(reader, text.maxLength)
-      if (value === undefined || value === null) return value
-      return { value, end: data.length - reader.remaining() }
+      // cch u16, flags u8, then cRun u16 and cbExtRst u32 when the flags say so
+      if (left < 3) return TRUNCATED
+      const count = u16At(data, at)
+      const flags = u8At(data, at + 2)
+      const rich = (flags & 0x08) !== 0
+      const ext = (flags & 0x04) !== 0
+      const header = 3 + (rich ? 2 : 0) + (ext ? 4 : 0)
+      if (left < header) return TRUNCATED
+      const runs = rich ? u16At(data, at + 3) : 0
+      const extSize = ext ? u32At(data, at + header - 4) : 0
+      if (count > text.maxLength) return tooLongString(count)
+      const wide = (flags & 0x01) !== 0
+      const charsEnd = at + header + count * (wide ? 2 : 1)
+      const end = charsEnd + runs * 4 + extSize
+      if (end > data.length) return TRUNCATED
+      return ok(chars8(data.subarray(at + header, charsEnd), wide), end)
     }
     // ShortXLUnicodeString: u8 count, flags, characters
-    if (rest.length < 2) return undefined
-    const count = rest[0]!
-    if (count > text.maxLength) return null
-    const wide = (rest[1]! & 0x01) !== 0
-    const bytes = count * (wide ? 2 : 1)
-    if (2 + bytes > rest.length) return undefined
-    const chars = rest.subarray(2, 2 + bytes)
-    return { value: wide ? utf16.decode(chars) : compressed(chars), end: at + 2 + bytes }
+    if (left < 2) return TRUNCATED
+    const count = u8At(data, at)
+    if (count > text.maxLength) return tooLongString(count)
+    const wide = (u8At(data, at + 1) & 0x01) !== 0
+    const end = at + 2 + count * (wide ? 2 : 1)
+    if (end > data.length) return TRUNCATED
+    return ok(chars8(data.subarray(at + 2, end), wide), end)
   }
-  if (rest.length < countBytes) return undefined
-  const count = countBytes === 1 ? rest[0]! : rest[0]! | (rest[1]! << 8)
-  if (count > text.maxLength) return null
-  if (countBytes + count > rest.length) return undefined
-  return { value: text.decoder.decode(rest.subarray(countBytes, countBytes + count)), end: at + countBytes + count }
+  if (left < countBytes) return TRUNCATED
+  const count = countBytes === 1 ? u8At(data, at) : u16At(data, at)
+  if (count > text.maxLength) return tooLongString(count)
+  const end = at + countBytes + count
+  if (end > data.length) return TRUNCATED
+  return ok(text.decoder.decode(data.subarray(at + countBytes, end)), end)
 }

@@ -1,40 +1,9 @@
 /**
- * Fixed-layout reads shared by the binary formats (XLS and XLSB records):
- * bounds-checked fields at absolute offsets, RK numbers and error codes.
+ * Values shared by the binary formats (XLS and XLSB records): RK numbers
+ * and error codes. Record fields are read through `binary/layout.ts`.
  *
  * @internal
  */
-
-/** Reads at absolute offsets of one record's data; out of bounds gives `undefined`. */
-export class Fields {
-  readonly data: Uint8Array
-  private readonly view: DataView
-
-  constructor(data: Uint8Array) {
-    this.data = data
-    this.view = new DataView(data.buffer, data.byteOffset, data.byteLength)
-  }
-
-  get length(): number {
-    return this.data.length
-  }
-
-  u8(at: number): number | undefined {
-    return at >= 0 && at + 1 <= this.data.length ? this.data[at] : undefined
-  }
-
-  u16(at: number): number | undefined {
-    return at >= 0 && at + 2 <= this.data.length ? this.view.getUint16(at, true) : undefined
-  }
-
-  u32(at: number): number | undefined {
-    return at >= 0 && at + 4 <= this.data.length ? this.view.getUint32(at, true) : undefined
-  }
-
-  f64(at: number): number | undefined {
-    return at >= 0 && at + 8 <= this.data.length ? this.view.getFloat64(at, true) : undefined
-  }
-}
 
 /** Excel error codes (BOOLERR, FORMULA results). */
 export const ERROR_CODES: ReadonlyMap<number, string> = new Map([

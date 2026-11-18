@@ -7,11 +7,15 @@
  * whether the rest of the characters are 8-bit or 16-bit (MS-XLS 2.5.293
  * XLUnicodeRichExtendedString, 2.1.4 records over 8224 bytes).
  *
- * Every read moves the cursor forward by what it consumes; a read past the
- * last segment fails (the reader stays failed), so a loop over reads ends.
+ * Fixed fields are read after one check that enough bytes are left
+ * (`has`), then without a check per field; character data checks its own
+ * bounds and gives a typed result (`StringRead`). Every read moves the
+ * cursor forward by what it consumes, so a loop over reads ends.
  *
  * @internal
  */
+
+import { ok, type StringRead, tooLongString, TRUNCATED } from "../binary/layout.ts"
 
 /** One UTF-16LE decoder for all 16-bit strings (decoding keeps no state between calls). */
 export const utf16 = new TextDecoder("utf-16le")
@@ -65,10 +69,10 @@ export class SegmentReader {
   private segment = 0
   /** Offset within the current segment. */
   private at = 0
+  /** Bytes in all segments. */
+  private readonly total: number
   /** Bytes not yet read, over all segments. */
   private left: number
-  /** Set when a read ran past the end; every later read fails too. */
-  failed = false
 
   constructor(segments: Segments | ReadonlyArray<Uint8Array>) {
     const s = "bounds" in segments ? segments : segmentsOf(segments)
@@ -78,12 +82,26 @@ export class SegmentReader {
     let n = 0
     // progress: k up to count
     for (let k = 0; k < s.count; k++) n += s.bounds[2 * k + 1]! - s.bounds[2 * k]!
+    this.total = n
     this.left = n
   }
 
   /** Bytes left in all segments (O(1): kept up to date by every read). */
   remaining(): number {
     return this.left
+  }
+
+  /** Bytes read so far, over all segments: the offset of the cursor in their concatenation. */
+  consumed(): number {
+    return this.total - this.left
+  }
+
+  /**
+   * Whether at least `n` bytes are left: the one check before reading `n`
+   * bytes of fixed fields with `u8`, `u16` and `u32`.
+   */
+  has(n: number): boolean {
+    return this.left >= n
   }
 
   private length(k: number): number {
@@ -105,36 +123,33 @@ export class SegmentReader {
     return this.at === 0 && this.segment > 0
   }
 
-  u8(): number | undefined {
-    if (this.failed || !this.settle()) {
-      this.failed = true
-      return undefined
-    }
+  /**
+   * The next byte, across segments. Callers check `has` first; past the
+   * end it reads 0 and moves nothing.
+   */
+  u8(): number {
+    if (!this.settle()) return 0
     this.left--
-    return this.bytes[this.bounds[2 * this.segment]! + this.at++]
+    return this.bytes[this.bounds[2 * this.segment]! + this.at++]!
   }
 
-  u16(): number | undefined {
-    const a = this.u8()
-    const b = this.u8()
-    return a === undefined || b === undefined ? undefined : a | (b << 8)
+  /** The next u16 (little-endian), across segments; checked by `has(2)` first. */
+  u16(): number {
+    return this.u8() | (this.u8() << 8)
   }
 
-  u32(): number | undefined {
-    const a = this.u16()
-    const b = this.u16()
-    return a === undefined || b === undefined ? undefined : (a | (b << 16)) >>> 0
+  /** The next u32 (little-endian), across segments; checked by `has(4)` first. */
+  u32(): number {
+    return (this.u16() | (this.u16() << 16)) >>> 0
   }
 
-  /** Skips `n` bytes across segments; fails if fewer are left. */
+  /** Skips `n` bytes across segments; false, skipping nothing, if fewer are left. */
   skip(n: number): boolean {
+    if (this.left < n) return false
     let left = n
-    // progress: each iteration skips at least 1 byte or ends
-    while (left > 0) {
-      if (this.failed || !this.settle()) {
-        this.failed = true
-        return false
-      }
+    // progress: each iteration skips at least 1 byte (n bytes are left, so
+    // settle finds a non-empty segment)
+    while (left > 0 && this.settle()) {
       const step = Math.min(left, this.length(this.segment) - this.at)
       this.at += step
       this.left -= step
@@ -146,38 +161,29 @@ export class SegmentReader {
   /**
    * Reads `count` characters, 16-bit when `highByte`, else 8-bit (Latin-1);
    * at each segment boundary inside the string, a new option byte gives
-   * the width of the rest.
+   * the width of the rest. `Truncated` if the segments end first, or end
+   * a segment in the middle of a 16-bit character; `end` is `consumed()`.
    */
-  chars(count: number, highByte: boolean): string | undefined {
+  chars(count: number, highByte: boolean): StringRead {
     let wide = highByte
     let left = count
     const parts: Array<string> = []
     // progress: each iteration consumes at least one character, or
     // boundary option bytes followed by at least one character, or fails
     while (left > 0) {
-      if (this.failed || !this.settle()) {
-        this.failed = true
-        return undefined
-      }
+      if (!this.settle()) return TRUNCATED
       // characters continued in a new segment (also right after the
       // string's header ended a segment) start with an option byte; a
       // segment may hold only that byte, so the next one starts with its
-      // own. progress: each pass reads one byte (or fails)
+      // own. progress: each pass reads one byte (settle found one)
       while (this.atBoundary()) {
-        const option = this.u8()
-        if (option === undefined || !this.settle()) {
-          this.failed = true
-          return undefined
-        }
-        wide = (option & 0x01) !== 0
+        wide = (this.u8() & 0x01) !== 0
+        if (!this.settle()) return TRUNCATED
       }
       const base = this.bounds[2 * this.segment]!
       const width = wide ? 2 : 1
       const fit = Math.floor((this.length(this.segment) - this.at) / width)
-      if (fit === 0) {
-        this.failed = true // half a 16-bit character at the end of a segment
-        return undefined
-      }
+      if (fit === 0) return TRUNCATED // half a 16-bit character at the end of a segment
       const take = Math.min(left, fit)
       const slice = this.bytes.subarray(base + this.at, base + this.at + take * width)
       parts.push(wide ? utf16.decode(slice) : compressed(slice))
@@ -185,32 +191,35 @@ export class SegmentReader {
       this.left -= take * width
       left -= take
     }
-    return parts.join("")
+    return ok(parts.join(""), this.consumed())
   }
 }
 
 /**
  * Reads an XLUnicodeRichExtendedString (an SST entry): character count,
  * option flags, optional rich-text run count and phonetic block size, the
- * characters, then the run and phonetic data (skipped). `undefined` if the
- * segments end early; `null` when the character count is over `maxLength`.
+ * characters, then the run and phonetic data (skipped). `Truncated` if the
+ * segments end early; `TooLong` with the character count when it is over
+ * `maxLength` (found before any character is read). `end` is the reader's
+ * `consumed()` after the string.
  *
- * After `null` the reader sits before that string's characters, so the
+ * After `TooLong` the reader sits before that string's characters, so the
  * caller must stop reading the SST there (fail with `LimitExceeded`): the
  * next read would start in the middle of a string.
  */
-export const readRichString = (reader: SegmentReader, maxLength: number): string | undefined | null => {
+export const readRichString = (reader: SegmentReader, maxLength: number): StringRead => {
+  // cch u16, flags u8, then cRun u16 and cbExtRst u32 when the flags say so
+  if (!reader.has(3)) return TRUNCATED
   const count = reader.u16()
   const flags = reader.u8()
-  if (count === undefined || flags === undefined) return undefined
   const rich = (flags & 0x08) !== 0
   const ext = (flags & 0x04) !== 0
+  if (!reader.has((rich ? 2 : 0) + (ext ? 4 : 0))) return TRUNCATED
   const runs = rich ? reader.u16() : 0
   const extSize = ext ? reader.u32() : 0
-  if (runs === undefined || extSize === undefined) return undefined
-  if (count > maxLength) return null
+  if (count > maxLength) return tooLongString(count)
   const text = reader.chars(count, (flags & 0x01) !== 0)
-  if (text === undefined) return undefined
-  if (!reader.skip(runs * 4) || !reader.skip(extSize)) return undefined
-  return text
+  if (text._tag !== "Ok") return text
+  if (!reader.skip(runs * 4) || !reader.skip(extSize)) return TRUNCATED
+  return ok(text.value, reader.consumed())
 }
