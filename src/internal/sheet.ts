@@ -1,12 +1,11 @@
 /**
  * Format-neutral helpers for the sheet readers: a row's cells in column
- * order, hidden-column spans, and the state of a pulled row stream.
+ * order, and hidden-column spans.
  *
  * @internal
  */
 import type * as Cell from "../Cell.ts"
-import type { SpreadsheetError } from "../SpreadsheetError.ts"
-import type { ColumnSpan } from "../Workbook.ts"
+import type { ColumnSpan, Row } from "../Workbook.ts"
 
 /**
  * Sorts a row's cells by column in place, keeping the last cell of each
@@ -37,15 +36,5 @@ export const mergeSpans = (spans: ReadonlyArray<ColumnSpan>): Array<ColumnSpan> 
   return out
 }
 
-/**
- * Where a sheet's row stream is: reading input; failing, with the rows
- * completed before the error already emitted; or done (the input ended,
- * or the error was raised).
- */
-export type PullState =
-  | { readonly _tag: "Reading" }
-  | { readonly _tag: "Failing"; readonly error: SpreadsheetError }
-  | { readonly _tag: "Done" }
-
-export const READING: PullState = { _tag: "Reading" }
-export const DONE: PullState = { _tag: "Done" }
+/** No rows: what a step that completed none emits. */
+export const NO_ROWS: ReadonlyArray<Row> = []

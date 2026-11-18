@@ -307,6 +307,13 @@ describe("xlsb reader", () => {
       }
     })
 
+    it("a part cut inside a record ends with the rows before the open row, then MalformedFile; the open row is not emitted", async () => {
+      const part = B.concat([B.beginSheet(), B.beginSheetData(), B.rowHdr(0), B.rk(0, B.rkInt(1)), B.rowHdr(1), B.rk(0, B.rkInt(2)), B.real(1, 3.5)])
+      const cut = await untilError(await B.xlsb({ sheets: [{ name: "S", part: part.subarray(0, part.length - 4) }] }))
+      expect(cut.indexes).toEqual([0])
+      expect(cut.error).toMatchObject({ _tag: "MalformedFile", reason: expect.stringContaining("runs past the end of the part") })
+    })
+
     it("can be taken without the error when it is in their slice", async () => {
       const wb = await Effect.runPromise(Xlsb.read(await B.xlsb(one([...tenRows, B.rowHdr(3)]))))
       const first = Array.from(await Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 3))))

@@ -37,19 +37,18 @@
  *
  * @internal
  */
-import { Cause, Effect, Pull, Stream } from "effect"
-import type * as Arr from "effect/Array"
+import type { Stream } from "effect"
 import { absurd } from "effect/Function"
 import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
-import { WorkMeter } from "../meter.ts"
+import { decoded, step } from "../decode.ts"
 import { serialToDate } from "../numFmt.ts"
 import { parseCellRef } from "../refs.ts"
-import { compact, DONE, type PullState, READING } from "../sheet.ts"
-import { XmlDecoder } from "../xml/parse.ts"
-import { attr, type XmlAttributes, type XmlHandler, XmlTokenizer } from "../xml/tokenizer.ts"
+import { compact, NO_ROWS } from "../sheet.ts"
+import { xmlDecoder } from "../xml/parse.ts"
+import { attr, type XmlAttributes, type XmlHandler } from "../xml/tokenizer.ts"
 import { isTrue, malformed, RichText, type Styles, unescapeXstring } from "./parts.ts"
 
 export interface SheetContext {
@@ -111,6 +110,14 @@ type OpenRow =
 export class SheetRows implements XmlHandler {
   /** Completed rows not yet emitted. */
   out: Array<Row> = []
+
+  /** The completed rows not yet taken; `out` starts over. */
+  take(): ReadonlyArray<Row> {
+    const out = this.out
+    if (out.length === 0) return NO_ROWS
+    this.out = []
+    return out
+  }
   /** Cells emitted so far (for maxCellsPerSheet), and rows. */
   private cells = 0
   private rowCount = 0
@@ -438,52 +445,17 @@ export const sheetRows = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,
   context: SheetContext
 ): Stream.Stream<Row, SpreadsheetError> =>
-  Stream.transformPull(bytes, (upstream) =>
-    Effect.map(WorkMeter, (meter) => {
-      const rows = new SheetRows(context)
-      const decoder = new XmlDecoder(context.part)
-      const tokenizer = new XmlTokenizer(rows, context.limits, context.part, meter)
-      const pullUpstream = Pull.catchDone(upstream, () => Effect.undefined)
-      let state: PullState = READING
-      const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
-        // progress: each iteration pulls one upstream piece (consumed), or
-        // ends the input (Done), or ends the stream (Failing goes to Done)
-        while (true) {
-          switch (state._tag) {
-            case "Reading":
-              break
-            case "Failing": {
-              const error = state.error
-              state = DONE
-              return yield* Effect.fail(error)
-            }
-            case "Done":
-              return yield* Cause.done()
-            default:
-              return absurd(state)
-          }
-          const chunk = yield* pullUpstream
-          let error: SpreadsheetError | undefined
-          if (chunk === undefined) {
-            state = DONE
-            const rest = decoder.end()
-            error = typeof rest === "string" ? (tokenizer.feed(rest) ?? tokenizer.end()) : rest
-          } else {
-            // progress: one piece per iteration
-            for (const piece of chunk) {
-              const text = decoder.push(piece)
-              error = typeof text === "string" ? tokenizer.feed(text) : text
-              if (error !== undefined) break
-            }
-          }
-          // the rows completed before the error come out first; the error on the next pull
-          if (error !== undefined) state = { _tag: "Failing", error }
-          if (rows.out.length > 0) {
-            const out = rows.out
-            rows.out = []
-            return out as unknown as Arr.NonEmptyReadonlyArray<Row>
-          }
-        }
-      })
-      return pull
-    }))
+  decoded(bytes, (meter) => {
+    const rows = new SheetRows(context)
+    const xml = xmlDecoder(rows, context.limits, context.part, meter)
+    return {
+      feed: (piece) => {
+        const error = xml.feed(piece).error
+        return step(rows.take(), error)
+      },
+      end: () => {
+        const error = xml.end().error
+        return step(rows.take(), error)
+      }
+    }
+  })
