@@ -191,6 +191,16 @@ describe("zip packages: broken ones fail, other zips don't", () => {
     // a deflated mimetype isn't read either
     expect(await formatOf(await buildZip([{ name: "mimetype", data: ods, method: "deflate" }]))).toBe("zip")
     expect(await formatOf(await buildZip([{ name: "mimetype", data: ods, method: "store" }]))).toBe("ods")
+    // a stored entry whose two sizes differ doesn't read
+    expect(await formatOf(await buildZip([{ name: "mimetype", data: ods, method: "store", uncompressedSize: ods.length + 1 }]))).toBe("zip")
+  })
+
+  it("a package-looking zip without a workbook part is still ODS by its mimetype", async () => {
+    const bytes = await buildZip([
+      { name: "mimetype", data: enc("application/vnd.oasis.opendocument.spreadsheet"), method: "store" },
+      { name: "_rels/.rels", data: relsXml([]) }
+    ])
+    expect(await formatOf(bytes)).toBe("ods")
   })
 })
 
