@@ -57,7 +57,6 @@ These are the intended differences:
 | defined names: `hidden` | the BrtName's fHidden flag (e.g. `_xlnm._FilterDatabase`) | not reported |
 | a broken record (truncated, a string past its record, a shared string out of range, a cell before any row) | `MalformedFile` at that record's offset; e.g. one corpus file's BrtBundleSh has 4 bytes more than MS-XLSB's layout | reads on, sometimes into garbage (that file's sheet names come out as binary) |
 | a BrtRowHdr whose row is the same as or below an earlier row's (a row given twice, or rows out of order) | `MalformedFile` at that row header: rows are streamed in order, each index once, so an earlier row can't take more cells. No corpus file has one | merges the cells into one sheet by address (rows 1, 2, 1 give two rows) |
-| a package whose workbook part isn't `xl/workbook.bin` (one corpus file, `wtf/workbook.bin`) | `Spreadsheet.read` sees a plain `zip` (`UnsupportedFormat`); `Xlsb.read` reads it through the package relationships | reads it |
 | sheets with the same name (also differing only in case) | every sheet is read; a later sheet with the same name in any case is reported as `Name (2)` (or the next free `Name (n)`), and defined names refer to it by that name; see the README | keeps duplicate names, and both name one sheet's cells (names differing only in case stay apart) |
 | built-in number format 14 | `numFmt: "mm-dd-yy"` (as ECMA-376 lists it) | `z: "m/d/yy"` |
 | formatted text (`w`) | not produced | `w` |
