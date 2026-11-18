@@ -65,6 +65,17 @@ describe("xls: cells and rows (BIFF8)", () => {
     expect(sheets[0]![0]!.cells[0]).toEqual(Cell.date(0, new Date("2023-03-15T00:00:00.000Z"), { numFmt: "yyyy-mm-dd" }))
   })
 
+  it("an XF that comes before the FORMAT record it uses still takes that format", async () => {
+    const { sheets } = await readOk(one(
+      [X.row(0), X.number(0, 0, 1, 2.5), X.number(0, 1, 2, 45000.5)],
+      [X.xf(0), X.xf(164), X.xf(165), X.format(164, "0.000"), X.format(165, "yyyy-mm-dd hh:mm")]
+    ))
+    expect(sheets[0]![0]!.cells).toEqual([
+      Cell.number(0, 2.5, { numFmt: "0.000" }),
+      Cell.date(1, new Date("2023-03-15T12:00:00.000Z"), { numFmt: "yyyy-mm-dd hh:mm" })
+    ])
+  })
+
   it("every cell record type, with number formats and dates", async () => {
     const { sheets } = await readOk(one([
       X.row(0), X.row(1),
