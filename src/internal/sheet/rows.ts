@@ -15,7 +15,12 @@
  * Cells are held only for the open row. A row whose cells come out of
  * order is sorted (and compacted) once, when it closes, or as soon as it
  * holds more than 2 x `maxColumns` cells, so the cells held stay under that
- * however often the file repeats a column.
+ * however often the file repeats a column (`RowCells`).
+ *
+ * A format whose rows don't come one after another (XLS: a row's cells may
+ * be split, or come after a later row's) uses `HeldRows` instead: it holds
+ * each row's cells until the format finishes the row, with the same limits
+ * and compaction. The format finishes rows in increasing row order.
  *
  * Where the formats differ, the rule is a parameter (`RowRules`), never
  * unified here: what a cell outside a row is, and how a malformed row
@@ -73,13 +78,87 @@ export interface RowRules<At> {
  */
 export type CellStart = "read" | "skip" | SpreadsheetError
 
+/**
+ * One row's cells as a format gives them: in any column order, a column
+ * maybe repeated. They are sorted (and compacted) once, when the row is
+ * done, or as soon as they are more than 2 x `maxColumns` and out of order,
+ * so the cells held stay under that however often the file repeats a column.
+ */
+export class RowCells {
+  /** The cells so far. */
+  cells: Array<Cell.Cell> = []
+  /** `cells` is in strictly increasing column order. */
+  sorted = true
+
+  /** Adds `cell`; returns how many cells it sorted, compacting the row (0 when it didn't). */
+  add(cell: Cell.Cell, maxColumns: number): number {
+    const cells = this.cells
+    if (cells.length > 0 && cell.column <= cells[cells.length - 1]!.column) this.sorted = false
+    cells.push(cell)
+    // repeated columns don't pile up: past 2 x maxColumns cells an unsorted
+    // row is compacted (to at most maxColumns), so the work is amortized
+    if (this.sorted || cells.length <= 2 * maxColumns) return 0
+    const sorting = cells.length
+    compact(cells)
+    this.sorted = true
+    return sorting
+  }
+
+  /** The cells, sorted and compacted. */
+  done(): Array<Cell.Cell> {
+    return this.sorted ? this.cells : compact(this.cells)
+  }
+
+  /** Starts a new row; the cells given out by `done` stay as they are. */
+  reset(): void {
+    this.cells = []
+    this.sorted = true
+  }
+}
+
+/** The per-sheet limits on rows, columns and cells, with the counts they need. */
+class SheetCounter {
+  /** Cells read so far, repeats included (for maxCellsPerSheet), and rows numbered (for maxRows). */
+  cells = 0
+  rows = 0
+  readonly limits: Limits
+
+  constructor(limits: Limits) {
+    this.limits = limits
+  }
+
+  /** The maxColumns error, if `column` is at or past it. */
+  column(column: number): SpreadsheetError | undefined {
+    const max = this.limits.maxColumns
+    return column >= max ? new LimitExceeded({ limit: "maxColumns", max, actual: column + 1 }) : undefined
+  }
+
+  /** Counts a cell read: fails past `maxCellsPerSheet` cells. */
+  cell(): SpreadsheetError | undefined {
+    const max = this.limits.maxCellsPerSheet
+    return ++this.cells > max ? new LimitExceeded({ limit: "maxCellsPerSheet", max, actual: this.cells }) : undefined
+  }
+
+  /** The maxRows error, if row `index` is at or past `maxRows`. */
+  rowIndex(index: number): SpreadsheetError | undefined {
+    const max = this.limits.maxRows
+    return index >= max ? new LimitExceeded({ limit: "maxRows", max, actual: index + 1 }) : undefined
+  }
+
+  /** Counts a row numbered. */
+  row(): SpreadsheetError | undefined {
+    // a guard: whole-number indexes go up and stay below maxRows, so they
+    // never number more rows than that; only a fractional index reaches it
+    const max = this.limits.maxRows
+    return ++this.rows > max ? new LimitExceeded({ limit: "maxRows", max, actual: this.rows }) : undefined
+  }
+}
+
 /** Builds a sheet's rows from its rows and cells, in document order. */
 export class RowBuilder<At> {
   /** Completed rows not yet taken. */
   private out: Array<Row> = []
-  /** Cells read so far, repeats included (for maxCellsPerSheet), and rows opened (for maxRows). */
-  private cellCount = 0
-  private rowCount = 0
+  private readonly count: SheetCounter
   /** The last row's index, -1 before the first row. */
   private previousRow = -1
 
@@ -88,17 +167,14 @@ export class RowBuilder<At> {
   /** The open row's index, undefined until it is numbered (opened without one, before its first cell). */
   private index: number | undefined
   private hidden = false
-  private cells: Array<Cell.Cell> = []
-  /** `cells` is in strictly increasing column order. */
-  private sorted = true
+  private readonly row = new RowCells()
   /** The last cell's column, -1 before the first. */
   private lastColumn = -1
 
-  private readonly limits: Limits
   private readonly rules: RowRules<At>
 
   constructor(limits: Limits, rules: RowRules<At>) {
-    this.limits = limits
+    this.count = new SheetCounter(limits)
     this.rules = rules
   }
 
@@ -117,7 +193,7 @@ export class RowBuilder<At> {
 
   /** Cells held for the open row (0 when none is open). */
   get held(): number {
-    return this.open ? this.cells.length : 0
+    return this.open ? this.row.cells.length : 0
   }
 
   /** The column a cell without its own takes: the previous cell's in the row + 1 (0 for the row's first). */
@@ -141,32 +217,23 @@ export class RowBuilder<At> {
     this.open = true
     this.index = index
     this.hidden = hidden
-    this.cells = []
-    this.sorted = true
+    this.row.reset()
     this.lastColumn = -1
     return undefined
   }
 
   /** Numbers the open row (or the one opening) `index`: it must be below `maxRows` and above the previous row. */
   private number(index: number, at: At): SpreadsheetError | undefined {
-    const tooHigh = this.pastMaxRows(index)
+    const tooHigh = this.count.rowIndex(index)
     if (tooHigh !== undefined) return tooHigh
     if (index <= this.previousRow) return this.rules.malformed(`row ${index + 1} after row ${this.previousRow + 1}`, at)
     return this.counted(index)
   }
 
-  /** The maxRows error, if row `index` is at or past `maxRows`. */
-  private pastMaxRows(index: number): SpreadsheetError | undefined {
-    const max = this.limits.maxRows
-    return index >= max ? new LimitExceeded({ limit: "maxRows", max, actual: index + 1 }) : undefined
-  }
-
   /** Counts the row numbered `index` and makes it the previous row. */
   private counted(index: number): SpreadsheetError | undefined {
-    // a guard: whole-number indexes go up and stay below maxRows, so they
-    // never number more rows than that; only a fractional index reaches it
-    const max = this.limits.maxRows
-    if (++this.rowCount > max) return new LimitExceeded({ limit: "maxRows", max, actual: this.rowCount })
+    const counted = this.count.row()
+    if (counted !== undefined) return counted
     this.previousRow = index
     this.index = index
     return undefined
@@ -182,10 +249,10 @@ export class RowBuilder<At> {
     if (index === undefined) {
       // a row without an index or cells: the previous row + 1, above it by construction
       index = this.previousRow + 1
-      const numbered = this.pastMaxRows(index) ?? this.counted(index)
+      const numbered = this.count.rowIndex(index) ?? this.counted(index)
       if (numbered !== undefined) return numbered
     }
-    this.out.push({ index, hidden: this.hidden, cells: this.sorted ? this.cells : compact(this.cells) })
+    this.out.push({ index, hidden: this.hidden, cells: this.row.done() })
     this.open = false
     return undefined
   }
@@ -213,25 +280,122 @@ export class RowBuilder<At> {
     } else if (rowOfRef !== undefined && rowOfRef !== index) {
       return this.rules.cellInOtherRow(index, at)
     }
-    const max = this.limits.maxColumns
-    if (column >= max) return new LimitExceeded({ limit: "maxColumns", max, actual: column + 1 })
+    const tooFar = this.count.column(column)
+    if (tooFar !== undefined) return tooFar
     this.lastColumn = column
     return undefined
   }
 
   /** The cell begun and placed, decoded: added to the open row. Fails past `maxCellsPerSheet` cells. */
   addCell(cell: Cell.Cell): SpreadsheetError | undefined {
-    const max = this.limits.maxCellsPerSheet
-    if (++this.cellCount > max) return new LimitExceeded({ limit: "maxCellsPerSheet", max, actual: this.cellCount })
-    const cells = this.cells
-    if (cells.length > 0 && cell.column <= cells[cells.length - 1]!.column) this.sorted = false
-    cells.push(cell)
-    // repeated columns don't pile up: past 2 x maxColumns cells an unsorted
-    // row is compacted (to at most maxColumns), so the work is amortized
-    if (!this.sorted && cells.length > 2 * this.limits.maxColumns) {
-      compact(cells)
-      this.sorted = true
+    const counted = this.count.cell()
+    if (counted !== undefined) return counted
+    this.row.add(cell, this.count.limits.maxColumns)
+    return undefined
+  }
+}
+
+/**
+ * Builds a sheet's rows from cells that come in any row order, for formats
+ * whose writers may split a row's cells or put rows out of order (XLS).
+ * Each row's cells are held until the format finishes the row, which it
+ * does in increasing row order. The limits and the per-row compaction are
+ * the `RowBuilder`'s: columns below `maxColumns` and at most
+ * `maxCellsPerSheet` cells, checked as each cell is added; rows below
+ * `maxRows`, checked as each is finished.
+ */
+export class HeldRows {
+  /** Finished rows not yet taken. */
+  private out: Array<Row> = []
+  /** Rows with cells, not finished yet. */
+  private readonly rows = new Map<number, RowCells>()
+  /** The row the last cell went to (most cells follow the one before). */
+  private hotIndex = -1
+  private hot: RowCells | undefined
+  private readonly count: SheetCounter
+  private heldCells = 0
+  private sortedCells = 0
+
+  constructor(limits: Limits) {
+    this.count = new SheetCounter(limits)
+  }
+
+  /** The finished rows not yet taken; the collector starts collecting anew. */
+  take(): ReadonlyArray<Row> {
+    const out = this.out
+    if (out.length === 0) return NO_ROWS
+    this.out = []
+    return out
+  }
+
+  /** Whether finished rows wait to be taken. */
+  get ready(): boolean {
+    return this.out.length > 0
+  }
+
+  /** Cells held: those of the rows not finished yet. */
+  get held(): number {
+    return this.heldCells
+  }
+
+  /** Cells sorted so far, compacting rows: the sorting work. */
+  get sorted(): number {
+    return this.sortedCells
+  }
+
+  /** The work done so far: cells added, cells sorted and rows finished. */
+  get work(): number {
+    return this.count.cells + this.sortedCells + this.count.rows
+  }
+
+  /** Whether row `index` holds cells. */
+  has(index: number): boolean {
+    return this.rows.has(index)
+  }
+
+  /** The rows holding cells, in row order. */
+  indexes(): Uint32Array {
+    return Uint32Array.from(this.rows.keys()).sort()
+  }
+
+  /** Adds `cell` to row `index`. Fails at or past `maxColumns`, and past `maxCellsPerSheet` cells. */
+  addCell(index: number, cell: Cell.Cell): SpreadsheetError | undefined {
+    const count = this.count
+    const failed = count.column(cell.column) ?? count.cell()
+    if (failed !== undefined) return failed
+    let row = this.hotIndex === index ? this.hot : this.rows.get(index)
+    if (row === undefined) {
+      row = new RowCells()
+      this.rows.set(index, row)
     }
+    this.hotIndex = index
+    this.hot = row
+    const before = row.cells.length
+    this.sortedCells += row.add(cell, count.limits.maxColumns)
+    this.heldCells += row.cells.length - before
+    return undefined
+  }
+
+  /**
+   * Finishes row `index`: it goes out with its cells, sorted and compacted,
+   * or without any if it holds none. Fails on an index at or past `maxRows`.
+   */
+  finishRow(index: number, hidden: boolean): SpreadsheetError | undefined {
+    const row = this.rows.get(index)
+    let cells: Array<Cell.Cell> = []
+    if (row !== undefined) {
+      this.rows.delete(index)
+      this.heldCells -= row.cells.length
+      if (this.hotIndex === index) {
+        this.hotIndex = -1
+        this.hot = undefined
+      }
+      if (!row.sorted) this.sortedCells += row.cells.length
+      cells = row.done()
+    }
+    const failed = this.count.rowIndex(index) ?? this.count.row()
+    if (failed !== undefined) return failed
+    this.out.push({ index, hidden, cells })
     return undefined
   }
 }
