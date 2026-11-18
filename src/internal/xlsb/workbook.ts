@@ -180,8 +180,9 @@ export const readWorkbookBin = (
           const link = ++externals
           if (books.length >= MAX_BOOKS) return undefined
           const rel = readWideString(record.data, 0, max)
+          if (rel === undefined) return malformed("truncated external book record", part, record.offset)
           if (typeof rel === "number") return tooLong(limits, rel)
-          books.push({ kind: "external", link, relationshipId: rel?.value ?? "" })
+          books.push({ kind: "external", link, relationshipId: rel.value })
           return undefined
         }
         case BRT_EXTERN_SHEET: {
