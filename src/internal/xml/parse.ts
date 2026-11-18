@@ -5,9 +5,10 @@
  *
  * @internal
  */
-import { Effect, Stream } from "effect"
+import type { Effect, Stream } from "effect"
 import { MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
-import { WorkMeter } from "../meter.ts"
+import { drained, type PushDecoder, stopped } from "../decode.ts"
+import type { Meter } from "../meter.ts"
 import { type XmlHandler, type XmlLimits, XmlTokenizer } from "./tokenizer.ts"
 
 /**
@@ -92,6 +93,32 @@ const concat = (a: Uint8Array, b: Uint8Array): Uint8Array => {
 }
 
 /**
+ * The push decoder of an XML part: its bytes go through the text decoder,
+ * then the tokenizer, which calls `handler` and hands its work to `meter`.
+ * A step's error is the first one from the decoder, the tokenizer or the
+ * handler.
+ */
+export const xmlDecoder = (
+  handler: XmlHandler,
+  limits: XmlLimits,
+  part: string | undefined,
+  meter: Meter
+): PushDecoder<never> => {
+  const decoder = new XmlDecoder(part)
+  const tokenizer = new XmlTokenizer(handler, limits, part, meter)
+  return {
+    feed: (piece) => {
+      const text = decoder.push(piece)
+      return stopped(typeof text === "string" ? tokenizer.feed(text) : text)
+    },
+    end: () => {
+      const rest = decoder.end()
+      return stopped(typeof rest === "string" ? (tokenizer.feed(rest) ?? tokenizer.end()) : rest)
+    }
+  }
+}
+
+/**
  * Tokenizes a byte stream with `handler`. Fails with the first error (from
  * the input stream, the decoder, the tokenizer or the handler). The
  * tokenizer hands its work to the work meter.
@@ -101,21 +128,4 @@ export const parse = <E, R>(
   handler: XmlHandler,
   limits: XmlLimits,
   part?: string
-): Effect.Effect<void, E | SpreadsheetError, R> =>
-  Effect.flatMap(WorkMeter, (meter) => {
-    const decoder = new XmlDecoder(part)
-    const tokenizer = new XmlTokenizer(handler, limits, part, meter)
-    return Stream.runForEach(bytes, (chunk) => {
-      const text = decoder.push(chunk)
-      if (typeof text !== "string") return Effect.fail(text)
-      const error = tokenizer.feed(text)
-      return error === undefined ? Effect.void : Effect.fail(error)
-    }).pipe(
-      Effect.flatMap(() => {
-        const rest = decoder.end()
-        if (typeof rest !== "string") return Effect.fail(rest)
-        const error = tokenizer.feed(rest) ?? tokenizer.end()
-        return error === undefined ? Effect.void : Effect.fail(error)
-      })
-    )
-  })
+): Effect.Effect<void, E | SpreadsheetError, R> => drained(bytes, (meter) => xmlDecoder(handler, limits, part, meter))

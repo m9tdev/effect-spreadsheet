@@ -18,10 +18,11 @@
  *
  * @internal
  */
-import { Effect, Stream } from "effect"
+import type { Effect, Stream } from "effect"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import { WorkMeter } from "../meter.ts"
+import { drained, type PushDecoder, stopped } from "../decode.ts"
+import type { Meter } from "../meter.ts"
 
 export interface Biff12Record {
   readonly type: number
@@ -170,29 +171,38 @@ export class RecordSplitter {
 }
 
 /**
+ * The push decoder of a BIFF12 part: splits its bytes into records and
+ * calls `onRecord` for each. A step's error is the first one from the
+ * record layer or the handler. The records of each piece go to `meter`.
+ */
+export const recordDecoder = (
+  onRecord: RecordHandler,
+  limits: Pick<Limits, "maxRecordBytes">,
+  part: string,
+  meter: Meter
+): PushDecoder<never> => {
+  const splitter = new RecordSplitter(part, limits.maxRecordBytes)
+  return {
+    feed: (piece) => {
+      const before = splitter.records
+      const error = splitter.feed(piece, onRecord)
+      meter.add("records", splitter.records - before)
+      return stopped(error)
+    },
+    end: () => stopped(splitter.end())
+  }
+}
+
+/**
  * Reads a part's records from its byte stream, calling `onRecord` for each.
  * Fails with the first error (from the stream, the record layer or the
  * handler). The archive hands the bytes over in bounded slices, each after
  * a yield, so the work between the stream's turns is bounded. The records
- * of each chunk go to the work meter.
+ * of each slice go to the work meter.
  */
 export const readRecords = <E, R>(
   bytes: Stream.Stream<Uint8Array, E, R>,
   onRecord: RecordHandler,
   limits: Pick<Limits, "maxRecordBytes">,
   part: string
-): Effect.Effect<void, E | SpreadsheetError, R> =>
-  Effect.flatMap(WorkMeter, (meter) => {
-    const splitter = new RecordSplitter(part, limits.maxRecordBytes)
-    return Stream.runForEach(bytes, (chunk) => {
-      const before = splitter.records
-      const error = splitter.feed(chunk, onRecord)
-      meter.add("records", splitter.records - before)
-      return error === undefined ? Effect.void : Effect.fail(error)
-    }).pipe(
-      Effect.flatMap(() => {
-        const error = splitter.end()
-        return error === undefined ? Effect.void : Effect.fail(error)
-      })
-    )
-  })
+): Effect.Effect<void, E | SpreadsheetError, R> => drained(bytes, (meter) => recordDecoder(onRecord, limits, part, meter))
