@@ -35,11 +35,12 @@
  *
  * @since 0.1.0
  */
-import { Effect, Stream } from "effect"
+import { Effect } from "effect"
 import { open as openCfb } from "../internal/cfb/cfb.ts"
 import { type Meter, WorkMeter } from "../internal/meter.ts"
-import { readGlobals } from "../internal/xls/globals.ts"
-import { sheetDetails, sheetRows } from "../internal/xls/sheet.ts"
+import { fromSources } from "../internal/workbook.ts"
+import { readGlobals, type SheetEntry } from "../internal/xls/globals.ts"
+import { type SheetContext, sheetDetails, sheetRows } from "../internal/xls/sheet.ts"
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../SpreadsheetLimits.ts"
 import * as Workbook from "../Workbook.ts"
@@ -107,26 +108,27 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     if ("_tag" in stream) return yield* Effect.fail(stream)
     const globals = yield* readGlobals(stream, limits)
 
-    const sheets: Array<Workbook.SheetInfo> = globals.sheets.map((s, index) => ({ name: s.name, index, visibility: s.visibility }))
-    const context = (sheet: Workbook.SheetInfo, effective: SpreadsheetLimits.Limits) => {
-      const entry = globals.sheets[sheet.index]!
-      return entry.kind !== "worksheet"
-        ? undefined
-        : { stream, offset: entry.offset, end: entry.end, part: `sheet ${JSON.stringify(sheet.name)}`, globals, limits: effective }
-    }
-    return Workbook.make({
+    const context = (entry: SheetEntry, effective: SpreadsheetLimits.Limits): SheetContext => ({
+      stream,
+      offset: entry.offset,
+      end: entry.end,
+      part: `sheet ${JSON.stringify(entry.name)}`,
+      globals,
+      limits: effective
+    })
+    return fromSources({
       format: "xls",
-      sheets,
+      sheets: globals.sheets.map((entry) => ({
+        name: entry.name,
+        visibility: entry.visibility,
+        // chart, macro and other sheets hold no cells
+        source: entry.kind !== "worksheet" ? { _tag: "NoCells" } : {
+          _tag: "Cells",
+          rows: (effective) => sheetRows(context(entry, effective)),
+          details: (effective) => sheetDetails(context(entry, effective))
+        }
+      })),
       definedNames: globals.definedNames,
-      limits,
-      // chart, macro and other sheets hold no cells
-      rows: (sheet, effective) => {
-        const c = context(sheet, effective)
-        return c === undefined ? Stream.empty : sheetRows(c)
-      },
-      details: (sheet, effective) => {
-        const c = context(sheet, effective)
-        return c === undefined ? Effect.succeed({ hiddenColumns: [], merges: [] }) : sheetDetails(c)
-      }
+      limits
     })
   })

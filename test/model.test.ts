@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest"
 import { Cause, Effect, Exit, Layer, Schema, Stream } from "effect"
 import * as Csv from "../src/csv/index.ts"
 import * as Cell from "../src/Cell.ts"
+import { fromSources } from "../src/internal/workbook.ts"
 import * as SpreadsheetError from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
@@ -166,4 +167,60 @@ describe("Workbook", () => {
     Schema.decodeUnknownSync(Workbook.Row)({ index: 3, hidden: true, cells: [Cell.number(16383, 1)] })
     assert.throws(() => Schema.decodeUnknownSync(Workbook.SheetInfo)({ name: "x", index: 0, visibility: "gone" }))
   })
+})
+
+describe("Workbook from sheet sources", () => {
+  const broken = new SpreadsheetError.MalformedFile({ format: "xlsx", part: "xl/worksheets/sheet3.xml", reason: "missing" })
+  const seen: Array<number> = []
+  const wb = fromSources({
+    format: "xlsx",
+    limits: SpreadsheetLimits.defaults,
+    sheets: [
+      {
+        name: "Data",
+        visibility: "visible",
+        source: {
+          _tag: "Cells",
+          rows: (limits) => {
+            seen.push(limits.maxRows)
+            return Stream.make({ index: 0, hidden: false, cells: [Cell.text(0, "x")] })
+          },
+          details: (limits) => Effect.succeed({ hiddenColumns: [{ first: 0, last: limits.maxColumns }], merges: [] })
+        }
+      },
+      { name: "Chart", visibility: "hidden", source: { _tag: "NoCells" } },
+      { name: "Gone", visibility: "veryHidden", source: { _tag: "Broken", error: broken } }
+    ]
+  })
+
+  it("lists the sheets in order, each index its position", () => {
+    assert.deepStrictEqual(wb.sheets, [
+      { name: "Data", index: 0, visibility: "visible" },
+      { name: "Chart", index: 1, visibility: "hidden" },
+      { name: "Gone", index: 2, visibility: "veryHidden" }
+    ])
+    assert.deepStrictEqual(wb.definedNames, [])
+  })
+
+  it.effect("reads a sheet with cells with the effective limits", () =>
+    Effect.gen(function*() {
+      const rows = yield* Stream.runCollect(Workbook.rows(wb, "Data", { limits: { maxRows: 7 } }))
+      assert.strictEqual(Array.from(rows).length, 1)
+      assert.deepStrictEqual(seen.slice(-1), [7])
+      const details = yield* Workbook.sheetDetails(wb, 0, { limits: { maxColumns: 5 } })
+      assert.deepStrictEqual(details, { hiddenColumns: [{ first: 0, last: 5 }], merges: [] })
+    }))
+
+  it.effect("a sheet without cells has no rows and no details", () =>
+    Effect.gen(function*() {
+      assert.strictEqual(Array.from(yield* Stream.runCollect(Workbook.rows(wb, 1))).length, 0)
+      assert.deepStrictEqual(yield* Workbook.sheetDetails(wb, "chart"), { hiddenColumns: [], merges: [] })
+    }))
+
+  it.effect("a broken sheet fails only when read", () =>
+    Effect.gen(function*() {
+      assert.strictEqual(yield* Effect.flip(Stream.runCollect(Workbook.rows(wb, 2))), broken)
+      assert.strictEqual(yield* Effect.flip(Workbook.sheetDetails(wb, "Gone")), broken)
+      assert.strictEqual(Array.from(yield* Stream.runCollect(Workbook.rows(wb, 0))).length, 1)
+    }))
 })

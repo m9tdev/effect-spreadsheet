@@ -6,6 +6,7 @@
  */
 import { Effect, Schema, Stream } from "effect"
 import { Cell } from "./Cell.ts"
+import { NO_DETAILS } from "./internal/sheet/layout.ts"
 import { SheetNotFound, type SpreadsheetError } from "./SpreadsheetError.ts"
 import { type LimitOverrides, type Limits, merge } from "./SpreadsheetLimits.ts"
 
@@ -150,8 +151,6 @@ export const SheetDetails = Schema.Struct({
 
 /** @since 0.1.0 @category models */
 export type SheetDetails = typeof SheetDetails.Type
-
-const NO_DETAILS: SheetDetails = { hiddenColumns: [], merges: [] }
 
 /** @internal */
 export const DetailsSource: unique symbol = Symbol.for("effect-spreadsheet/Workbook/details") as never
