@@ -138,7 +138,7 @@ export const readCsv: (
  * cell values):
  *
  * - `header: "first-row"`: the first row gives the names.
- * - `header: n`: the row with index `n` (an integer, 0 or more) gives the
+ * - `header: n`: the row with index `n` (a safe integer, 0 or more) gives the
  *   names; rows before it are skipped.
  * - `header: [...]`: the given names, by column (repeats made unique the
  *   same way); every row is data. Columns past the array, and columns whose
