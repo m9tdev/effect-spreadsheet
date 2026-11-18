@@ -10,7 +10,7 @@ import type { Limits } from "../../SpreadsheetLimits.ts"
 import { Fields } from "../binary.ts"
 import { readRichStr, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords } from "../biff12/records.ts"
-import { cellStyles, type CellStyles, classify, type NumberFormat } from "../numFmt.ts"
+import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
 import { malformed, tooLong } from "./workbook.ts"
@@ -95,7 +95,7 @@ export const readStyles = (
           // classified here, a slice per event-loop turn, not on the cells'
           // turn (the rows stream doesn't yield between the cells of a row);
           // a later BrtFmt with the same id wins
-          custom.set(id, classify(code.value))
+          addFormat(custom, id, code.value)
           return undefined
         }
         case BRT_XF: {

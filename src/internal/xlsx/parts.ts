@@ -9,7 +9,7 @@
 import { Effect } from "effect"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import { cellStyles, type CellStyles, classify, type NumberFormat } from "../numFmt.ts"
+import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import { parsePart } from "../opc.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import { attr, type XmlAttributes, type XmlHandler } from "../xml/tokenizer.ts"
@@ -242,7 +242,7 @@ export const readStyles = (
         const code = attr(attributes, "formatCode")
         if (id !== undefined && code !== undefined && /^\d{1,9}$/.test(id)) {
           // a later <numFmt> with the same id wins
-          custom.set(Number(id), classify(code))
+          addFormat(custom, Number(id), code)
         }
       } else if (name === "cellXfs") inCellXfs = true
       else if (name === "xf" && inCellXfs) {

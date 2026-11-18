@@ -1,7 +1,7 @@
 import { Effect, Exit, Stream } from "effect"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
-import { cellStyles, classify, isDateCode, serialToDate } from "../src/internal/numFmt.ts"
+import { addFormat, cellStyles, classify, isDateCode, type NumberFormat, serialToDate } from "../src/internal/numFmt.ts"
 import { resolvePart } from "../src/internal/opc.ts"
 import { columnName, parseCellRef, parseRange } from "../src/internal/refs.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
@@ -58,6 +58,16 @@ describe("number formats and serial dates", () => {
     expect(formatFor(70, new Map()).date).toBe(false)
     expect(formatFor(82, new Map()).date).toBe(false)
     expect(formatFor(500, new Map())).toEqual({ code: undefined, date: false })
+  })
+
+  it("custom formats: a later code with the same id wins; the same code again keeps the classified format", () => {
+    const formats = new Map<number, NumberFormat>()
+    addFormat(formats, 164, "0.00")
+    const first = formats.get(164)
+    addFormat(formats, 164, "0.00")
+    expect(formats.get(164)).toBe(first)
+    addFormat(formats, 164, "yyyy")
+    expect(formats.get(164)).toEqual({ code: "yyyy", date: true })
   })
 
   it("cell styles: a lookup by style index, undefined past the styles", () => {

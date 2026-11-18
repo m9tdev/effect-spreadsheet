@@ -112,6 +112,15 @@ const builtinFormat = (id: number): NumberFormat =>
 export const classify = (code: string): NumberFormat => ({ code, date: isDateCode(code) })
 
 /**
+ * Adds the custom format `code` with `id` to `formats`, classified: a later
+ * code with the same id wins, and the same code again changes nothing (so
+ * it isn't scanned again).
+ */
+export const addFormat = (formats: Map<number, NumberFormat>, id: number, code: string): void => {
+  if (formats.get(id)?.code !== code) formats.set(id, classify(code))
+}
+
+/**
  * The number formats of a workbook's cell styles: a cell's style index is an
  * index into its cell formats (`cellXfs`, BrtXF, XF), each of which names a
  * number format id. A lookup only, never a scan: custom codes come

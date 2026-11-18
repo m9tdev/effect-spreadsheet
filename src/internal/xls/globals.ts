@@ -22,7 +22,7 @@ import { type BiffRecord, BOF_BIFF5_8, EOF, type Gathering, RecordReader, readBo
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { Fields } from "../binary.ts"
 import { WorkMeter } from "../meter.ts"
-import { cellStyles, type CellStyles, classify, type NumberFormat } from "../numFmt.ts"
+import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import { codepageLabel, readString, type Text, textDecoder } from "./fields.ts"
@@ -361,9 +361,9 @@ class GlobalsWalk {
         const code = readString(record.data, 2, this.text, biff8 ? 2 : 1)
         if (code === null) return tooLong(limits)
         if (id !== undefined && code !== undefined) {
-          // classified here, once per FORMAT (a later one with the same id
-          // wins); the scan counts in the batch, by the code's length
-          this.custom.set(id, classify(code.value))
+          // classified here (a later FORMAT with the same id wins); the
+          // scan counts in the batch, by the code's length
+          addFormat(this.custom, id, code.value)
           this.bytes += code.value.length
         }
         return undefined
