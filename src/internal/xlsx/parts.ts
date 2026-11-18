@@ -13,7 +13,7 @@ import { parse } from "../xml/parse.ts"
 import type { XmlAttributes, XmlHandler } from "../xml/tokenizer.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
-import { formatFor, isDateCode, type NumberFormat } from "./numFmt.ts"
+import { builtinFormat, isDateCode, type NumberFormat } from "./numFmt.ts"
 
 export const malformed = (reason: string, part?: string) =>
   new MalformedFile({ format: "xlsx", reason, ...(part === undefined ? {} : { part }) })
@@ -303,8 +303,6 @@ export interface Styles {
 
 export const NO_STYLES: Styles = { formats: [] }
 
-const NO_CUSTOM: ReadonlyMap<number, string> = new Map()
-
 /** Reads the number formats and the cell styles that use them. */
 export const readStyles = (
   archive: Archive,
@@ -341,18 +339,8 @@ export const readStyles = (
     },
     text: () => undefined
   }
-  return Effect.map(parsePart(archive, entry, handler, limits), () => {
-    // one NumberFormat per id, shared by the cell styles that use it
-    const byId = new Map<number, NumberFormat>(custom)
-    return {
-      formats: xfIds.map((id) => {
-        let format = byId.get(id)
-        if (format === undefined) {
-          format = formatFor(id, NO_CUSTOM)
-          byId.set(id, format)
-        }
-        return format
-      })
-    }
-  })
+  return Effect.map(parsePart(archive, entry, handler, limits), () => ({
+    // shared formats: custom ones from the parse, built-in ones from a fixed table
+    formats: xfIds.map((id) => custom.get(id) ?? builtinFormat(id))
+  }))
 }

@@ -127,8 +127,8 @@ const longestGap = async (run: () => Promise<unknown>): Promise<number> => {
  * the cell styles times the code length (seconds for a few KB file), or
  * with the total length of the codes in one stretch after the parse.
  * The bound is generous so a loaded machine doesn't fail it: these cases
- * take 1-3 s in one stretch when the work isn't spread out, and a few ms
- * per stretch when it is.
+ * take seconds in one stretch when the work isn't spread out, and a few
+ * ms per stretch when it is.
  */
 const MAX_GAP_MS = 500
 const SERIAL = 45_000 // 2023-03-15
@@ -179,5 +179,33 @@ describe("xlsx: number formats in the styles part", () => {
     })
     expect(dates).toEqual(xfs.map((_, k) => k % 2 === 0))
     expect(gap, `longest gap ${gap.toFixed(0)} ms`).toBeLessThan(MAX_GAP_MS)
+  }, 120_000)
+
+  it("many cell styles with distinct ids don't block the event loop", async () => {
+    // 2 500 000 cell styles, each with its own id that has no code (neither
+    // custom nor built-in): about 60 MB of styles, under the inflate budget
+    // of a small file; then a custom date code and built-in date and number ids.
+    // Looking up each style's format after the parse is one stretch of up to
+    // a few hundred ms on a loaded machine; building an entry per distinct
+    // id takes seconds. The bound sits between the two.
+    const XFS = 2_500_000
+    const MAX_STYLES_GAP_MS = 800
+    const xfs = [...Array.from({ length: XFS }, (_, k) => 1000 + k), 165, 14, 4]
+    const bytes = await xlsx({
+      sheets: [{
+        name: "S",
+        data: `<row r="1"><c r="A1" s="0"><v>${SERIAL}</v></c><c r="B1" s="${XFS - 1}"><v>${SERIAL}</v></c>` +
+          `<c r="C1" s="${XFS}"><v>${SERIAL}</v></c><c r="D1" s="${XFS + 1}"><v>${SERIAL}</v></c>` +
+          `<c r="E1" s="${XFS + 2}"><v>${SERIAL}</v></c></row>`
+      }],
+      numFmts: { 165: "yyyy-mm-dd" },
+      xfs
+    })
+    let dates: Array<boolean> = []
+    const gap = await longestGap(async () => {
+      dates = await cellsOf(bytes)
+    })
+    expect(dates).toEqual([false, false, true, true, false])
+    expect(gap, `longest gap ${gap.toFixed(0)} ms`).toBeLessThan(MAX_STYLES_GAP_MS)
   }, 120_000)
 })
