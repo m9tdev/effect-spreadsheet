@@ -32,13 +32,9 @@
  * @since 0.1.0
  */
 import { Effect } from "effect"
-import { type PackageFormat, readPackage } from "../internal/package.ts"
-import { toDefinedNames } from "../internal/workbook.ts"
-import { sheetDetails } from "../internal/xlsx/details.ts"
-import { malformed, readSharedStrings, readStyles, readWorkbookPart, type WorkbookPart } from "../internal/xlsx/parts.ts"
-import { sheetRows } from "../internal/xlsx/sheet.ts"
-import { open } from "../internal/zip/archive.ts"
-import { LimitExceeded, type SpreadsheetError } from "../SpreadsheetError.ts"
+import { accept } from "../internal/input.ts"
+import { readXlsx } from "../internal/xlsx/read.ts"
+import { type SpreadsheetError } from "../SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../SpreadsheetLimits.ts"
 import * as Workbook from "../Workbook.ts"
 
@@ -65,24 +61,4 @@ export interface ReadOptions {
  * @category readers
  */
 export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Workbook.Workbook, SpreadsheetError> =>
-  Effect.gen(function*() {
-    const limits = yield* SpreadsheetLimits.resolve(options?.limits)
-    if (bytes.length > limits.maxInputBytes) {
-      return yield* new LimitExceeded({ limit: "maxInputBytes", max: limits.maxInputBytes, actual: bytes.length })
-    }
-    const archive = yield* Effect.fromResult(open(bytes, limits))
-
-    return yield* readPackage(archive, limits, XLSX)
-  })
-
-const XLSX: PackageFormat<WorkbookPart> = {
-  format: "xlsx",
-  fallbackWorkbook: "xl/workbook.xml",
-  malformed,
-  readWorkbook: readWorkbookPart,
-  readStrings: readSharedStrings,
-  readStyles,
-  definedNames: (workbook) => Effect.succeed(toDefinedNames(workbook.definedNames, workbook.sheets.length)),
-  rows: sheetRows,
-  details: sheetDetails
-}
+  Effect.flatMap(accept(bytes, options?.limits), readXlsx)

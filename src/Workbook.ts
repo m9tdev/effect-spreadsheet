@@ -7,7 +7,8 @@
 import { Effect, Schema, Stream } from "effect"
 import { Cell } from "./Cell.ts"
 import { SheetNotFound, type SpreadsheetError } from "./SpreadsheetError.ts"
-import { type LimitOverrides, type Limits, merge } from "./SpreadsheetLimits.ts"
+import { mergeLimits } from "./internal/input.ts"
+import { type LimitOverrides, type Limits } from "./SpreadsheetLimits.ts"
 
 /**
  * One row. `index` is the 0-based row index in the sheet (rows that hold
@@ -269,8 +270,8 @@ export const rows = (
 ): Stream.Stream<Row, SpreadsheetError> => {
   const found = findSheet(workbook, sheet)
   if (found === undefined) return Stream.fail(new SheetNotFound({ sheet }))
-  // suspend: invalid limit overrides (merge throws) die when the stream runs
-  return Stream.suspend(() => workbook[RowsSource](found, merge(workbook.limits, options?.limits)))
+  // suspend: invalid limit overrides (mergeLimits throws) die when the stream runs
+  return Stream.suspend(() => workbook[RowsSource](found, mergeLimits(workbook.limits, options?.limits)))
 }
 
 /**
@@ -289,5 +290,5 @@ export const sheetDetails = (
 ): Effect.Effect<SheetDetails, SpreadsheetError> => {
   const found = findSheet(workbook, sheet)
   if (found === undefined) return Effect.fail(new SheetNotFound({ sheet }))
-  return Effect.suspend(() => workbook[DetailsSource](found, merge(workbook.limits, options?.limits)))
+  return Effect.suspend(() => workbook[DetailsSource](found, mergeLimits(workbook.limits, options?.limits)))
 }
