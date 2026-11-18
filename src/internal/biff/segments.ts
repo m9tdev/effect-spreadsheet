@@ -135,6 +135,16 @@ export class SegmentReader {
 
   /** The next u16 (little-endian), across segments; checked by `has(2)` first. */
   u16(): number {
+    // within the current segment (the common case): no settling per byte
+    const k = this.segment
+    if (k < this.count) {
+      const at = this.bounds[2 * k]! + this.at
+      if (at + 2 <= this.bounds[2 * k + 1]!) {
+        this.at += 2
+        this.left -= 2
+        return this.bytes[at]! | (this.bytes[at + 1]! << 8)
+      }
+    }
     return this.u8() | (this.u8() << 8)
   }
 
