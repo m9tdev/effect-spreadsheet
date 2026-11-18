@@ -284,8 +284,11 @@ export class Rows {
 
   /** Emits row `index` with its cells, or without any if only ROW records declared it. */
   private finishRow(index: number): SpreadsheetError | undefined {
-    if (!this.rows.has(index) && !this.declared.has(index)) return undefined
-    return this.rows.finishRow(index, this.hidden.has(index))
+    const hidden = this.hidden.has(index)
+    const finished = this.rows.finishRow(index, hidden)
+    if (finished === true) return undefined
+    if (finished !== false) return finished
+    return this.declared.has(index) ? this.rows.finishEmptyRow(index, hidden) : undefined
   }
 
   /** Whether rows wait to be taken. */
