@@ -33,7 +33,25 @@ import type * as Cell from "../../Cell.ts"
 import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
-import { compact, NO_ROWS } from "../sheet.ts"
+
+/**
+ * Sorts a row's cells by column in place, keeping the last cell of each
+ * column (`sort` is stable), and returns them.
+ */
+export const compact = (cells: Array<Cell.Cell>): Array<Cell.Cell> => {
+  cells.sort((a, b) => a.column - b.column)
+  let kept = 0
+  // progress: k up to cells.length
+  for (let k = 0; k < cells.length; k++) {
+    const next = cells[k + 1]
+    if (next === undefined || next.column !== cells[k]!.column) cells[kept++] = cells[k]!
+  }
+  cells.length = kept
+  return cells
+}
+
+/** No rows: what a step that completed none emits. */
+export const NO_ROWS: ReadonlyArray<Row> = []
 
 /** A format's own rules. `At` is where a row or cell sits in the source (a record, say), for errors. */
 export interface RowRules<At> {
