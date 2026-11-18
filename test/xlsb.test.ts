@@ -723,6 +723,75 @@ describe("xlsb limits and malformed input", () => {
     expect(await errorOf({ sheets: [{ name: "S", part: cut.subarray(0, cut.length - 8) }] })).toMatchObject({ _tag: "MalformedFile", reason: expect.stringContaining("runs past the end of the part") })
   })
 
+  it("a cell past maxColumns whose value is also cut fails on its column: the cell is placed before its value is checked", async () => {
+    const tooFar = { _tag: "LimitExceeded", limit: "maxColumns", max: 8, actual: 9 }
+    // a cut record is its body cut, under a new header (these types and sizes take 1 byte each)
+    const body = (record: Uint8Array) => record.subarray(2)
+    const real = body(B.real(8, 2.5))
+    expect(await errorOf(one([B.rowHdr(0), B.record(0x05, real.subarray(0, 10))]), { maxColumns: 8 })).toMatchObject(tooFar)
+    const text = body(B.cellSt(8, "abc"))
+    expect(await errorOf(one([B.rowHdr(0), B.record(0x06, text.subarray(0, 13))]), { maxColumns: 8 })).toMatchObject(tooFar)
+    // the short forms take the column after the previous cell's
+    const shortRk = body(B.shortRk(B.rkInt(1)))
+    expect(await errorOf(one([B.rowHdr(0), B.blank(7), B.record(0x0D, shortRk.subarray(0, 6))]), { maxColumns: 8 })).toMatchObject(tooFar)
+    // within maxColumns, the same records are truncated
+    expect(await errorOf(one([B.rowHdr(0), B.record(0x05, real.subarray(0, 10))]))).toMatchObject({ _tag: "MalformedFile", reason: "truncated cell record 0x5" })
+  })
+
+  it("every cell kind cut below its declared minimum, or inside its string, is a truncated cell record", () => {
+    const head = (short: boolean) => (short ? B.u32(0) : [...B.u32(2), ...B.u32(0)])
+    // type, short form, value bytes (MS-XLSB: the value's fixed part, or a string)
+    const kinds: ReadonlyArray<readonly [number, boolean, ReadonlyArray<number>]> = [
+      [0x01, false, []],
+      [0x02, false, B.u32(B.rkInt(7))],
+      [0x03, false, [0x07]],
+      [0x04, false, [1]],
+      [0x05, false, B.f64(2.5)],
+      [0x06, false, B.wide("st")],
+      [0x07, false, B.u32(0)],
+      [0x08, false, B.wide("fs")],
+      [0x09, false, B.f64(3.5)],
+      [0x0A, false, [1]],
+      [0x0B, false, [0x2A]],
+      [0x0C, true, []],
+      [0x0D, true, B.u32(B.rkInt(9))],
+      [0x0E, true, [0x24]],
+      [0x0F, true, [0]],
+      [0x10, true, B.f64(4.5)],
+      [0x11, true, B.wide("s")],
+      [0x12, true, B.u32(0)],
+      [0x3E, false, [1, ...B.wide("rich")]]
+    ]
+    const handled = (record: Uint8Array) => {
+      const rows = new SheetRows({ part: "t.bin", strings: ["a"], styles: NO_STYLES, date1904: false, limits: SpreadsheetLimits.defaults })
+      return new RecordSplitter("t.bin", SpreadsheetLimits.defaults.maxRecordBytes).feed(B.concat([B.beginSheetData(), B.rowHdr(0), record]), rows.handle)
+    }
+    // progress: one kind per iteration
+    for (const [type, short, value] of kinds) {
+      const full = [...head(short), ...value]
+      expect(handled(B.record(type, full)), `whole record 0x${type.toString(16)}`).toBeUndefined()
+      // progress: k up to the record's length
+      for (let k = 0; k < full.length; k++) {
+        expect(handled(B.record(type, full.slice(0, k))), `record 0x${type.toString(16)} cut to ${k} bytes`)
+          .toMatchObject({ _tag: "MalformedFile", reason: `truncated cell record 0x${type.toString(16)}` })
+      }
+    }
+  })
+
+  it("a BrtWbProp too short for its flags means the 1900 date system", async () => {
+    // flags u32 (f1904 bit 0), brtcalcprops u32, strName
+    const wbProp = new Uint8Array([...B.u32(1), ...B.u32(0), ...B.wide("")])
+    const serial1 = async (workbookProps: Uint8Array) => {
+      const workbookPart = B.concat([B.beginBook(), B.record(0x99, workbookProps), B.record(0x8F), B.bundleSh("S", "rId1"), B.record(0x90), B.endBook()])
+      const { sheets } = await readOk({ sheets: [{ name: "S", part: B.sheetBin([B.rowHdr(0), B.real(0, 1, 1)]) }], workbookPart, xfs: [0, 14] })
+      return (Cell.value(sheets[0]![0]!.cells[0]!) as Date).toISOString()
+    }
+    expect(await serial1(wbProp)).toBe("1904-01-02T00:00:00.000Z")
+    expect(await serial1(wbProp.subarray(0, 4))).toBe("1904-01-02T00:00:00.000Z")
+    // progress: k up to 3
+    for (let k = 0; k < 4; k++) expect(await serial1(wbProp.subarray(0, k)), `cut to ${k} bytes`).toBe("1900-01-01T00:00:00.000Z")
+  })
+
   it("a broken package: no workbook part, a part that isn't a workbook, a missing sheet part, two sheets on one part", async () => {
     expect(await errorOf({ sheets: [], workbookPart: new Uint8Array(0) })).toMatchObject({ _tag: "MalformedFile", reason: "empty workbook part" })
     expect(await errorOf({ sheets: [], workbookPart: B.concat([B.record(0x81)]) })).toMatchObject({ _tag: "MalformedFile", reason: "not a workbook part: it starts with record 0x81" })
