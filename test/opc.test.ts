@@ -1,4 +1,5 @@
 import { Effect, Stream } from "effect"
+import * as Result from "effect/Result"
 import { describe, expect, it } from "vitest"
 import { packageRels, partRels, resolveName } from "../src/internal/opc.ts"
 import { open } from "../src/internal/zip/archive.ts"
@@ -13,8 +14,7 @@ import { buildZip } from "./helpers/zip.ts"
 const limits = SpreadsheetLimits.defaults
 
 const openArchive = async (entries: ReadonlyArray<{ name: string; data: Uint8Array }>) => {
-  const archive = open(await buildZip(entries), limits)
-  if ("_tag" in archive) throw new Error(archive._tag)
+  const archive = Result.getOrThrow(open(await buildZip(entries), limits))
   return archive
 }
 

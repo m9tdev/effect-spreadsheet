@@ -1,5 +1,6 @@
 /** Fuzz tasks run inside a worker thread (see host.ts / worker.ts). */
 import { Effect, Stream } from "effect"
+import * as Result from "effect/Result"
 import * as Csv from "../../src/csv/index.ts"
 import * as Spreadsheet from "../../src/Spreadsheet.ts"
 import { RecordReader } from "../../src/internal/biff/records.ts"
@@ -43,8 +44,9 @@ export const effectOf = (task: FuzzTask): Effect.Effect<unknown, unknown> => {
     case "zip":
       // open the archive, inflate every entry and tokenize the XML ones
       return Effect.flatMap(SpreadsheetLimits.resolve(task.limits), (limits) => {
-        const archive = open(task.bytes, limits)
-        if ("_tag" in archive) return Effect.fail(archive)
+        const opened = open(task.bytes, limits)
+        if (Result.isFailure(opened)) return Effect.fail(opened.failure)
+        const archive = opened.success
         return Effect.forEach(archive.entries, (entry) =>
           /\.(xml|rels)$/i.test(entry.name)
             ? parse(archive.read(entry), ignore, limits, entry.name)
@@ -55,12 +57,14 @@ export const effectOf = (task: FuzzTask): Effect.Effect<unknown, unknown> => {
       // records and decode its SST strings
       return Effect.flatMap(SpreadsheetLimits.resolve(task.limits), (limits) =>
         Effect.suspend(() => {
-          const cfb = openCfb(task.bytes, limits)
-          if ("_tag" in cfb) return Effect.fail(cfb)
+          const opened = openCfb(task.bytes, limits)
+          if (Result.isFailure(opened)) return Effect.fail(opened.failure)
+          const cfb = opened.success
           for (const entry of cfb.entries) {
             if (entry.type !== "stream") continue
-            const data = cfb.read(entry)
-            if ("_tag" in data) return Effect.fail(data)
+            const read = cfb.read(entry)
+            if (Result.isFailure(read)) return Effect.fail(read.failure)
+            const data = read.success
             if (!/^(workbook|book)$/i.test(entry.path)) continue
             const reader = new RecordReader(data, entry.path)
             // progress: every record advances the reader

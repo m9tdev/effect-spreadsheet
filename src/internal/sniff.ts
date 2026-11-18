@@ -4,12 +4,13 @@
  *
  * @internal
  */
-import { LimitExceeded, MalformedFile } from "../SpreadsheetError.ts"
+import * as Result from "effect/Result"
+import type { LimitExceeded, MalformedFile } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
 import type { Format } from "../Workbook.ts"
 import { detectEncoding } from "./csv/decode.ts"
 import { open as openCfb } from "./cfb/cfb.ts"
-import { normalizeName, readDirectory, storedData } from "./zip/directory.ts"
+import { normalizeName, readDirectory, storedData, type ZipEntry } from "./zip/directory.ts"
 
 const TEXT_PREFIX_BYTES = 8 * 1024
 
@@ -36,10 +37,13 @@ const ZIP_MAGICS: ReadonlyArray<ReadonlyArray<number>> = [
 const CFB_MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 const ODS_MIME = "application/vnd.oasis.opendocument.spreadsheet"
 
-const detectZip = (bytes: Uint8Array, limits: Limits): Format | MalformedFile | LimitExceeded => {
+const detectZip = (bytes: Uint8Array, limits: Limits): Result.Result<Format, MalformedFile | LimitExceeded> => {
   const directory = readDirectory(bytes, limits)
-  if (directory instanceof MalformedFile || directory instanceof LimitExceeded) return directory
-  const entries = directory.entries
+  return Result.isFailure(directory) ? Result.fail(directory.failure) : Result.succeed(zipFormat(bytes, directory.success.entries))
+}
+
+/** What a zip archive holds, from its entry names (and an ODF `mimetype`). */
+const zipFormat = (bytes: Uint8Array, entries: ReadonlyArray<ZipEntry>): Format => {
   let xlsxPart = false
   let xlsbPart = false
   let mimetype: string | undefined
@@ -112,18 +116,27 @@ const textPrefix = (bytes: Uint8Array): string => {
 const isSylk = (text: string): boolean =>
   text.startsWith("ID;P") && /\r?\n(?:[CFBP];|E\s*$)/.test(text)
 
-export const detect = (bytes: Uint8Array, limits: Limits): Format | MalformedFile | LimitExceeded => {
-  if (bytes.length === 0) return "csv"
+/**
+ * The format of `bytes`. Only a container (a compound file or a zip) is
+ * opened, and a broken one fails rather than giving a format.
+ */
+export const detect = (bytes: Uint8Array, limits: Limits): Result.Result<Format, MalformedFile | LimitExceeded> => {
+  if (bytes.length === 0) return Result.succeed("csv")
   if (startsWith(bytes, CFB_MAGIC)) {
     // a compound file: an .xls if it has a workbook stream (BIFF8 or BIFF5)
     const cfb = openCfb(bytes, limits)
-    if ("_tag" in cfb) return cfb
-    const entry = cfb.find("Workbook") ?? cfb.find("Book")
-    return entry !== undefined && entry.type === "stream" ? "xls" : "cfb"
+    if (Result.isFailure(cfb)) return Result.fail(cfb.failure)
+    const entry = cfb.success.find("Workbook") ?? cfb.success.find("Book")
+    return Result.succeed(entry !== undefined && entry.type === "stream" ? "xls" : "cfb")
   }
   if (ZIP_MAGICS.some((magic) => startsWith(bytes, magic))) {
     return detectZip(bytes, limits)
   }
+  return Result.succeed(plainFormat(bytes))
+}
+
+/** The format of bytes that are neither a compound file nor a zip. */
+const plainFormat = (bytes: Uint8Array): Format => {
   if (isBiffBof(bytes)) return "xls"
   if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46])) return "pdf"
   if (

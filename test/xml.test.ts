@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { Effect, Exit, Stream } from "effect"
+import * as Result from "effect/Result"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { open } from "../src/internal/zip/archive.ts"
@@ -603,8 +604,7 @@ describe("xml bytes", () => {
         if (!statSync(`${dir}/${name}`).isFile()) continue
         const bytes = new Uint8Array(readFileSync(`${dir}/${name}`))
         if (!(bytes[0] === 0x50 && bytes[1] === 0x4B)) continue
-        const archive = open(bytes, limits)
-        if ("_tag" in archive) throw new Error(`${name}: ${archive._tag}`)
+        const archive = Result.getOrThrow(open(bytes, limits))
         for (const entry of archive.entries.filter((e) => /\.(xml|rels)$/.test(e.name))) {
           const handler: XmlHandler = { open: () => undefined, close: () => undefined, text: () => undefined }
           const characters = counter("characters")

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 import { Effect, Exit, Stream } from "effect"
+import * as Result from "effect/Result"
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { RecordSplitter } from "../src/internal/biff12/records.ts"
@@ -118,8 +119,7 @@ describe("xlsb reader", () => {
   it("cell styles: one number format per format id, shared; styles past maxCellXfs aren't kept", async () => {
     const bytes = await B.xlsb({ sheets: [{ name: "S" }], xfs: [0, 14, 164, 14, 164], formats: { 164: "0.000" }, method: "store" })
     const limits = SpreadsheetLimits.defaults
-    const archive = open(bytes, limits)
-    if ("_tag" in archive) throw new Error(archive._tag)
+    const archive = Result.getOrThrow(open(bytes, limits))
     const read = (max?: number) => Effect.runPromise(readStyles(archive, archive.find("xl/styles.bin")!, limits, max))
     const styles = await read()
     expect(styles.count).toBe(5)
@@ -552,8 +552,7 @@ describe("xlsb defined names", () => {
     ]
     const bytes = await B.xlsb({ sheets: [{ name: "S" }], externalLinks: [link], globals, method: "store" })
     const limits = SpreadsheetLimits.defaults
-    const archive = open(bytes, limits)
-    if ("_tag" in archive) throw new Error(archive._tag)
+    const archive = Result.getOrThrow(open(bytes, limits))
     const workbook = await Effect.runPromise(readWorkbookBin(archive, archive.find("xl/workbook.bin")!, limits))
     const rels = await Effect.runPromise(partRels(archive, archive.find("xl/workbook.bin")!, limits))
     const inflated = counter("bytes")
@@ -579,8 +578,7 @@ describe("xlsb defined names", () => {
     ])
     const bytes = await B.xlsb({ sheets: [{ name: "S" }], globals: [floods, B.name("N", B.ref3d(65_535, 0, 0))], method: "store" })
     const limits = SpreadsheetLimits.defaults
-    const archive = open(bytes, limits)
-    if ("_tag" in archive) throw new Error(archive._tag)
+    const archive = Result.getOrThrow(open(bytes, limits))
     const workbook = await Effect.runPromise(readWorkbookBin(archive, archive.find("xl/workbook.bin")!, limits))
     expect(workbook.books.length).toBe(MAX_BOOKS)
     expect(workbook.books[0]).toBe(workbook.books[3])

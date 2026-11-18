@@ -28,6 +28,7 @@
  */
 import { Cause, Effect, Scope, Stream } from "effect"
 import * as Channel from "effect/Channel"
+import * as Result from "effect/Result"
 import type * as Arr from "effect/Array"
 import type * as Pull from "effect/Pull"
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
@@ -66,6 +67,9 @@ const malformed = (reason: string, part?: string, offset?: number) =>
     ...(offset === undefined ? {} : { offset })
   })
 
+/** A failed result with a `MalformedFile`. */
+const fail = (reason: string, part?: string, offset?: number) => Result.fail(malformed(reason, part, offset))
+
 interface Located {
   readonly entry: ZipEntry
   readonly dataStart: number
@@ -73,7 +77,7 @@ interface Located {
 }
 
 /** Checks the local headers and the layout; returns where each entry's data is. */
-const locate = (bytes: Uint8Array, directory: Directory): Map<ZipEntry, Located> | MalformedFile => {
+const locate = (bytes: Uint8Array, directory: Directory): Result.Result<Map<ZipEntry, Located>, MalformedFile> => {
   const entries = directory.entries
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const names = new TextDecoder("utf-8")
@@ -81,22 +85,22 @@ const locate = (bytes: Uint8Array, directory: Directory): Map<ZipEntry, Located>
   // progress: one entry per iteration (entries are bounded by maxZipEntries)
   for (const entry of entries) {
     const at = entry.localOffset
-    if (at + 30 > bytes.length) return malformed("local header out of bounds", entry.name, at)
-    if (view.getUint32(at, true) !== LOCAL) return malformed("bad local header signature", entry.name, at)
+    if (at + 30 > bytes.length) return fail("local header out of bounds", entry.name, at)
+    if (view.getUint32(at, true) !== LOCAL) return fail("bad local header signature", entry.name, at)
     if (view.getUint16(at + 8, true) !== entry.method) {
-      return malformed("local header compression method differs from the directory", entry.name, at)
+      return fail("local header compression method differs from the directory", entry.name, at)
     }
     const nameLength = view.getUint16(at + 26, true)
     const extraLength = view.getUint16(at + 28, true)
     const dataStart = at + 30 + nameLength + extraLength
     const dataEnd = dataStart + entry.compressedSize
-    if (dataEnd > bytes.length) return malformed("entry data out of bounds", entry.name, at)
+    if (dataEnd > bytes.length) return fail("entry data out of bounds", entry.name, at)
     // entry data comes before the central directory (and so the EOCD)
-    if (dataEnd > directory.directoryStart) return malformed("entry data overlaps the central directory", entry.name, at)
+    if (dataEnd > directory.directoryStart) return fail("entry data overlaps the central directory", entry.name, at)
     // The local name must be the directory's name (decoded the same way); a
     // mismatch means the directory points at the wrong data.
     if (names.decode(bytes.subarray(at + 30, at + 30 + nameLength)) !== entry.name) {
-      return malformed("local header name differs from the directory", entry.name, at)
+      return fail("local header name differs from the directory", entry.name, at)
     }
     located.set(entry, { entry, dataStart, dataEnd })
   }
@@ -107,10 +111,10 @@ const locate = (bytes: Uint8Array, directory: Directory): Map<ZipEntry, Located>
     const before = ordered[i - 1]!
     const after = ordered[i]!
     if (before.dataEnd > after.entry.localOffset) {
-      return malformed("entries overlap", after.entry.name, after.entry.localOffset)
+      return fail("entries overlap", after.entry.name, after.entry.localOffset)
     }
   }
-  return located
+  return Result.succeed(located)
 }
 
 /** Opens an archive. `inflate` is replaceable for other inflate implementations (and tests). */
@@ -118,19 +122,31 @@ export const open = (
   bytes: Uint8Array,
   limits: Limits,
   inflate: InflateRaw = inflateRawWeb
-): Archive | SpreadsheetError => {
-  const directory = readDirectory(bytes, limits)
-  if (directory instanceof MalformedFile || directory instanceof LimitExceeded) return directory
-  const entries = directory.entries
+): Result.Result<Archive, MalformedFile | LimitExceeded> => {
+  const read = readDirectory(bytes, limits)
+  if (Result.isFailure(read)) return Result.fail(read.failure)
+  const directory = read.success
   const byName = new Map<string, ZipEntry>()
   // progress: one entry per iteration
-  for (const entry of entries) {
+  for (const entry of directory.entries) {
     const key = normalizeName(entry.name)
-    if (byName.has(key)) return malformed("duplicate entry name", entry.name, entry.localOffset)
+    if (byName.has(key)) return fail("duplicate entry name", entry.name, entry.localOffset)
     byName.set(key, entry)
   }
   const located = locate(bytes, directory)
-  if (located instanceof MalformedFile) return located
+  if (Result.isFailure(located)) return Result.fail(located.failure)
+  return Result.succeed(archive(bytes, limits, inflate, directory.entries, byName, located.success))
+}
+
+/** The archive over entries `open` has checked and located. */
+const archive = (
+  bytes: Uint8Array,
+  limits: Limits,
+  inflate: InflateRaw,
+  entries: ReadonlyArray<ZipEntry>,
+  byName: ReadonlyMap<string, ZipEntry>,
+  located: ReadonlyMap<ZipEntry, Located>
+): Archive => {
   /** Bytes counted against the budget: per entry, the most it has inflated so far. */
   let charged = 0
   const highWater = new Map<ZipEntry, number>()

@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
+import * as Result from "effect/Result"
 import { afterAll, describe, expect, it } from "vitest"
 import { FuzzHost } from "./fuzz/host.ts"
 import { RecordReader, readBof, EOF } from "../src/internal/biff/records.ts"
@@ -23,18 +24,19 @@ const pseudoRandom = (n: number, seed = 1): Uint8Array => {
 
 const openOk = (bytes: Uint8Array, l = limits, meter?: Meter): Cfb => {
   const cfb = open(bytes, l, meter)
-  if ("_tag" in cfb) throw new Error(`open failed: ${cfb._tag} ${(cfb as { reason?: string }).reason}`)
-  return cfb
+  if (Result.isFailure(cfb)) throw new Error(`open failed: ${cfb.failure._tag} ${(cfb.failure as { reason?: string }).reason}`)
+  return cfb.success
 }
 
 const readOk = (cfb: Cfb, path: string): Uint8Array => {
   const data = cfb.read(cfb.find(path)!)
-  if ("_tag" in data) throw new Error(`read failed: ${data._tag} ${(data as { reason?: string }).reason}`)
-  return data
+  if (Result.isFailure(data)) throw new Error(`read failed: ${data.failure._tag} ${(data.failure as { reason?: string }).reason}`)
+  return data.success
 }
 
-const reasonOf = (result: unknown): string =>
-  (result as { reason?: string; _tag?: string }).reason ?? (result as { _tag?: string })._tag ?? "ok"
+/** A failure's reason (or tag), "ok" for a success. */
+const reasonOf = <A, E extends { readonly _tag: string }>(result: Result.Result<A, E>): string =>
+  Result.isSuccess(result) ? "ok" : (result.failure as { reason?: string }).reason ?? result.failure._tag
 
 const SAMPLE: ReadonlyArray<CfbItem> = [
   { name: "Workbook", data: pseudoRandom(10_000, 1) },
@@ -195,8 +197,8 @@ describe("cfb: reading", () => {
       patch32(overstated, 44, declared)
       const cfb = open(overstated, limits)
       expect(reasonOf(cfb), String(declared)).toBe("ok")
-      expect(readOk(cfb as Cfb, "Workbook"), String(declared)).toEqual(pseudoRandom(10_000, 1))
-      expect(readOk(cfb as Cfb, "Edge"), String(declared)).toEqual(pseudoRandom(4095, 3))
+      expect(readOk(Result.getOrThrow(cfb), "Workbook"), String(declared)).toEqual(pseudoRandom(10_000, 1))
+      expect(readOk(Result.getOrThrow(cfb), "Edge"), String(declared)).toEqual(pseudoRandom(4095, 3))
     }
   })
 
@@ -215,8 +217,8 @@ describe("cfb: reading", () => {
       patch32(junk, 44, declared)
       const cfb = open(junk, limits)
       expect(reasonOf(cfb), String(declared)).toBe("ok")
-      expect(readOk(cfb as Cfb, "Workbook"), String(declared)).toEqual(pseudoRandom(10_000, 1))
-      expect(readOk(cfb as Cfb, "Edge"), String(declared)).toEqual(pseudoRandom(4095, 3))
+      expect(readOk(Result.getOrThrow(cfb), "Workbook"), String(declared)).toEqual(pseudoRandom(10_000, 1))
+      expect(readOk(Result.getOrThrow(cfb), "Edge"), String(declared)).toEqual(pseudoRandom(4095, 3))
     }
     // 200 sectors of data need two FAT sectors; with only the first listed, a
     // chain reaching past what it describes is MalformedFile
@@ -228,7 +230,7 @@ describe("cfb: reading", () => {
       patch32(short, 44, declared)
       patch32(short, 80, 0xFFFFFFFF)
       const result = open(short, limits)
-      expect(result, String(declared)).toBeInstanceOf(MalformedFile)
+      expect(Result.merge(result), String(declared)).toBeInstanceOf(MalformedFile)
       expect(reasonOf(result), String(declared)).toMatch(/^FAT chain points at sector \d+$/)
     }
   })
@@ -299,7 +301,7 @@ describe("cfb: reading", () => {
     const twoDifat = writeCfb([{ name: "Workbook", data: new Uint8Array(240 * 128 * 512) }])
     expect(twoDifat.difatSectors.length).toBe(2)
     expect(twoDifat.directorySectors.length).toBe(1)
-    expect(open(twoDifat.bytes, { ...limits, maxSectorChain: 1 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxSectorChain", max: 1, actual: 2 })
+    expect(Result.merge(open(twoDifat.bytes, { ...limits, maxSectorChain: 1 }))).toMatchObject({ _tag: "LimitExceeded", limit: "maxSectorChain", max: 1, actual: 2 })
   })
 
   it("opens every committed .xls in a CFB, and its workbook stream is a BIFF record stream from BOF to EOF", () => {
@@ -326,7 +328,7 @@ describe("cfb: reading", () => {
         }
         expect(eofs, name).toBeGreaterThanOrEqual(2) // globals and at least one sheet
         expect(reader.records, name).toBeLessThanOrEqual(stream.length / 4)
-        for (const e of cfb.entries.filter((x) => x.type === "stream")) expect("_tag" in cfb.read(e), `${name}: ${e.path}`).toBe(false)
+        for (const e of cfb.entries.filter((x) => x.type === "stream")) expect(Result.isSuccess(cfb.read(e)), `${name}: ${e.path}`).toBe(true)
         files++
       }
     }
@@ -385,7 +387,7 @@ describe("cfb: hostile and broken files", () => {
     const a = openOk(huge)
     expect(reasonOf(a.read(a.find("Workbook")!))).toMatch(/larger than the file/)
     const b = openOk(layout.bytes, { ...limits, maxSectorChain: 5 })
-    expect(b.read(b.find("Workbook")!)).toMatchObject({ _tag: "LimitExceeded", limit: "maxSectorChain", max: 5 })
+    expect(Result.merge(b.read(b.find("Workbook")!))).toMatchObject({ _tag: "LimitExceeded", limit: "maxSectorChain", max: 5 })
   })
 
   // Run in the fuzz worker with a time budget: if a loop check were
@@ -432,6 +434,15 @@ describe("cfb: hostile and broken files", () => {
     patch32(bigRoot, sectorOffset(layout.directorySectors[0]!) + 120, 0x7FFFFFF0)
     const b = openOk(bigRoot)
     expect(reasonOf(b.read(b.find("Edge")!))).toBe("mini stream is larger than the file")
+  })
+
+  it("an empty stream reads as empty without loading the mini stream, even a broken one", () => {
+    const layout = fresh()
+    const shortMiniFat = layout.bytes.slice()
+    patch32(shortMiniFat, 64, 5)
+    const cfb = openOk(shortMiniFat)
+    expect(readOk(cfb, "Empty")).toEqual(new Uint8Array(0))
+    expect(reasonOf(cfb.read(cfb.find("Edge")!))).toBe("miniFAT chain is shorter than the header says")
   })
 
   it("a DIFAT chain with a cycle, or longer than the header says, is MalformedFile", () => {
@@ -511,7 +522,7 @@ describe("cfb: hostile and broken files", () => {
     let item: CfbItem = { name: "leaf", data: new Uint8Array([1]) }
     for (let k = 0; k < 10_000; k++) item = { name: `s${k % 10}`, children: [item] }
     const { bytes } = writeCfb([item])
-    expect(open(bytes, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStorageDepth", max: 32, actual: 33 })
+    expect(Result.merge(open(bytes, limits))).toMatchObject({ _tag: "LimitExceeded", limit: "maxStorageDepth", max: 32, actual: 33 })
     // within the limit it reads
     let shallow: CfbItem = { name: "leaf", data: new Uint8Array([7]) }
     for (let k = 0; k < 31; k++) shallow = { name: "s", children: [shallow] }
@@ -523,13 +534,13 @@ describe("cfb: hostile and broken files", () => {
     const { bytes } = writeCfb([...SAMPLE, { name: "Big", data: pseudoRandom(50_000, 9) }])
     for (let cut = 0; cut < bytes.length; cut += 97) {
       const cfb = open(bytes.subarray(0, cut), limits)
-      if ("_tag" in cfb) {
-        expect(cfb._tag).toBe("MalformedFile")
+      if (Result.isFailure(cfb)) {
+        expect(cfb.failure._tag).toBe("MalformedFile")
         continue
       }
-      for (const entry of cfb.entries.filter((e) => e.type === "stream")) {
-        const data = cfb.read(entry)
-        if ("_tag" in data) expect(data._tag).toBe("MalformedFile")
+      for (const entry of cfb.success.entries.filter((e) => e.type === "stream")) {
+        const data = cfb.success.read(entry)
+        if (Result.isFailure(data)) expect(data.failure._tag).toBe("MalformedFile")
       }
     }
   })

@@ -20,6 +20,7 @@
  *
  * @internal
  */
+import * as Result from "effect/Result"
 import { LimitExceeded, MalformedFile } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import { type Meter, noMeter } from "../meter.ts"
@@ -58,11 +59,17 @@ export interface Cfb {
    */
   readonly find: (path: string) => CfbEntry | undefined
   /** A stream's bytes (copied out of its sectors). */
-  readonly read: (entry: CfbEntry) => Uint8Array | MalformedFile | LimitExceeded
+  readonly read: (entry: CfbEntry) => Result.Result<Uint8Array, CfbError>
 }
+
+/** What opening a compound file or reading one of its streams fails with. */
+export type CfbError = MalformedFile | LimitExceeded
 
 const malformed = (reason: string, offset?: number) =>
   new MalformedFile({ format: "cfb", reason, ...(offset === undefined ? {} : { offset }) })
+
+/** A failed result with a `MalformedFile`. */
+const fail = (reason: string, offset?: number) => Result.fail(malformed(reason, offset))
 
 /**
  * Walks a sector chain with a table (`FAT` or miniFAT).
@@ -108,36 +115,36 @@ class Chains {
    * `count` is undefined), claimed for `owner`: a sector another owner has
    * claimed is a `MalformedFile` (the same owner may walk it again).
    */
-  walk(start: number, count: number | undefined, owner: number): Array<number> | MalformedFile | LimitExceeded {
+  walk(start: number, count: number | undefined, owner: number): Result.Result<Array<number>, CfbError> {
     const out: Array<number> = []
-    if (count === 0) return out
+    if (count === 0) return Result.succeed(out)
     const result = this.follow(start, count, owner, out)
     this.meter.add("sectors", out.length)
     return result
   }
 
   /** `walk`'s loop: collects the chain's sectors in `out`. */
-  private follow(start: number, count: number | undefined, owner: number, out: Array<number>): Array<number> | MalformedFile | LimitExceeded {
+  private follow(start: number, count: number | undefined, owner: number, out: Array<number>): Result.Result<Array<number>, CfbError> {
     this.stamp++
     let sector = start
     // progress: every step adds one new (unvisited) sector, see the class doc
     while (sector !== ENDOFCHAIN) {
       if (sector > MAXREGSECT || sector >= this.limitSectors || sector >= this.table.length) {
-        return malformed(`${this.what} chain points at sector ${sector}`)
+        return fail(`${this.what} chain points at sector ${sector}`)
       }
-      if (this.stamps[sector] === this.stamp) return malformed(`${this.what} chain has a cycle at sector ${sector}`)
+      if (this.stamps[sector] === this.stamp) return fail(`${this.what} chain has a cycle at sector ${sector}`)
       if (out.length >= this.maxChain) {
-        return new LimitExceeded({ limit: "maxSectorChain", max: this.maxChain, actual: out.length + 1 })
+        return Result.fail(new LimitExceeded({ limit: "maxSectorChain", max: this.maxChain, actual: out.length + 1 }))
       }
       const holder = this.owners[sector]!
-      if (holder !== 0 && holder !== owner) return malformed(`sector ${sector} of the ${this.what} belongs to two streams`)
+      if (holder !== 0 && holder !== owner) return fail(`sector ${sector} of the ${this.what} belongs to two streams`)
       this.owners[sector] = owner
       this.stamps[sector] = this.stamp
       out.push(sector)
-      if (count !== undefined && out.length === count) return out
+      if (count !== undefined && out.length === count) return Result.succeed(out)
       sector = this.table[sector]!
     }
-    return out
+    return Result.succeed(out)
   }
 }
 
@@ -151,23 +158,23 @@ const consecutive = (sectors: ReadonlyArray<number>): boolean => {
 }
 
 /** Opens a compound file. The sectors it visits, opening and reading streams, go to `meter`. */
-export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter): Cfb | MalformedFile | LimitExceeded => {
-  if (bytes.length < 512) return malformed("file shorter than a CFB header")
+export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter): Result.Result<Cfb, CfbError> => {
+  if (bytes.length < 512) return fail("file shorter than a CFB header")
   // progress: k up to 8
-  for (let k = 0; k < 8; k++) if (bytes[k] !== SIGNATURE[k]) return malformed("not a CFB file (bad signature)", 0)
+  for (let k = 0; k < 8; k++) if (bytes[k] !== SIGNATURE[k]) return fail("not a CFB file (bad signature)", 0)
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const u16 = (at: number) => view.getUint16(at, true)
   const u32 = (at: number) => view.getUint32(at, true)
-  if (u16(28) !== 0xFFFE) return malformed("bad byte order mark", 28)
+  if (u16(28) !== 0xFFFE) return fail("bad byte order mark", 28)
   const major = u16(26)
   const shift = u16(30)
   if (!((major === 3 && shift === 9) || (major === 4 && shift === 12))) {
-    return malformed(`unsupported version ${major} with sector size 2^${shift}`, 26)
+    return fail(`unsupported version ${major} with sector size 2^${shift}`, 26)
   }
-  if (u16(32) !== 6) return malformed("mini sector size must be 64", 32)
-  if (u32(56) !== MINI_CUTOFF) return malformed("mini stream cutoff must be 4096", 56)
+  if (u16(32) !== 6) return fail("mini sector size must be 64", 32)
+  if (u32(56) !== MINI_CUTOFF) return fail("mini stream cutoff must be 4096", 56)
   const sectorSize = 1 << shift
-  if (bytes.length < sectorSize) return malformed("file shorter than its header sector")
+  if (bytes.length < sectorSize) return fail("file shorter than its header sector")
   /** Sectors the file holds (a partial last one counts). */
   const fileSectors = Math.ceil((bytes.length - sectorSize) / sectorSize)
   const perSector = sectorSize / 4
@@ -207,10 +214,10 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
   const difatSeen = new Set<number>()
   // progress: each DIFAT sector is visited once (difatSeen), at most numDifat and fileSectors of them
   while (!headerEnded && fatSectors.length < numFatWanted && difat !== ENDOFCHAIN && difat !== FREESECT) {
-    if (difat > MAXREGSECT || difat >= fileSectors) return malformed(`DIFAT chain points at sector ${difat}`)
-    if (difatSeen.has(difat)) return malformed(`DIFAT chain has a cycle at sector ${difat}`)
-    if (difatSeen.size >= numDifat) return malformed("DIFAT chain is longer than the header says")
-    if (difatSeen.size >= maxChain) return new LimitExceeded({ limit: "maxSectorChain", max: maxChain, actual: difatSeen.size + 1 })
+    if (difat > MAXREGSECT || difat >= fileSectors) return fail(`DIFAT chain points at sector ${difat}`)
+    if (difatSeen.has(difat)) return fail(`DIFAT chain has a cycle at sector ${difat}`)
+    if (difatSeen.size >= numDifat) return fail("DIFAT chain is longer than the header says")
+    if (difatSeen.size >= maxChain) return Result.fail(new LimitExceeded({ limit: "maxSectorChain", max: maxChain, actual: difatSeen.size + 1 }))
     difatSeen.add(difat)
     visited++
     // progress: k up to perSector - 1
@@ -225,7 +232,7 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
     if (headerEnded) break
     difat = sectorU32(difat, perSector - 1)
   }
-  if (fatSectors.length === 0) return malformed("no FAT sectors")
+  if (fatSectors.length === 0) return fail("no FAT sectors")
   // the FAT itself. FAT sector k describes sectors k * perSector onwards, so
   // only the first ceil(fileSectors / perSector) can describe sectors the
   // file has; walks reject sectors past the file before using the FAT, so the
@@ -237,7 +244,7 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
   // progress: one FAT sector per iteration
   for (let k = 0; k < numFat; k++) {
     const sector = fatSectors[k]!
-    if (sector > MAXREGSECT || sector >= fileSectors) return malformed(`FAT sector ${sector} is outside the file`)
+    if (sector > MAXREGSECT || sector >= fileSectors) return fail(`FAT sector ${sector} is outside the file`)
     const data = sectorAt(sector)
     visited++
     const words = Math.floor(data.length / 4)
@@ -261,7 +268,7 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
     size: number,
     unit: number,
     slice: (sector: number) => Uint8Array
-  ): Uint8Array | MalformedFile => {
+  ): Result.Result<Uint8Array, MalformedFile> => {
     const out = new Uint8Array(size)
     let at = 0
     // progress: one sector per iteration
@@ -269,22 +276,23 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
       if (at >= size) break
       const data = slice(sector)
       const take = Math.min(unit, size - at)
-      if (data.length < take) return malformed("stream runs past the end of the file")
+      if (data.length < take) return fail("stream runs past the end of the file")
       out.set(data.subarray(0, take), at)
       at += take
     }
-    if (at < size) return malformed("stream chain is shorter than its size")
-    return out
+    if (at < size) return fail("stream chain is shorter than its size")
+    return Result.succeed(out)
   }
 
   // the directory
   const dirChain = chains.walk(u32(48), undefined, OWN_DIRECTORY)
-  if (!Array.isArray(dirChain)) return dirChain
-  const dirBytes = gather(dirChain, dirChain.length * sectorSize, sectorSize, sectorAt)
-  if (dirBytes instanceof MalformedFile) return dirBytes
+  if (Result.isFailure(dirChain)) return Result.fail(dirChain.failure)
+  const dirGathered = gather(dirChain.success, dirChain.success.length * sectorSize, sectorSize, sectorAt)
+  if (Result.isFailure(dirGathered)) return Result.fail(dirGathered.failure)
+  const dirBytes = dirGathered.success
   const dirView = new DataView(dirBytes.buffer)
   const count = Math.floor(dirBytes.length / DIRECTORY_ENTRY)
-  if (count === 0) return malformed("empty directory")
+  if (count === 0) return fail("empty directory")
 
   interface Raw {
     readonly name: string
@@ -295,16 +303,16 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
     readonly start: number
     readonly size: number
   }
-  const raw = (id: number): Raw | MalformedFile => {
+  const raw = (id: number): Result.Result<Raw, MalformedFile> => {
     const at = id * DIRECTORY_ENTRY
     const nameLength = dirView.getUint16(at + 64, true)
-    if (nameLength > 64 || nameLength % 2 !== 0) return malformed(`directory entry ${id} has a bad name length`)
+    if (nameLength > 64 || nameLength % 2 !== 0) return fail(`directory entry ${id} has a bad name length`)
     const name = utf16.decode(dirBytes.subarray(at, at + Math.max(0, nameLength - 2)))
     const low = dirView.getUint32(at + 120, true)
     const high = dirView.getUint32(at + 124, true)
     // version 3 files may leave garbage in the high word
     const size = major === 3 ? low : high >= 0x200000 ? Infinity : high * 0x100000000 + low
-    return {
+    return Result.succeed({
       name,
       type: dirView.getUint8(at + 66),
       left: dirView.getUint32(at + 68, true),
@@ -312,11 +320,12 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
       child: dirView.getUint32(at + 76, true),
       start: dirView.getUint32(at + 116, true),
       size
-    }
+    })
   }
-  const root = raw(0)
-  if (root instanceof MalformedFile) return root
-  if (root.type !== 5) return malformed("the first directory entry is not the root")
+  const rawRoot = raw(0)
+  if (Result.isFailure(rawRoot)) return Result.fail(rawRoot.failure)
+  const root = rawRoot.success
+  if (root.type !== 5) return fail("the first directory entry is not the root")
 
   // walk the tree: siblings (left/right) and children; every entry once
   const entries: Array<CfbEntry> = []
@@ -329,22 +338,23 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
   // and visited at most once (seen), so at most `count` iterations do work
   while (stack.length > 0) {
     const [id, prefix, depth] = stack.pop()!
-    if (id >= count) return malformed(`directory points at entry ${id} of ${count}`)
-    if (seen[id] === 1) return malformed(`directory entry ${id} is reached twice`)
+    if (id >= count) return fail(`directory points at entry ${id} of ${count}`)
+    if (seen[id] === 1) return fail(`directory entry ${id} is reached twice`)
     seen[id] = 1
-    const entry = raw(id)
-    if (entry instanceof MalformedFile) return entry
+    const rawEntry = raw(id)
+    if (Result.isFailure(rawEntry)) return Result.fail(rawEntry.failure)
+    const entry = rawEntry.success
     const type: CfbEntryType | undefined = entry.type === 1 ? "storage" : entry.type === 2 ? "stream" : undefined
-    if (type === undefined) return malformed(`directory entry ${id} has type ${entry.type}`)
+    if (type === undefined) return fail(`directory entry ${id} has type ${entry.type}`)
     // MS-CFB forbids "/" (and \ : !) in names; "/" would break paths
-    if (entry.name.includes("/")) return malformed(`directory entry ${id} has "/" in its name`)
+    if (entry.name.includes("/")) return fail(`directory entry ${id} has "/" in its name`)
     const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`
     entries.push({ id, name: entry.name, path, type, size: type === "stream" ? entry.size : 0, start: entry.start })
     if (entry.right !== NOSTREAM) stack.push([entry.right, prefix, depth])
     if (entry.left !== NOSTREAM) stack.push([entry.left, prefix, depth])
     if (type === "storage" && entry.child !== NOSTREAM) {
       if (depth >= limits.maxStorageDepth) {
-        return new LimitExceeded({ limit: "maxStorageDepth", max: limits.maxStorageDepth, actual: depth + 1 })
+        return Result.fail(new LimitExceeded({ limit: "maxStorageDepth", max: limits.maxStorageDepth, actual: depth + 1 }))
       }
       stack.push([entry.child, path, depth + 1])
     }
@@ -352,28 +362,33 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
   entries.sort((a, b) => a.id - b.id)
 
   // the mini stream (in the root entry) and the miniFAT, read on first use
-  let mini: { readonly data: Uint8Array; readonly chains: Chains } | MalformedFile | LimitExceeded | undefined
-  const loadMini = () => {
+  interface Mini {
+    readonly data: Uint8Array
+    readonly chains: Chains
+  }
+  let mini: Result.Result<Mini, CfbError> | undefined
+  const loadMini = (): Result.Result<Mini, CfbError> => {
     if (mini !== undefined) return mini
     const numMiniFat = u32(64)
     const miniFatChain = chains.walk(u32(60), numMiniFat, OWN_MINIFAT)
-    if (!Array.isArray(miniFatChain)) return (mini = miniFatChain)
-    if (miniFatChain.length < numMiniFat) return (mini = malformed("miniFAT chain is shorter than the header says"))
-    const table = new Uint32Array(miniFatChain.length * perSector)
+    if (Result.isFailure(miniFatChain)) return (mini = Result.fail(miniFatChain.failure))
+    const miniFatSectors = miniFatChain.success
+    if (miniFatSectors.length < numMiniFat) return (mini = fail("miniFAT chain is shorter than the header says"))
+    const table = new Uint32Array(miniFatSectors.length * perSector)
     // progress: one sector per iteration, i up to perSector
-    miniFatChain.forEach((sector, k) => {
+    miniFatSectors.forEach((sector, k) => {
       for (let i = 0; i < perSector; i++) table[k * perSector + i] = sectorU32(sector, i)
     })
     if (!Number.isFinite(root.size) || root.size > fileSectors * sectorSize) {
-      return (mini = malformed("mini stream is larger than the file"))
+      return (mini = fail("mini stream is larger than the file"))
     }
     const rootChain = chains.walk(root.start, Math.ceil(root.size / sectorSize), 1)
-    if (!Array.isArray(rootChain)) return (mini = rootChain)
-    const data = gather(rootChain, root.size, sectorSize, sectorAt)
-    if (data instanceof MalformedFile) return (mini = data)
+    if (Result.isFailure(rootChain)) return (mini = Result.fail(rootChain.failure))
+    const data = gather(rootChain.success, root.size, sectorSize, sectorAt)
+    if (Result.isFailure(data)) return (mini = Result.fail(data.failure))
     // a last, partial mini sector counts (its stream reads only what it has)
-    const miniSectors = Math.ceil(data.length / MINI_SECTOR)
-    return (mini = { data, chains: new Chains(table, miniSectors, maxChain, "miniFAT", meter) })
+    const miniSectors = Math.ceil(data.success.length / MINI_SECTOR)
+    return (mini = Result.succeed({ data: data.success, chains: new Chains(table, miniSectors, maxChain, "miniFAT", meter) }))
   }
 
   const byPath = new Map<string, CfbEntry>()
@@ -382,30 +397,34 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
     const key = entry.path.toLowerCase()
     if (!byPath.has(key)) byPath.set(key, entry)
   }
-  return {
+  return Result.succeed({
     entries,
     find: (path) => byPath.get(path.toLowerCase()),
     read: (entry) => {
-      if (entry.type !== "stream") return malformed(`${entry.path} is not a stream`)
+      if (entry.type !== "stream") return fail(`${entry.path} is not a stream`)
       const size = entry.size
       if (!Number.isFinite(size) || size > fileSectors * sectorSize) {
-        return malformed(`stream ${entry.path} is larger than the file`)
+        return fail(`stream ${entry.path} is larger than the file`)
       }
       if (size < MINI_CUTOFF) {
-        if (size === 0) return new Uint8Array(0)
+        if (size === 0) return Result.succeed(new Uint8Array(0))
         const m = loadMini()
-        if (!("data" in m)) return m
-        const sectors = m.chains.walk(entry.start, Math.ceil(size / MINI_SECTOR), entry.id + 1)
-        if (!Array.isArray(sectors)) return sectors
-        return gather(sectors, size, MINI_SECTOR, (s) => m.data.subarray(s * MINI_SECTOR, s * MINI_SECTOR + MINI_SECTOR))
+        if (Result.isFailure(m)) return Result.fail(m.failure)
+        const { data, chains: miniChains } = m.success
+        const sectors = miniChains.walk(entry.start, Math.ceil(size / MINI_SECTOR), entry.id + 1)
+        if (Result.isFailure(sectors)) return Result.fail(sectors.failure)
+        return gather(sectors.success, size, MINI_SECTOR, (s) => data.subarray(s * MINI_SECTOR, s * MINI_SECTOR + MINI_SECTOR))
       }
-      const sectors = chains.walk(entry.start, Math.ceil(size / sectorSize), entry.id + 1)
-      if (!Array.isArray(sectors)) return sectors
+      const walked = chains.walk(entry.start, Math.ceil(size / sectorSize), entry.id + 1)
+      if (Result.isFailure(walked)) return Result.fail(walked.failure)
+      const sectors = walked.success
       // a stream in consecutive sectors (as writers lay out big streams) is a
       // view of the file, not a copy: no pause to copy hundreds of MiB
       const at = sectors.length > 0 ? (sectors[0]! + 1) * sectorSize : 0
-      if (sectors.length * sectorSize >= size && at + size <= bytes.length && consecutive(sectors)) return bytes.subarray(at, at + size)
+      if (sectors.length * sectorSize >= size && at + size <= bytes.length && consecutive(sectors)) {
+        return Result.succeed(bytes.subarray(at, at + size))
+      }
       return gather(sectors, size, sectorSize, sectorAt)
     }
-  }
+  })
 }

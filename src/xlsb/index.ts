@@ -72,8 +72,7 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
     if (bytes.length > limits.maxInputBytes) {
       return yield* new LimitExceeded({ limit: "maxInputBytes", max: limits.maxInputBytes, actual: bytes.length })
     }
-    const archive = open(bytes, limits)
-    if ("_tag" in archive) return yield* Effect.fail(archive)
+    const archive = yield* Effect.fromResult(open(bytes, limits))
 
     return yield* readPackage(archive, limits, XLSB)
   })
