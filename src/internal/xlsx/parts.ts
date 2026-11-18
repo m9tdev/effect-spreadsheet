@@ -7,17 +7,17 @@
  * @internal
  */
 import { Effect } from "effect"
-import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
+import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import { parsePart } from "../opc.ts"
+import { malformedIn, type SheetEntry, sheetVisibility } from "../package.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import { attr, type XmlAttributes, type XmlHandler } from "../xml/tokenizer.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
 
-export const malformed = (reason: string, part?: string) =>
-  new MalformedFile({ format: "xlsx", reason, ...(part === undefined ? {} : { part }) })
+export const malformed = malformedIn("xlsx")
 
 /** A relationship id attribute: `id` with any namespace prefix (`r:id`, `x:id`). */
 export const relationshipId = (attributes: XmlAttributes): string | undefined => {
@@ -33,12 +33,6 @@ export const relationshipId = (attributes: XmlAttributes): string | undefined =>
 export const isTrue = (value: string | undefined): boolean => value === "1" || value === "true"
 
 export type SheetKind = "worksheet" | "chartsheet" | "dialogsheet" | "macrosheet" | "other"
-
-export interface SheetEntry {
-  readonly name: string
-  readonly visibility: "visible" | "hidden" | "veryHidden"
-  readonly relationshipId: string | undefined
-}
 
 export interface DefinedNameEntry {
   readonly name: string
@@ -86,11 +80,10 @@ export const readWorkbookPart = (
           if (sheets.length >= limits.maxSheets) {
             return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: sheets.length + 1 })
           }
-          const state = attr(attributes, "state")
           const sheetName = attr(attributes, "name")
           sheets.push({
             name: sheetName === undefined ? undefined : unescapeXstring(sheetName),
-            visibility: state === "hidden" ? "hidden" : state === "veryHidden" ? "veryHidden" : "visible",
+            visibility: sheetVisibility(attr(attributes, "state")),
             relationshipId: relationshipId(attributes)
           })
           return
