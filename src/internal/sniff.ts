@@ -81,7 +81,9 @@ export type BiffVersion = "biff2" | "biff3" | "biff4" | "biff5/8"
  * and a known data type: BIFF2 (0x0009, length 4), BIFF3/4 (0x0209/0x0409,
  * length 6), BIFF5/8 (0x0809, length 8 or 16, version word 0x05xx/0x0600);
  * `undefined` for anything else. The strict check keeps UTF-16LE text
- * starting with tabs (`09 00 09 00`) out.
+ * starting with tabs (`09 00 09 00`) out. BIFF2-4 BOF records have no
+ * version word to check (files carry 0, their own version or other values
+ * in it).
  */
 export const biffBof = (bytes: Uint8Array): BiffVersion | undefined => {
   if (bytes.length < 8) return undefined

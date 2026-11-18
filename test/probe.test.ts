@@ -82,15 +82,56 @@ describe("probe: bare BIFF streams", () => {
     }
   })
 
-  it("Xls.read still names the version of bytes that start with a BIFF2-4 BOF type but no well-formed BOF", async () => {
-    // UTF-16LE text starting with tabs: CSV to detection
-    const tabs = new Uint8Array([0x09, 0x00, 0x09, 0x00, 0x61, 0x00, 0x0A, 0x00])
-    expect(await formatOf(tabs)).toBe("csv")
-    expect(await xlsError(tabs)).toMatchObject({ _tag: "UnsupportedFormat", format: "biff2" })
-    expect(await xlsError(new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x33, 0x00]))).toMatchObject({
-      _tag: "UnsupportedFormat",
-      format: "biff4"
-    })
+  it("a BIFF2-4 BOF needs no particular version word: the versions files carry still read as before", async () => {
+    // version words seen in real files: 0x0007 (BIFF2), 0x0003 (BIFF3), 0x0400 with data type 0x0100 (BIFF4 workbook)
+    const cases: Array<[string, ReadonlyArray<number>]> = [
+      ["biff2", [0x09, 0x00, 0x04, 0x00, 0x07, 0x00, 0x10, 0x00]],
+      ["biff3", [0x09, 0x02, 0x06, 0x00, 0x03, 0x00, 0x10, 0x00]],
+      ["biff4", [0x09, 0x04, 0x06, 0x00, 0x00, 0x04, 0x00, 0x01]]
+    ]
+    for (const [version, head] of cases) {
+      const bytes = new Uint8Array([...head, 0x0A, 0x00, 0x00, 0x00])
+      expect(tagOf(bytes)).toBe("Unreadable")
+      expect(await formatOf(bytes)).toBe("xls")
+      for (const error of [await xlsError(bytes), await readError(bytes)]) {
+        expect(error).toMatchObject({ _tag: "UnsupportedFormat", format: version })
+      }
+    }
+  })
+
+  it("bytes starting with a BIFF2-4 BOF type but no well-formed BOF are MalformedFile to Xls.read, and text or unknown data to detection", async () => {
+    // UTF-16LE text without a BOM, whose first character makes its first word a BIFF2-4 BOF record type
+    const utf16le = (text: string) => new Uint8Array([...text].flatMap((c) => [c.charCodeAt(0) & 0xFF, c.charCodeAt(0) >> 8]))
+    // [version, label, bytes, what detection and Spreadsheet.read make of them: CSV rows, or unknown data]
+    const cases: Array<[string, string, Uint8Array, number | "unknown"]> = [
+      ["BIFF2", "length 6", new Uint8Array([0x09, 0x00, 0x06, 0x00, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00]), "unknown"],
+      ["BIFF2", "data type 0x0033", new Uint8Array([0x09, 0x00, 0x04, 0x00, 0x02, 0x00, 0x33, 0x00, 0x00, 0x80, 0x00, 0x90]), "unknown"],
+      ["BIFF2", "two bytes", new Uint8Array([0x09, 0x00]), "unknown"],
+      ["BIFF2", "text starting with a tab", utf16le("\t\tname\tx\n1\t2\t3\n"), 2],
+      ["BIFF3", "length 4", new Uint8Array([0x09, 0x02, 0x04, 0x00, 0x00, 0x00, 0x10, 0x00]), "unknown"],
+      ["BIFF3", "data type 0x0000", new Uint8Array([0x09, 0x02, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), "unknown"],
+      ["BIFF3", "text starting with U+0209", utf16le("\u0209abc\tx\n1\t2\n"), 2],
+      ["BIFF4", "length 8", new Uint8Array([0x09, 0x04, 0x08, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00]), "unknown"],
+      ["BIFF4", "data type 0x0033", new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x33, 0x00]), "unknown"],
+      ["BIFF4", "a BOF cut short", new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x10]), "unknown"],
+      ["BIFF4", "text starting with U+0409", utf16le("\u0409,name,x\n1,2,3\n"), 2]
+    ]
+    for (const [version, label, bytes, detected] of cases) {
+      expect(tagOf(bytes), label).toBe("Detected")
+      expect(await xlsError(bytes), label).toMatchObject({
+        _tag: "MalformedFile",
+        format: "xls",
+        reason: `malformed ${version} BOF record`
+      })
+      if (detected === "unknown") {
+        expect(await formatOf(bytes), label).toBe("unknown")
+        expect(await readError(bytes), label).toMatchObject({ _tag: "UnsupportedFormat", format: "unknown" })
+      } else {
+        expect(await formatOf(bytes), label).toBe("csv")
+        const exit = await run(Effect.flatMap(Spreadsheet.read(bytes), (wb) => Stream.runCollect(Workbook.rows(wb, 0))))
+        expect(Exit.isSuccess(exit) && Array.from(exit.value).length, label).toBe(detected)
+      }
+    }
   })
 })
 

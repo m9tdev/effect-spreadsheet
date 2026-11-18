@@ -131,6 +131,23 @@ describe("format detection", () => {
     assert.notStrictEqual(await formatOf(new Uint8Array([0x09, 0x08, 0x10, 0x00, 0x00, 0x07, 0x05, 0x00, ...new Uint8Array(12)])), "xls")
   })
 
+  it("UTF-16LE text is CSV with a BOM or without a leading tab; a malformed BIFF2-4 BOF is never a detection error", async () => {
+    const utf16le = (text: string) => new Uint8Array([...text].flatMap((c) => [c.charCodeAt(0) & 0xFF, c.charCodeAt(0) >> 8]))
+    const bom = (bytes: Uint8Array) => new Uint8Array([0xFF, 0xFE, ...bytes])
+    assert.strictEqual(await formatOf(bom(utf16le("\t\tname\tx\n1\t2\t3\n"))), "csv")
+    assert.strictEqual(await formatOf(bom(utf16le("\t\na\tb\n"))), "csv")
+    assert.strictEqual(await formatOf(utf16le("name\t\tx\n1\t2\t3\n")), "csv")
+    assert.strictEqual(await formatOf(utf16le("\tx")), "csv")
+    // binary bytes starting 09 00 without a well-formed BIFF2 BOF: unknown data, as before
+    assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x00, 0x06, 0x00, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00])), "unknown")
+    assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x00, 0x04, 0x00, 0x02, 0x00, 0x33, 0x00, 0x00, 0x80, 0x00, 0x90])), "unknown")
+    // text and binary bytes starting 09 02 or 09 04 without a well-formed BIFF3/4 BOF: as before too
+    assert.strictEqual(await formatOf(utf16le("\u0209abc\tx\n1\t2\n")), "csv")
+    assert.strictEqual(await formatOf(utf16le("\u0409,name,x\n1,2,3\n")), "csv")
+    assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x02, 0x04, 0x00, 0x00, 0x00, 0x10, 0x00])), "unknown")
+    assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x33, 0x00])), "unknown")
+  })
+
   it("a CSV whose first field starts with < is CSV; markup is html/xml", async () => {
     assert.strictEqual(await formatOf(enc("<b>,x\n1,2\n")), "csv")
     assert.strictEqual(await formatOf(enc("<b>name</b>;<i>x</i>\n")), "csv")
