@@ -9,7 +9,7 @@ import type { Limits } from "../SpreadsheetLimits.ts"
 import type { Format } from "../Workbook.ts"
 import { detectEncoding } from "./csv/decode.ts"
 import { open as openCfb } from "./cfb/cfb.ts"
-import { readDirectory, storedData } from "./zip/directory.ts"
+import { normalizeName, readDirectory, storedData } from "./zip/directory.ts"
 
 const TEXT_PREFIX_BYTES = 8 * 1024
 
@@ -45,7 +45,7 @@ const detectZip = (bytes: Uint8Array, limits: Limits): Format | MalformedFile | 
   let mimetype: string | undefined
   // progress: one entry per iteration, entries bounded by maxZipEntries
   for (const entry of entries) {
-    const name = entry.name.toLowerCase()
+    const name = normalizeName(entry.name)
     if (name === "xl/workbook.xml") xlsxPart = true
     else if (name === "xl/workbook.bin") xlsbPart = true
     else if (name === "mimetype") {

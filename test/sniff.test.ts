@@ -32,6 +32,15 @@ describe("format detection", () => {
     assert.strictEqual(await formatOf(makeZip([{ name: "hello.txt", data: enc("hi") }])), "zip")
   })
 
+  it("zip entry names match like the archive matches them: a leading slash ignored", async () => {
+    assert.strictEqual(await formatOf(makeZip([{ name: "/xl/workbook.xml" }])), "xlsx")
+    assert.strictEqual(await formatOf(makeZip([{ name: "/XL/Workbook.bin" }])), "xlsb")
+    assert.strictEqual(
+      await formatOf(makeZip([{ name: "/mimetype", data: enc("application/vnd.oasis.opendocument.spreadsheet") }])),
+      "ods"
+    )
+  })
+
   it("only exact zip signatures sniff as zip", async () => {
     // junk that starts with PK is not a zip any more
     for (const junk of [[0x50, 0x4B, 0x00, 0x00], [0x50, 0x4B, 0x01, 0x02], [0x50, 0x4B, 0x03, 0x03], [0x50, 0x4B, 0x08, 0x08]]) {

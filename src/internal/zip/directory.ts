@@ -53,6 +53,13 @@ const findEocd = (bytes: Uint8Array, view: DataView): number => {
   return -1
 }
 
+/**
+ * The key an entry name is matched by: case-insensitive (as OPC part names
+ * compare), a leading `/` ignored. Detection and the archive both use it, so
+ * a name the archive finds is a name detection sees.
+ */
+export const normalizeName = (name: string): string => (name.startsWith("/") ? name.slice(1) : name).toLowerCase()
+
 /** The entries, plus where the central directory starts (entry data must end before it). */
 export interface Directory {
   readonly entries: ReadonlyArray<ZipEntry>
