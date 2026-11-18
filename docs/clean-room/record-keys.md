@@ -103,10 +103,12 @@ as if every column had data in the first data row: `recordKeys(names)`, equal to
 
 How `records.ts` uses it:
 
-- `"first-row"` / `header: n`: convert the header row's cells to entries (see
-  4.6) and call `make`. If the header row is missing (sparse rows skip it), call
-  `make([])`: every column gets an `__EMPTY…` key (test "header row missing from
-  sparse rows").
+- `"first-row"` / `header: n`: compact the header row's cells like a reader
+  compacts a row (ascending columns, the last cell of a repeated column kept,
+  also an Empty one; cells whose column isn't a non-negative safe integer
+  dropped), convert them to entries (see 4.6) and call `make`. If the header
+  row is missing (sparse rows skip it), call `make([])`: every column gets an
+  `__EMPTY…` key (test "header row missing from sparse rows").
 - `header: [...]`: build the entries with an index loop over the array (not
   `map`, which keeps holes), one `[i, name]` per string entry; a hole,
   `undefined` or `null` drops that column. The API also drops
@@ -275,11 +277,12 @@ Why it can't hang, and why the total cost is O(n) expected:
   `a_1 … a_8191` then 8192 × `a`, which is ≤ 16384 failed probes in total).
 - No recursion and no regexes, and nothing parses suffixes back out of names.
 
-`make` must not throw on a violated precondition (repeated or descending column
-in the entries). If a column repeats, the last entry wins (also an empty one),
-like the cells the readers keep for a row and like a data row in `toRecords`,
-where the last cell of a column (also an Empty one) gives its value.
-Every loop stays bounded regardless.
+`make` trusts its precondition (strictly ascending, valid columns): the records
+code compacts the header row first, so a repeated column's last cell (also an
+Empty one) names it, like the cells the readers keep for a row and like a data
+row in `toRecords`, where the last cell of a column gives its value. On a
+violated precondition `make` must still not throw, and every loop stays
+bounded.
 
 ## 7. Existing tests that must keep passing (unchanged)
 

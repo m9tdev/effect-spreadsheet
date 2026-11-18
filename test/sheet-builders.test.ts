@@ -162,14 +162,17 @@ describe("held rows", () => {
     expect(rows.addCell(5, Cell.number(0, 3))).toBeUndefined()
     expect(rows.addCell(5, Cell.number(2, 4))).toBeUndefined()
     expect(rows.held).toBe(4)
-    expect([rows.has(2), rows.has(3), rows.has(5)]).toEqual([true, false, true])
     expect(Array.from(rows.indexes())).toEqual([2, 5])
     expect(rows.ready).toBe(false)
-    expect(rows.finishRow(2, true)).toBeUndefined()
-    expect(rows.finishRow(3, false)).toBeUndefined()
+    expect(rows.finishRow(2, true)).toBe(true)
+    // a row without cells: nothing happens until the format sends it out without any
+    expect(rows.finishRow(3, false)).toBe(false)
     expect(rows.held).toBe(3)
     expect(rows.ready).toBe(true)
-    expect(rows.finishRow(5, false)).toBeUndefined()
+    expect(rows.finishEmptyRow(3, false)).toBeUndefined()
+    expect(rows.finishRow(5, false)).toBe(true)
+    // a finished row holds no cells any more
+    expect(rows.finishRow(5, false)).toBe(false)
     expect(rows.held).toBe(0)
     expect(held(rows)).toEqual([[2, true, [[1, 2]]], [3, false, []], [5, false, [[0, 3], [2, 4]]]])
     expect(rows.ready).toBe(false)
@@ -182,8 +185,9 @@ describe("held rows", () => {
     expect(rows.addCell(0, Cell.number(0, 1))).toBeUndefined()
     expect(rows.addCell(12, Cell.number(0, 2))).toBeUndefined()
     expect(rows.addCell(1, Cell.number(0, 3))).toMatchObject({ _tag: "LimitExceeded", limit: "maxCellsPerSheet", max: 2, actual: 3 })
-    expect(rows.finishRow(0, false)).toBeUndefined()
+    expect(rows.finishRow(0, false)).toBe(true)
     expect(rows.finishRow(12, false)).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows", max: 10, actual: 13 })
+    expect(rows.finishEmptyRow(10, false)).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows", max: 10, actual: 11 })
     expect(rows.take().map((r) => r.index)).toEqual([0])
   })
 
@@ -200,8 +204,8 @@ describe("held rows", () => {
     expect(rows.sorted).toBeGreaterThan(0)
     expect(rows.work).toBe(100 + rows.sorted)
     const sorted = rows.sorted
-    expect(rows.finishRow(0, false)).toBeUndefined()
-    expect(rows.finishRow(1, false)).toBeUndefined()
+    expect(rows.finishRow(0, false)).toBe(true)
+    expect(rows.finishRow(1, false)).toBe(true)
     expect(rows.held).toBe(0)
     expect(rows.work).toBe(100 + rows.sorted + 2)
     // both rows were left unsorted, and were sorted when finished

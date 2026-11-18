@@ -12,6 +12,7 @@ import type { LimitOverrides, Limits } from "../SpreadsheetLimits.ts"
 import type { Row } from "../Workbook.ts"
 import { type Meter, WorkMeter } from "./meter.ts"
 import * as RecordKeys from "./recordKeys.ts"
+import { compact } from "./sheet/rows.ts"
 
 export interface RecordsOptions<D = never> {
   /**
@@ -142,8 +143,29 @@ const initial = (header: RecordsOptions<unknown>["header"], meter: Meter): Phase
 const ready = (row: Row | undefined, meter: Meter): Ready => {
   const entries: Array<RecordKeys.HeaderEntry> = []
   // progress: one header cell per iteration
-  if (row !== undefined) for (const cell of row.cells) entries.push([cell.column, headerName(cell)])
+  if (row !== undefined) for (const cell of headerCells(row.cells)) entries.push([cell.column, headerName(cell)])
   return { _tag: "Ready", namer: RecordKeys.make(entries, meter), explicit: undefined }
+}
+
+/**
+ * The header row's cells as the namer takes them: in ascending column
+ * order, one cell per column, the last cell of a repeated column (also an
+ * Empty one), as the readers keep a row's cells. A cell whose column isn't a
+ * non-negative safe integer names no column. Rows whose columns strictly
+ * ascend (all rows the readers make) are returned as they are; any other
+ * row is copied (rows are the caller's) and compacted once.
+ */
+const headerCells = (cells: ReadonlyArray<Cell.Cell>): ReadonlyArray<Cell.Cell> => {
+  let previous = -1
+  // progress: i increases by one up to cells.length
+  for (let i = 0; i < cells.length; i++) {
+    const column = cells[i]!.column
+    if (!(column > previous) || !Number.isSafeInteger(column)) {
+      return compact(cells.filter((cell) => Number.isSafeInteger(cell.column) && cell.column >= 0))
+    }
+    previous = column
+  }
+  return cells
 }
 
 /**

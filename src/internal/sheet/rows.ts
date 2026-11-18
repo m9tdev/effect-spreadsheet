@@ -20,7 +20,8 @@
  * A format whose rows don't come one after another (XLS: a row's cells may
  * be split, or come after a later row's) uses `HeldRows` instead: it holds
  * each row's cells until the format finishes the row, with the same limits
- * and compaction. The format finishes rows in increasing row order.
+ * and compaction. The format promises to finish rows in increasing row
+ * order; `HeldRows` doesn't check it.
  *
  * Where the formats differ, the rule is a parameter (`RowRules`), never
  * unified here: what a cell outside a row is, and how a malformed row
@@ -313,8 +314,9 @@ export class RowBuilder<At> {
 /**
  * Builds a sheet's rows from cells that come in any row order, for formats
  * whose writers may split a row's cells or put rows out of order (XLS).
- * Each row's cells are held until the format finishes the row, which it
- * does in increasing row order. The limits and the per-row compaction are
+ * Each row's cells are held until the format finishes the row. The format
+ * promises to finish rows in increasing row order (`HeldRows` doesn't check
+ * it, and emits rows in the order they are finished). The limits and the per-row compaction are
  * the `RowBuilder`'s: columns below `maxColumns` and at most
  * `maxCellsPerSheet` cells, checked as each cell is added; rows below
  * `maxRows`, checked as each is finished.
@@ -355,11 +357,6 @@ export class HeldRows {
     return this.out.length > 0
   }
 
-  /** Whether row `index` holds cells. */
-  has(index: number): boolean {
-    return this.rows.has(index)
-  }
-
   /** The rows holding cells, in row order. */
   indexes(): Uint32Array {
     return Uint32Array.from(this.rows.keys()).sort()
@@ -386,27 +383,49 @@ export class HeldRows {
   }
 
   /**
-   * Finishes row `index`: it goes out with its cells, sorted and compacted,
-   * or without any if it holds none. Fails on an index at or past `maxRows`.
+   * Finishes row `index` if it holds cells: it goes out with its cells,
+   * sorted and compacted. Returns `true` then, `false` when the row holds
+   * none (nothing is done: the format decides whether the row goes out
+   * without cells, with `finishEmptyRow`), or the error of an index at or
+   * past `maxRows`.
    */
-  finishRow(index: number, hidden: boolean): SpreadsheetError | undefined {
+  finishRow(index: number, hidden: boolean): SpreadsheetError | boolean {
     const row = this.rows.get(index)
-    if (row !== undefined) {
-      this.rows.delete(index)
-      this.held -= row.cells.length
-      if (this.hotIndex === index) {
-        this.hotIndex = -1
-        this.hot = undefined
-      }
-      if (!row.sorted) {
-        this.sorted += row.cells.length
-        this.work += row.cells.length
-      }
+    if (row === undefined) return false
+    this.rows.delete(index)
+    this.held -= row.cells.length
+    // Defensive, unreachable today: the format adds no cell to a row it
+    // finished (XLS finishes a row once its last cell record is passed).
+    // Should one come, it starts a new row instead of joining these cells.
+    if (this.hotIndex === index) {
+      this.hotIndex = -1
+      this.hot = undefined
     }
-    const failed = this.count.rowIndex(index) ?? this.count.row()
+    if (!row.sorted) {
+      this.sorted += row.cells.length
+      this.work += row.cells.length
+    }
+    const failed = this.admit(index)
     if (failed !== undefined) return failed
-    this.work++
-    this.out.push({ index, hidden, cells: row === undefined ? [] : row.done() })
+    this.out.push({ index, hidden, cells: row.done() })
+    return true
+  }
+
+  /**
+   * Row `index`, which holds no cells, goes out without any (a row the
+   * format declares). Fails on an index at or past `maxRows`.
+   */
+  finishEmptyRow(index: number, hidden: boolean): SpreadsheetError | undefined {
+    const failed = this.admit(index)
+    if (failed !== undefined) return failed
+    this.out.push({ index, hidden, cells: [] })
     return undefined
+  }
+
+  /** Counts row `index` as it goes out: fails at or past `maxRows`. */
+  private admit(index: number): SpreadsheetError | undefined {
+    const failed = this.count.rowIndex(index) ?? this.count.row()
+    if (failed === undefined) this.work++
+    return failed
   }
 }
