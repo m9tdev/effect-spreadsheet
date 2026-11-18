@@ -428,6 +428,10 @@ describe("zip archive: hostile input", () => {
     // duplicate names, compared case-insensitively
     const dup = await buildZip([{ name: "A.xml", data: enc("1") }, { name: "a.XML", data: enc("2") }])
     expect(Result.merge(open(dup, limits))).toMatchObject({ _tag: "MalformedFile", reason: "duplicate entry name" })
+    // names are checked before the local headers: with both wrong, the duplicate is reported
+    const dupBadSig = dup.slice()
+    new DataView(dupBadSig.buffer).setUint32(0, 0, true)
+    expect(Result.merge(open(dupBadSig, limits))).toMatchObject({ _tag: "MalformedFile", reason: "duplicate entry name" })
     // a local header with the wrong signature
     const badSig = two.slice()
     new DataView(badSig.buffer).setUint32(0, 0, true)

@@ -436,6 +436,15 @@ describe("cfb: hostile and broken files", () => {
     expect(reasonOf(b.read(b.find("Edge")!))).toBe("mini stream is larger than the file")
   })
 
+  it("an empty stream reads as empty without loading the mini stream, even a broken one", () => {
+    const layout = fresh()
+    const shortMiniFat = layout.bytes.slice()
+    patch32(shortMiniFat, 64, 5)
+    const cfb = openOk(shortMiniFat)
+    expect(readOk(cfb, "Empty")).toEqual(new Uint8Array(0))
+    expect(reasonOf(cfb.read(cfb.find("Edge")!))).toBe("miniFAT chain is shorter than the header says")
+  })
+
   it("a DIFAT chain with a cycle, or longer than the header says, is MalformedFile", () => {
     const layout = writeCfb([{ name: "Workbook", data: new Uint8Array(110 * 128 * 512) }])
     const difat = layout.difatSectors[0]!
