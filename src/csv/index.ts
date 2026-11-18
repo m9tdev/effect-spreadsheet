@@ -27,8 +27,10 @@
  * @since 0.1.0
  */
 import { Effect, Stream } from "effect"
-import { readCsvWorkbook, resolved, toStream } from "../internal/csv/read.ts"
-import { rowsFromByteStream } from "../internal/csv/reader.ts"
+import * as Result from "effect/Result"
+import { parseDelimiter, parseEncoding, withDecoding } from "../internal/csv/options.ts"
+import { readCsvWorkbook, toStream } from "../internal/csv/read.ts"
+import { failAtDecoding, rowsFromByteStream } from "../internal/csv/reader.ts"
 import { accept, resolveLimits } from "../internal/input.ts"
 import { type SpreadsheetError } from "../SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../SpreadsheetLimits.ts"
@@ -93,15 +95,23 @@ export const rows: {
   options?: ReadOptions
 ): Stream.Stream<Workbook.Row, E | SpreadsheetError, R> =>
   Stream.unwrap(
-    Effect.map(SpreadsheetLimits.resolve(options?.limits), (limits) =>
-      rowsFromByteStream(toStream(input), resolved(options, limits)))
+    Effect.map(SpreadsheetLimits.resolve(options?.limits), (limits) => {
+      // the delimiter, then the encoding, as `csvOptions` checks them for `read`
+      const delimiter = parseDelimiter(options?.delimiter)
+      if (Result.isFailure(delimiter)) return Stream.fail(delimiter.failure)
+      const decoding = parseEncoding(options?.encoding ?? "auto")
+      // an unknown encoding fails where decoding starts, after the first bytes
+      if (Result.isFailure(decoding)) return failAtDecoding(toStream(input), limits, decoding.failure)
+      return rowsFromByteStream(toStream(input), withDecoding(options, delimiter.success, decoding.success), limits)
+    })
   )) as never
 
 /**
  * Opens delimited text as a one-sheet workbook. The limits are resolved
  * here (context plus `options.limits`) and kept in the workbook; for a
- * `Uint8Array` the size limit is checked here too. Parsing happens when
- * rows are streamed.
+ * `Uint8Array` the size limit is checked here too. The options are
+ * checked here and kept: changing the options object later doesn't affect
+ * the workbook's rows. Parsing happens when rows are streamed.
  * A byte-stream input is consumed each time the rows are streamed, so it
  * must be re-runnable to stream them more than once, and may only fail
  * with `SpreadsheetError` (map other errors first, or use {@link rows},

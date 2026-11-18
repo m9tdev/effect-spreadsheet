@@ -22,6 +22,7 @@ import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
+import { isDelimiter } from "./options.ts"
 import { guessDelimiter, SNIFF_CHARS } from "./sniff.ts"
 
 const QUOTE = 0x22
@@ -41,8 +42,8 @@ const State = {
 type State = typeof State[keyof typeof State]
 
 export interface ParserOptions {
-  /** Delimiter character, or undefined to sniff it. */
-  readonly delimiter: string | undefined
+  /** The delimiter's character code, or undefined to sniff it. */
+  readonly delimiter: number | undefined
   readonly inferTypes: boolean
   readonly strict: boolean
   readonly limits: Limits
@@ -67,7 +68,7 @@ export class CsvParser {
     this.options = options
     this.phase = options.delimiter === undefined
       ? { _tag: "Sniffing", pending: "" }
-      : { _tag: "Parsing", tokenizer: new Tokenizer(options, options.delimiter.charCodeAt(0), 0) }
+      : { _tag: "Parsing", tokenizer: new Tokenizer(options, options.delimiter, 0) }
   }
 
   /** The error that stopped parsing, if any. Once set, it stays. */
@@ -136,7 +137,7 @@ export class CsvParser {
   private sniff(text: string, complete: boolean): Tokenizer {
     const sep = /^sep=(.)(\r\n|\r|\n|$)/.exec(text)
     const char = sep?.[1]
-    if (sep !== null && char !== undefined && char !== '"' && char !== "\r" && char !== "\n") {
+    if (sep !== null && char !== undefined && isDelimiter(char)) {
       return new Tokenizer(this.options, char.charCodeAt(0), sep[0].length)
     }
     return new Tokenizer(this.options, guessDelimiter(text.slice(0, SNIFF_CHARS), complete), 0)

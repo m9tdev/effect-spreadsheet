@@ -6,8 +6,7 @@
  * @internal
  */
 import { absurd } from "effect/Function"
-import * as Result from "effect/Result"
-import { InvalidOption } from "../../SpreadsheetError.ts"
+import { type Decoding, makeDecoder } from "./options.ts"
 
 /** Bytes buffered before deciding the encoding in `"auto"` mode. */
 export const DETECT_BYTES = 64 * 1024
@@ -51,54 +50,29 @@ export const detectEncoding = (head: Uint8Array, complete: boolean): string => {
   }
 }
 
-/** An error if `label` isn't `"auto"` or a label `TextDecoder` knows. */
-export const validateEncoding = (label: string): InvalidOption | undefined => {
-  if (label === "auto") return undefined
-  const decoder = makeDecoder(label)
-  return decoder instanceof InvalidOption ? decoder : undefined
-}
-
-const makeDecoder = (label: string): TextDecoder | InvalidOption => {
-  try {
-    // ignoreBOM: false makes the decoder drop a BOM of its own encoding.
-    return new TextDecoder(label, { ignoreBOM: false })
-  } catch {
-    return new InvalidOption({ option: "encoding", reason: `text encoding ${JSON.stringify(label)} is not supported` })
-  }
-}
-
 /**
  * Where a {@link ByteDecoder} is: holding the first bytes back until the
- * encoding is decided, decoding with the chosen encoding, or stopped on an
- * error (which every later call returns again).
+ * encoding is decided, or decoding with the chosen encoding.
  */
 type Phase =
   | { readonly _tag: "Detecting"; readonly head: Array<Uint8Array>; bytes: number }
-  | Decided
-
-type Decided =
   | { readonly _tag: "Decoding"; readonly decoder: TextDecoder }
-  | { readonly _tag: "Failed"; readonly error: InvalidOption }
 
 /**
- * Leaves detection: picks the encoding from the held-back bytes `head`
- * (`complete` says it is the whole input) and makes its decoder.
+ * Leaves detection: picks the decoder for the held-back bytes `head`
+ * (`complete` says it is the whole input).
  */
-const decide = (requested: string, head: Uint8Array, complete: boolean): Decided => {
-  if (requested !== "auto") {
-    const invalid = validateEncoding(requested)
-    if (invalid !== undefined) return { _tag: "Failed", error: invalid }
-  }
+const decide = (decoding: Decoding, head: Uint8Array, complete: boolean): TextDecoder => {
+  const bom = bomEncoding(head)
+  if (bom !== undefined) return makeDecoder(bom)
+  if (decoding !== "auto") return decoding()
   // Detect on exactly the first DETECT_BYTES, so the choice doesn't depend
   // on how the input was chunked.
-  const label = bomEncoding(head) ?? (requested === "auto"
-    ? head.length > DETECT_BYTES
+  return makeDecoder(
+    head.length > DETECT_BYTES
       ? detectEncoding(head.subarray(0, DETECT_BYTES), false)
       : detectEncoding(head, complete)
-    : requested)
-  const decoder = makeDecoder(label)
-  if (decoder instanceof InvalidOption) return { _tag: "Failed", error: decoder }
-  return { _tag: "Decoding", decoder }
+  )
 }
 
 /**
@@ -110,50 +84,44 @@ const decide = (requested: string, head: Uint8Array, complete: boolean): Decided
  */
 export class ByteDecoder {
   private phase: Phase = { _tag: "Detecting", head: [], bytes: 0 }
-  private readonly requested: string
+  private readonly decoding: Decoding
 
-  constructor(requested: string) {
-    this.requested = requested
+  constructor(decoding: Decoding) {
+    this.decoding = decoding
   }
 
-  /** Decodes a chunk. Succeeds with the text available so far, or fails. */
-  push(bytes: Uint8Array): Result.Result<string, InvalidOption> {
+  /** Decodes a chunk: the text available so far. */
+  push(bytes: Uint8Array): string {
     const phase = this.phase
     switch (phase._tag) {
       case "Detecting": {
         phase.head.push(bytes)
         phase.bytes += bytes.length
-        if (phase.bytes < (this.requested === "auto" ? DETECT_BYTES : 3)) return Result.succeed("")
+        if (phase.bytes < (this.decoding === "auto" ? DETECT_BYTES : 3)) return ""
         const head = concat(phase.head, phase.bytes)
-        const next = this.phase = decide(this.requested, head, false)
-        return next._tag === "Decoding"
-          ? Result.succeed(next.decoder.decode(head, { stream: true }))
-          : Result.fail(next.error)
+        const decoder = decide(this.decoding, head, false)
+        this.phase = { _tag: "Decoding", decoder }
+        return decoder.decode(head, { stream: true })
       }
       case "Decoding":
-        return Result.succeed(phase.decoder.decode(bytes, { stream: true }))
-      case "Failed":
-        return Result.fail(phase.error)
+        return phase.decoder.decode(bytes, { stream: true })
       default:
         return absurd(phase)
     }
   }
 
   /** Flushes at end of input (an incomplete trailing sequence becomes U+FFFD). */
-  end(): Result.Result<string, InvalidOption> {
+  end(): string {
     const phase = this.phase
     switch (phase._tag) {
       case "Detecting": {
         const head = concat(phase.head, phase.bytes)
-        const next = this.phase = decide(this.requested, head, true)
-        return next._tag === "Decoding"
-          ? Result.succeed(next.decoder.decode(head, { stream: true }) + next.decoder.decode())
-          : Result.fail(next.error)
+        const decoder = decide(this.decoding, head, true)
+        this.phase = { _tag: "Decoding", decoder }
+        return decoder.decode(head, { stream: true }) + decoder.decode()
       }
       case "Decoding":
-        return Result.succeed(phase.decoder.decode())
-      case "Failed":
-        return Result.fail(phase.error)
+        return phase.decoder.decode()
       default:
         return absurd(phase)
     }
