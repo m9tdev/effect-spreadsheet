@@ -266,4 +266,32 @@ describe("xlsb: external books by relationship target", () => {
     const wb = await Effect.runPromise(Xlsb.read(bytes))
     expect(wb.definedNames.map((n) => n.formula)).toEqual(["[1]Rates!$A$1", "[2]Prices!$A$1", "[3]Rates!$A$1"])
   })
+
+  it("reads the shared strings and styles before the external link parts, so a broken one of each fails with the strings", async () => {
+    const B = await import("./helpers/xlsb.ts")
+    // a sheet list that says one name follows, and ends
+    const brokenLink = B.record(0x167, B.u32(1))
+    const brokenStrings = B.concat([B.beginSst(1), B.record(0x13, [0])])
+    const bytes = await xlsbPackage({
+      sheets: [{ name: "S", relationshipId: "a" }],
+      workbookPath: "xl/workbook.bin",
+      packageRels: [{ id: "r", kind: "officeDocument", target: "xl/workbook.bin" }],
+      workbookRels: [
+        { id: "a", kind: "worksheet", target: "worksheets/sheet1.bin" },
+        { id: "s", kind: "sharedStrings", target: "sharedStrings.bin" },
+        { id: "x1", kind: "externalLink", target: "externalLinks/externalLink1.bin" }
+      ],
+      parts: [
+        { name: "xl/worksheets/sheet1.bin", data: worksheet("xlsb", 1) },
+        { name: "xl/sharedStrings.bin", data: brokenStrings },
+        { name: "xl/externalLinks/externalLink1.bin", data: brokenLink }
+      ],
+      globals: [B.supSelf(), B.supBookSrc("x1"), B.externSheet([[1, 0, 0]]), B.name("N", B.ref3d(0, 0, 0))]
+    })
+    expect(failureOf(await Effect.runPromiseExit(Xlsb.read(bytes)))).toMatchObject({
+      _tag: "MalformedFile",
+      reason: "truncated shared string",
+      part: "xl/sharedStrings.bin"
+    })
+  })
 })
