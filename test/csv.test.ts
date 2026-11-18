@@ -324,6 +324,8 @@ describe("csv: encodings", () => {
     // at read, both are checked before any row
     const atRead = await Effect.runPromise(Effect.flip(Csv.read(Stream.empty, { encoding })))
     assert.strictEqual(atRead._tag === "InvalidOption" && atRead.reason, 'text encoding "klingon" is not supported')
+    const bothAtRead = await Effect.runPromise(Effect.flip(Csv.read(Stream.empty, { encoding, delimiter: ";;" })))
+    assert.strictEqual(bothAtRead._tag === "InvalidOption" && bothAtRead.option, "delimiter")
   })
 
   it("a workbook's rows use the options as checked when it was read", async () => {
