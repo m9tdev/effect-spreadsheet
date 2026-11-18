@@ -7,13 +7,13 @@
 import { Effect } from "effect"
 import { LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import { Fields } from "../binary.ts"
 import { readRichStr, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords } from "../biff12/records.ts"
+import { FixedReader } from "../binary/layout.ts"
 import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
-import { malformed, tooLong } from "./workbook.ts"
+import { malformed, stringError } from "./workbook.ts"
 
 const BRT_SST_ITEM = 0x0013
 const BRT_FMT = 0x002C
@@ -40,8 +40,7 @@ export const readSharedStrings = (
         return new LimitExceeded({ limit: "maxSharedStrings", max: limits.maxSharedStrings, actual: strings.length + 1 })
       }
       const text = readRichStr(record.data, 0, limits.maxStringLength)
-      if (text === undefined) return malformed("truncated shared string", entry.name, record.offset)
-      if (typeof text === "number") return tooLong(limits, text)
+      if (text._tag !== "Ok") return stringError(text, limits, "truncated shared string", entry.name, record.offset)
       strings.push(text.value)
       return undefined
     }
@@ -71,6 +70,7 @@ export const readStyles = (
     let count = 0
     let inFmts = false
     let inCellXfs = false
+    const reader = new FixedReader()
     const handle = (record: Biff12Record): SpreadsheetError | undefined => {
       switch (record.type) {
         case BRT_BEGIN_FMTS:
@@ -88,10 +88,12 @@ export const readStyles = (
         case BRT_FMT: {
           if (!inFmts) return undefined
           // ifmt u16, stFmtCode
-          const id = new Fields(record.data).u16(0)
+          const truncated = "truncated number format"
+          const f = reader.fixed(record.data, 2)
+          if (f === undefined) return malformed(truncated, entry.name, record.offset)
+          const id = f.u16(0)
           const code = readWideString(record.data, 2, limits.maxStringLength)
-          if (id === undefined || code === undefined) return malformed("truncated number format", entry.name, record.offset)
-          if (typeof code === "number") return tooLong(limits, code)
+          if (code._tag !== "Ok") return stringError(code, limits, truncated, entry.name, record.offset)
           // classified here, a slice per event-loop turn, not on the cells'
           // turn (the rows stream doesn't yield between the cells of a row);
           // a later BrtFmt with the same id wins
@@ -101,8 +103,9 @@ export const readStyles = (
         case BRT_XF: {
           if (!inCellXfs) return undefined
           // ixfeParent u16, iFmt u16, ...
-          const id = new Fields(record.data).u16(2)
-          if (id === undefined) return malformed("truncated cell format", entry.name, record.offset)
+          const f = reader.fixed(record.data, 4)
+          if (f === undefined) return malformed("truncated cell format", entry.name, record.offset)
+          const id = f.u16(2)
           // styles past the u24 range can't be used by any cell
           if (count >= maxCellXfs) return undefined
           if (count === ids.length) {

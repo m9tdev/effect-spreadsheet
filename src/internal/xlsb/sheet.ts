@@ -40,14 +40,15 @@ import * as Cell from "../../Cell.ts"
 import type { SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Range, Row, SheetDetails } from "../../Workbook.ts"
-import { decodeRk, ERROR_CODES, Fields } from "../binary.ts"
+import { decodeRk, ERROR_CODES } from "../binary.ts"
+import { type Fixed, FixedReader, type StringFailure, type StringRead } from "../binary/layout.ts"
 import { readRichStr, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords, recordDecoder } from "../biff12/records.ts"
 import { decoded, step } from "../decode.ts"
 import { type CellStyles, numberCell } from "../numFmt.ts"
 import { LayoutBuilder } from "../sheet/layout.ts"
 import { RowBuilder } from "../sheet/rows.ts"
-import { malformed, tooLong } from "./workbook.ts"
+import { malformed, stringError } from "./workbook.ts"
 
 export interface SheetContext {
   readonly part: string
@@ -58,25 +59,6 @@ export interface SheetContext {
 }
 
 const BRT_ROW_HDR = 0x0000
-const BRT_CELL_BLANK = 0x0001
-const BRT_CELL_RK = 0x0002
-const BRT_CELL_ERROR = 0x0003
-const BRT_CELL_BOOL = 0x0004
-const BRT_CELL_REAL = 0x0005
-const BRT_CELL_ST = 0x0006
-const BRT_CELL_ISST = 0x0007
-const BRT_FMLA_STRING = 0x0008
-const BRT_FMLA_NUM = 0x0009
-const BRT_FMLA_BOOL = 0x000A
-const BRT_FMLA_ERROR = 0x000B
-const BRT_SHORT_BLANK = 0x000C
-const BRT_SHORT_RK = 0x000D
-const BRT_SHORT_ERROR = 0x000E
-const BRT_SHORT_BOOL = 0x000F
-const BRT_SHORT_REAL = 0x0010
-const BRT_SHORT_ST = 0x0011
-const BRT_SHORT_ISST = 0x0012
-const BRT_CELL_RSTRING = 0x003E
 const BRT_END_SHEET_DATA = 0x0092
 const BRT_WS_DIM = 0x0094
 const BRT_COL_INFO = 0x003C
@@ -84,6 +66,95 @@ const BRT_MERGE_CELL = 0x00B0
 
 /** The row header's fDyZero bit (in the u16 at offset 10): a hidden row. */
 const ROW_HIDDEN = 0x1000
+/** A row header's fixed fields: rw u32, ixfe u32, miyRw u16, flags u16 (fDyZero), ... */
+const ROW_HDR_MIN = 12
+/** An RfX range: rwFirst, rwLast, colFirst, colLast, u32 each. */
+const RFX_MIN = 16
+/** A BrtColInfo's fixed fields: colFirst u32, colLast u32, coldx u32, ixfe u32, flags u16 (fHidden bit 0). */
+const COL_INFO_MIN = 18
+
+const errorCode = (code: number): string => ERROR_CODES.get(code) ?? "#N/A"
+
+/** Where a cell record's value goes: the sheet's rows, read in its context. */
+interface CellSink {
+  readonly context: SheetContext
+  /** Adds the cell to the open row. */
+  add(cell: Cell.Cell): SpreadsheetError | undefined
+  /** Adds a number cell, a Date when its style has a date format. */
+  addNumber(column: number, style: number, value: number): SpreadsheetError | undefined
+  /** The error of a cell's string that couldn't be read: too long, or past the record. */
+  unread(read: StringFailure, record: Biff12Record): SpreadsheetError
+}
+
+/** Decodes a cell's value at `at` (after its column and style) and adds the cell. */
+type CellValue = (sink: CellSink, f: Fixed, at: number, column: number, style: number, record: Biff12Record) => SpreadsheetError | undefined
+
+/**
+ * A cell record type: whether it is a short form (no column field: the
+ * previous cell's column + 1), its declared minimum length (the column, if
+ * any, and style u24 + flags byte, then the value's fixed part; a string
+ * value checks its own length), and how its value is read.
+ */
+interface CellKind {
+  readonly short: boolean
+  readonly min: number
+  readonly value: CellValue
+}
+
+const blankValue: CellValue = (sink, _f, _at, column) => sink.add(Cell.empty(column))
+const rkValue: CellValue = (sink, f, at, column, style) => sink.addNumber(column, style, decodeRk(f.u32(at)))
+const realValue: CellValue = (sink, f, at, column, style) => sink.addNumber(column, style, f.f64(at))
+const boolValue: CellValue = (sink, f, at, column) => sink.add(Cell.boolean(column, f.u8(at) !== 0))
+const errorValue: CellValue = (sink, f, at, column) => sink.add(Cell.error(column, errorCode(f.u8(at))))
+const textOf = (read: StringRead, sink: CellSink, column: number, record: Biff12Record): SpreadsheetError | undefined =>
+  read._tag === "Ok" ? sink.add(Cell.text(column, read.value)) : sink.unread(read, record)
+const textValue: CellValue = (sink, f, at, column, _style, record) =>
+  textOf(readWideString(f.data, at, sink.context.limits.maxStringLength), sink, column, record)
+const richValue: CellValue = (sink, f, at, column, _style, record) =>
+  textOf(readRichStr(f.data, at, sink.context.limits.maxStringLength), sink, column, record)
+const sharedValue: CellValue = (sink, f, at, column, _style, record) => {
+  // a shared string index
+  const index = f.u32(at)
+  const strings = sink.context.strings
+  if (strings === undefined || index >= strings.length) return malformed(`shared string ${index} doesn't exist`, sink.context.part, record.offset)
+  return sink.add(Cell.text(column, strings[index]!))
+}
+
+const truncatedCell = (record: Biff12Record): string => `truncated cell record 0x${record.type.toString(16)}`
+
+const cellKind = (short: boolean, size: number, value: CellValue): CellKind => ({ short, min: (short ? 4 : 8) + size, value })
+
+/**
+ * The cell records, by record type: they drive which records are cells
+ * (inside the sheet data) and how each is read. Types 0x01 to 0x12 and
+ * 0x3E; none above.
+ */
+const CELLS: ReadonlyArray<CellKind | undefined> = (() => {
+  const table: Array<CellKind | undefined> = new Array(0x3F).fill(undefined)
+  table[0x01] = cellKind(false, 0, blankValue) // BrtCellBlank
+  table[0x02] = cellKind(false, 4, rkValue) // BrtCellRk
+  table[0x03] = cellKind(false, 1, errorValue) // BrtCellError
+  table[0x04] = cellKind(false, 1, boolValue) // BrtCellBool
+  table[0x05] = cellKind(false, 8, realValue) // BrtCellReal
+  table[0x06] = cellKind(false, 0, textValue) // BrtCellSt
+  table[0x07] = cellKind(false, 4, sharedValue) // BrtCellIsst
+  table[0x08] = cellKind(false, 0, textValue) // BrtFmlaString
+  table[0x09] = cellKind(false, 8, realValue) // BrtFmlaNum
+  table[0x0A] = cellKind(false, 1, boolValue) // BrtFmlaBool
+  table[0x0B] = cellKind(false, 1, errorValue) // BrtFmlaError
+  table[0x0C] = cellKind(true, 0, blankValue) // BrtShortBlank
+  table[0x0D] = cellKind(true, 4, rkValue) // BrtShortRk
+  table[0x0E] = cellKind(true, 1, errorValue) // BrtShortError
+  table[0x0F] = cellKind(true, 1, boolValue) // BrtShortBool
+  table[0x10] = cellKind(true, 8, realValue) // BrtShortReal
+  table[0x11] = cellKind(true, 0, textValue) // BrtShortSt
+  table[0x12] = cellKind(true, 4, sharedValue) // BrtShortIsst
+  table[0x3E] = cellKind(false, 0, richValue) // BrtCellRString
+  return table
+})()
+
+/** The kind of a cell record type, if it is one. */
+const cellKindOf = (type: number): CellKind | undefined => (type < CELLS.length ? CELLS[type] : undefined)
 
 const BRT_BEGIN_SHEET_DATA = 0x0091
 const BRT_FRT_BEGIN = 0x0023
@@ -123,7 +194,7 @@ class Scope {
       this.sheetData = false
       return was
     }
-    return this.sheetData || (type !== BRT_ROW_HDR && !(type <= BRT_SHORT_ISST || type === BRT_CELL_RSTRING))
+    return this.sheetData || (type !== BRT_ROW_HDR && cellKindOf(type) === undefined)
   }
 
   /** The end of the part: MalformedFile if a future-record block is still open. */
@@ -132,13 +203,12 @@ class Scope {
   }
 }
 
-const errorCode = (code: number): string => ERROR_CODES.get(code) ?? "#N/A"
-
 /** Collects rows from a worksheet's records. Exported for tests. */
-export class SheetRows {
+export class SheetRows implements CellSink {
   /** The rows: in XLSB a cell record outside a row is MalformedFile. */
   readonly rows: RowBuilder<Biff12Record>
-  private readonly context: SheetContext
+  readonly context: SheetContext
+  private readonly reader = new FixedReader()
 
   constructor(context: SheetContext) {
     this.context = context
@@ -164,8 +234,8 @@ export class SheetRows {
     if (!this.scope.step(record)) return undefined
     if (type === BRT_ROW_HDR) return this.openRow(record)
     if (type === BRT_END_SHEET_DATA) return this.rows.closeRow()
-    if (type <= BRT_SHORT_ISST || type === BRT_CELL_RSTRING) return this.cell(record)
-    return undefined
+    const kind = cellKindOf(type)
+    return kind === undefined ? undefined : this.cell(record, kind)
   }
 
   /** The end of the part: the open row, if any, is complete (MalformedFile if a future-record block is still open). */
@@ -175,98 +245,48 @@ export class SheetRows {
   private openRow(record: Biff12Record): SpreadsheetError | undefined {
     const closed = this.rows.closeRow()
     if (closed !== undefined) return closed
-    // rw u32, ixfe u32, miyRw u16, flags u16 (fDyZero), ...
-    const f = new Fields(record.data)
-    const index = f.u32(0)
-    const flags = f.u16(10)
-    if (index === undefined || flags === undefined) return malformed("truncated row header", this.context.part, record.offset)
-    return this.rows.openRow(index, (flags & ROW_HIDDEN) !== 0, record)
+    const f = this.reader.fixed(record.data, ROW_HDR_MIN)
+    if (f === undefined) return malformed("truncated row header", this.context.part, record.offset)
+    return this.rows.openRow(f.u32(0), (f.u16(10) & ROW_HIDDEN) !== 0, record)
   }
 
-  private cell(record: Biff12Record): SpreadsheetError | undefined {
-    const { part, limits } = this.context
+  /**
+   * A cell record of `kind`. Its column and style are checked and read
+   * first, then the cell is placed (which may fail on its own), and only
+   * then is the record checked against the kind's declared minimum and its
+   * value read.
+   */
+  private cell(record: Biff12Record, kind: CellKind): SpreadsheetError | undefined {
     const rows = this.rows
     const start = rows.beginCell(record)
     if (start !== "read") return start === "skip" ? undefined : start
-    const type = record.type
     const data = record.data
-    const f = new Fields(data)
-    const short = type >= BRT_SHORT_BLANK && type <= BRT_SHORT_ISST
     // Cell: column u32 and style u24 (+ flags byte); the short forms have no column
-    const column = short ? rows.nextColumn : f.u32(0)
-    const style = f.u32(short ? 0 : 4)
-    const at = short ? 4 : 8
-    const truncated = () => malformed(`truncated cell record 0x${type.toString(16)}`, part, record.offset)
-    if (column === undefined || style === undefined) return truncated()
+    const head = kind.short ? 4 : 8
+    const f = this.reader.fixed(data, head)
+    if (f === undefined) return this.truncated(record)
+    const column = kind.short ? rows.nextColumn : f.u32(0)
+    const style = f.u32(head - 4) & 0xFFFFFF
     const placed = rows.placeCell(column, record)
     if (placed !== undefined) return placed
-    let cell: Cell.Cell
-    switch (type) {
-      case BRT_CELL_BLANK:
-      case BRT_SHORT_BLANK:
-        cell = Cell.empty(column)
-        break
-      case BRT_CELL_RK:
-      case BRT_SHORT_RK: {
-        const rk = f.u32(at)
-        if (rk === undefined) return truncated()
-        cell = this.numberCell(column, style & 0xFFFFFF, decodeRk(rk))
-        break
-      }
-      case BRT_CELL_REAL:
-      case BRT_SHORT_REAL:
-      case BRT_FMLA_NUM: {
-        const value = f.f64(at)
-        if (value === undefined) return truncated()
-        cell = this.numberCell(column, style & 0xFFFFFF, value)
-        break
-      }
-      case BRT_CELL_BOOL:
-      case BRT_SHORT_BOOL:
-      case BRT_FMLA_BOOL: {
-        const value = f.u8(at)
-        if (value === undefined) return truncated()
-        cell = Cell.boolean(column, value !== 0)
-        break
-      }
-      case BRT_CELL_ERROR:
-      case BRT_SHORT_ERROR:
-      case BRT_FMLA_ERROR: {
-        const value = f.u8(at)
-        if (value === undefined) return truncated()
-        cell = Cell.error(column, errorCode(value))
-        break
-      }
-      case BRT_CELL_ST:
-      case BRT_SHORT_ST:
-      case BRT_FMLA_STRING:
-      case BRT_CELL_RSTRING: {
-        const rich = type === BRT_CELL_RSTRING
-        const text = rich ? readRichStr(data, at, limits.maxStringLength) : readWideString(data, at, limits.maxStringLength)
-        if (text === undefined) return truncated()
-        if (typeof text === "number") return tooLong(limits, text)
-        cell = Cell.text(column, text.value)
-        break
-      }
-      case BRT_CELL_ISST:
-      case BRT_SHORT_ISST: {
-        // a shared string index
-        const index = f.u32(at)
-        if (index === undefined) return truncated()
-        const strings = this.context.strings
-        if (strings === undefined || index >= strings.length) return malformed(`shared string ${index} doesn't exist`, part, record.offset)
-        cell = Cell.text(column, strings[index]!)
-        break
-      }
-      default:
-        return undefined
-    }
-    return rows.addCell(cell)
+    if (data.length < kind.min) return this.truncated(record)
+    return kind.value(this, f, head, column, style, record)
   }
 
-  /** A number cell, a Date when its style has a date format. */
-  private numberCell(column: number, style: number, value: number): Cell.Cell {
-    return numberCell(column, value, this.context.styles.format(style), this.context.date1904)
+  private truncated(record: Biff12Record): SpreadsheetError {
+    return malformed(truncatedCell(record), this.context.part, record.offset)
+  }
+
+  unread(read: StringFailure, record: Biff12Record): SpreadsheetError {
+    return stringError(read, this.context.limits, truncatedCell(record), this.context.part, record.offset)
+  }
+
+  add(cell: Cell.Cell): SpreadsheetError | undefined {
+    return this.rows.addCell(cell)
+  }
+
+  addNumber(column: number, style: number, value: number): SpreadsheetError | undefined {
+    return this.rows.addCell(numberCell(column, value, this.context.styles.format(style), this.context.date1904))
   }
 }
 
@@ -293,13 +313,14 @@ export const sheetRows = (
     }
   })
 
-/** An RfX range (rwFirst, rwLast, colFirst, colLast: u32 each) at `at`; undefined if truncated or reversed. */
-const range = (f: Fields, at: number): Range | undefined => {
-  const firstRow = f.u32(at)
-  const lastRow = f.u32(at + 4)
-  const firstColumn = f.u32(at + 8)
-  const lastColumn = f.u32(at + 12)
-  if (firstRow === undefined || lastRow === undefined || firstColumn === undefined || lastColumn === undefined) return undefined
+/** The RfX range a record starts with (rwFirst, rwLast, colFirst, colLast: u32 each); undefined if truncated or reversed. */
+const range = (reader: FixedReader, data: Uint8Array): Range | undefined => {
+  const f = reader.fixed(data, RFX_MIN)
+  if (f === undefined) return undefined
+  const firstRow = f.u32(0)
+  const lastRow = f.u32(4)
+  const firstColumn = f.u32(8)
+  const lastColumn = f.u32(12)
   if (lastRow < firstRow || lastColumn < firstColumn) return undefined
   return { firstRow, firstColumn, lastRow, lastColumn }
 }
@@ -318,28 +339,25 @@ export const sheetDetails = (
   Effect.suspend(() => {
     const layout = new LayoutBuilder(limits)
     const scope = new Scope()
+    const reader = new FixedReader()
     const handle = (record: Biff12Record): SpreadsheetError | undefined => {
       if (!scope.step(record)) return undefined
       switch (record.type) {
         case BRT_WS_DIM: {
-          const r = range(new Fields(record.data), 0)
+          const r = range(reader, record.data)
           if (r !== undefined) layout.dimension(r)
           return undefined
         }
         case BRT_COL_INFO: {
           const counted = layout.columnRecord()
           if (counted !== undefined) return counted
-          // colFirst u32, colLast u32, coldx u32, ixfe u32, flags u16 (fHidden bit 0)
-          const f = new Fields(record.data)
-          const first = f.u32(0)
-          const last = f.u32(4)
-          const flags = f.u16(16)
-          if (first === undefined || last === undefined || flags === undefined) return malformed("truncated column info", part, record.offset)
-          if ((flags & 0x01) !== 0) layout.hideColumns(first, last)
+          const f = reader.fixed(record.data, COL_INFO_MIN)
+          if (f === undefined) return malformed("truncated column info", part, record.offset)
+          if ((f.u16(16) & 0x01) !== 0) layout.hideColumns(f.u32(0), f.u32(4))
           return undefined
         }
         case BRT_MERGE_CELL: {
-          const r = range(new Fields(record.data), 0)
+          const r = range(reader, record.data)
           if (r === undefined) return malformed("bad merge range", part, record.offset)
           return layout.merge(r)
         }

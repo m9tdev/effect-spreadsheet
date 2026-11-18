@@ -16,13 +16,16 @@
  * work is linear in n. A record cut off by the end of the part is a
  * `MalformedFile` (`end`).
  *
+ * A record handler can also end a part's read early, without an error
+ * (`"stop"`): an external link part is read up to its sheet list only.
+ *
  * @internal
  */
-import type { Effect, Stream } from "effect"
+import { Effect, Stream } from "effect"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import { drained, type PushDecoder, stopped } from "../decode.ts"
-import type { Meter } from "../meter.ts"
+import { type PushDecoder, stopped } from "../decode.ts"
+import { type Meter, WorkMeter } from "../meter.ts"
 
 export interface Biff12Record {
   readonly type: number
@@ -31,8 +34,14 @@ export interface Biff12Record {
   readonly data: Uint8Array
 }
 
-/** What a record handler gives back: nothing, or the error that stops the read. */
-export type RecordHandler = (record: Biff12Record) => SpreadsheetError | undefined
+/**
+ * What a record handler gives back: nothing (go on), `"stop"` (the read
+ * ends here, without an error: the rest of the part isn't read), or the
+ * error that ends the read.
+ */
+export type Handled = undefined | "stop" | SpreadsheetError
+
+export type RecordHandler = (record: Biff12Record) => Handled
 
 const EMPTY = new Uint8Array(0)
 
@@ -68,7 +77,7 @@ export class RecordSplitter {
     return new MalformedFile({ format: "xlsb", part: this.part, offset: this.start, reason })
   }
 
-  private emit(onRecord: RecordHandler, data: Uint8Array): SpreadsheetError | undefined {
+  private emit<H extends Handled>(onRecord: (record: Biff12Record) => H, data: Uint8Array): H {
     this.records++
     this.state = TYPE
     this.varintBytes = 0
@@ -79,9 +88,10 @@ export class RecordSplitter {
   /**
    * Consumes `chunk`, calling `onRecord` for every record it completes, in
    * order. Stops at, and returns, the first error (from the input or the
-   * handler); the splitter isn't usable after one.
+   * handler) or the handler's `"stop"`; the splitter isn't usable after
+   * either.
    */
-  feed(chunk: Uint8Array, onRecord: RecordHandler): SpreadsheetError | undefined {
+  feed<H extends Handled>(chunk: Uint8Array, onRecord: (record: Biff12Record) => H): H | MalformedFile | LimitExceeded | undefined {
     let at = 0
     const n = chunk.length
     // progress: every iteration consumes at least one byte of the chunk
@@ -121,19 +131,19 @@ export class RecordSplitter {
           return new LimitExceeded({ limit: "maxRecordBytes", max: this.maxRecordBytes, actual: this.size })
         }
         if (this.size === 0) {
-          const error = this.emit(onRecord, EMPTY)
-          if (error !== undefined) {
+          const handled = this.emit(onRecord, EMPTY)
+          if (handled !== undefined) {
             this.offset += at
-            return error
+            return handled
           }
         } else if (n - at >= this.size) {
           // the whole body is in this chunk: a view of it
           const data = chunk.subarray(at, at + this.size)
           at += this.size
-          const error = this.emit(onRecord, data)
-          if (error !== undefined) {
+          const handled = this.emit(onRecord, data)
+          if (handled !== undefined) {
             this.offset += at
-            return error
+            return handled
           }
         } else {
           // spans chunks: one buffer of the record's size (at most maxRecordBytes), filled as they come
@@ -148,10 +158,10 @@ export class RecordSplitter {
         at += take
         this.filled += take
         if (this.filled === body.length) {
-          const error = this.emit(onRecord, body)
-          if (error !== undefined) {
+          const handled = this.emit(onRecord, body)
+          if (handled !== undefined) {
             this.offset += at
-            return error
+            return handled
           }
         }
       }
@@ -172,11 +182,12 @@ export class RecordSplitter {
 
 /**
  * The push decoder of a BIFF12 part: splits its bytes into records and
- * calls `onRecord` for each. A step's error is the first one from the
- * record layer or the handler. The records of each piece go to `meter`.
+ * calls `onRecord` for each (a handler that never stops the read early).
+ * A step's error is the first one from the record layer or the handler.
+ * The records of each piece go to `meter`.
  */
 export const recordDecoder = (
-  onRecord: RecordHandler,
+  onRecord: (record: Biff12Record) => SpreadsheetError | undefined,
   limits: Pick<Limits, "maxRecordBytes">,
   part: string,
   meter: Meter
@@ -193,16 +204,39 @@ export const recordDecoder = (
   }
 }
 
+const GO_ON = Effect.succeed(true)
+const STOP = Effect.succeed(false)
+
 /**
- * Reads a part's records from its byte stream, calling `onRecord` for each.
- * Fails with the first error (from the stream, the record layer or the
- * handler). The archive hands the bytes over in bounded slices, each after
+ * Reads a part's records from its byte stream, calling `onRecord` for each,
+ * and gives the number of records read. Fails with the first error (from
+ * the stream, the record layer or the handler). A handler's `"stop"` ends
+ * the read there: no more bytes are pulled, and the part's end isn't
+ * checked. The archive hands the bytes over in bounded slices, each after
  * a yield, so the work between the stream's turns is bounded. The records
- * of each slice go to the work meter.
+ * of each slice go to the work meter in effect.
  */
 export const readRecords = <E, R>(
   bytes: Stream.Stream<Uint8Array, E, R>,
   onRecord: RecordHandler,
   limits: Pick<Limits, "maxRecordBytes">,
   part: string
-): Effect.Effect<void, E | SpreadsheetError, R> => drained(bytes, (meter) => recordDecoder(onRecord, limits, part, meter))
+): Effect.Effect<number, E | SpreadsheetError, R> =>
+  Effect.flatMap(WorkMeter, (meter) => {
+    const splitter = new RecordSplitter(part, limits.maxRecordBytes)
+    let ended = false
+    return Stream.runForEachWhile(bytes, (piece) => {
+      const before = splitter.records
+      const handled = splitter.feed(piece, onRecord)
+      meter.add("records", splitter.records - before)
+      if (handled === undefined) return GO_ON
+      if (handled !== "stop") return Effect.fail(handled)
+      ended = true
+      return STOP
+    }).pipe(
+      Effect.flatMap(() => {
+        const error = ended ? undefined : splitter.end()
+        return error === undefined ? Effect.succeed(splitter.records) : Effect.fail(error)
+      })
+    )
+  })
