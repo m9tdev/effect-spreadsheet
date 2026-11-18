@@ -9,6 +9,7 @@
  */
 import { Effect, Stream } from "effect"
 import { describe, expect, it } from "vitest"
+import * as Cell from "../src/Cell.ts"
 import { parse } from "../src/internal/xml/parse.ts"
 import { open } from "../src/internal/zip/archive.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
@@ -16,6 +17,7 @@ import * as Workbook from "../src/Workbook.ts"
 import * as Xlsx from "../src/xlsx/index.ts"
 import { bigXlsx, MIN_ROW_BYTES } from "./helpers/big-xlsx.ts"
 import { countYields } from "./helpers/yields.ts"
+import { xlsx } from "./helpers/xlsx.ts"
 
 /** The most bytes of sheet XML one pull handles: one inflated or stored piece. */
 const PIECE_BYTES = 64 * 1024
@@ -87,4 +89,95 @@ describe("xlsx: 200 000 rows", () => {
     const details = await Effect.runPromise(Workbook.sheetDetails(wb, 0))
     expect(details.merges).toEqual([])
   }, 300_000)
+})
+
+/**
+ * The longest stretch without an event-loop turn while `run` is in flight,
+ * in ms: a setImmediate ticker that re-arms itself notes the time between
+ * its runs.
+ */
+const longestGap = async (run: () => Promise<unknown>): Promise<number> => {
+  let last = performance.now()
+  let gap = 0
+  let running = true
+  const sample = () => {
+    const now = performance.now()
+    gap = Math.max(gap, now - last)
+    last = now
+  }
+  const tick = () => {
+    if (!running) return
+    sample()
+    setImmediate(tick)
+  }
+  setImmediate(tick)
+  try {
+    await run()
+    sample()
+    return gap
+  } finally {
+    running = false
+  }
+}
+
+/**
+ * Styles read before any row is out: classifying number-format codes must
+ * not block the event loop for long, whatever the number of cell styles or
+ * the length of the codes. Without a per-format bound this work grew with
+ * the cell styles times the code length (seconds for a few KB file), or
+ * with the total length of the codes in one stretch after the parse.
+ * The bound is generous so a loaded machine doesn't fail it: these cases
+ * take 1-3 s in one stretch when the work isn't spread out, and a few ms
+ * per stretch when it is.
+ */
+const MAX_GAP_MS = 500
+const SERIAL = 45_000 // 2023-03-15
+
+const cellsOf = async (bytes: Uint8Array) => {
+  const wb = await Effect.runPromise(Xlsx.read(bytes))
+  const rows = Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, 0))))
+  return rows.flatMap((row) => row.cells.map((c) => Cell.value(c) instanceof Date))
+}
+
+describe("xlsx: number formats in the styles part", () => {
+  it("many cell styles sharing one long custom code don't block the event loop", async () => {
+    const XFS = 10_000
+    const long = "a".repeat(10_000)
+    // xf 0..XFS-1 use the long code; then a custom date, a built-in date and a built-in number
+    const xfs = [...Array.from({ length: XFS }, () => 164), 165, 14, 4]
+    const bytes = await xlsx({
+      sheets: [{
+        name: "S",
+        data: `<row r="1"><c r="A1" s="0"><v>${SERIAL}</v></c><c r="B1" s="${XFS - 1}"><v>${SERIAL}</v></c>` +
+          `<c r="C1" s="${XFS}"><v>${SERIAL}</v></c><c r="D1" s="${XFS + 1}"><v>${SERIAL}</v></c>` +
+          `<c r="E1" s="${XFS + 2}"><v>${SERIAL}</v></c></row>`
+      }],
+      numFmts: { 164: long, 165: "yyyy-mm-dd" },
+      xfs
+    })
+    let dates: Array<boolean> = []
+    const gap = await longestGap(async () => {
+      dates = await cellsOf(bytes)
+    })
+    expect(dates).toEqual([false, false, true, true, false])
+    expect(gap, `longest gap ${gap.toFixed(0)} ms`).toBeLessThan(MAX_GAP_MS)
+  }, 120_000)
+
+  it("many distinct long custom codes don't block the event loop", async () => {
+    // 256 codes of 250 000 characters: 64 MB of codes, under the inflate
+    // budget of a small file; even ids end in a date letter
+    const IDS = 256
+    const numFmts: Record<number, string> = {}
+    const filler = "a".repeat(250_000 - 1)
+    for (let k = 0; k < IDS; k++) numFmts[164 + k] = filler + (k % 2 === 0 ? "d" : "0")
+    const xfs = Array.from({ length: IDS }, (_, k) => 164 + k)
+    const cells = xfs.map((_, k) => `<c s="${k}"><v>${SERIAL}</v></c>`).join("")
+    const bytes = await xlsx({ sheets: [{ name: "S", data: `<row r="1">${cells}</row>` }], numFmts, xfs })
+    let dates: Array<boolean> = []
+    const gap = await longestGap(async () => {
+      dates = await cellsOf(bytes)
+    })
+    expect(dates).toEqual(xfs.map((_, k) => k % 2 === 0))
+    expect(gap, `longest gap ${gap.toFixed(0)} ms`).toBeLessThan(MAX_GAP_MS)
+  }, 120_000)
 })
