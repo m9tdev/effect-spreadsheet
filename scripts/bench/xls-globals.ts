@@ -6,7 +6,7 @@
  * `xf` (XF records), `format` (FORMAT records), `sst` (one SST of short
  * strings over CONTINUEs), `names` (NAME records) or `continue` (empty
  * CONTINUEs after an SST) or `xf-formats` (4 096 FORMATs with 8 000-character
- * codes and one XF per id, so the XF pass parses every code; megabytes is
+ * codes and one XF per id, so every code is classified; megabytes is
  * ignored). Limits that would stop the flood are lifted.
  */
 import { Effect, Exit } from "effect"
