@@ -34,14 +34,14 @@ import type * as Pull from "effect/Pull"
 import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
-import type { ColumnSpan, Range, Row, SheetDetails } from "../../Workbook.ts"
+import type { Row, SheetDetails } from "../../Workbook.ts"
 import { BOF_BIFF5_8, type BiffRecord, CONTINUE, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { decodeRk, ERROR_CODES, Fields } from "../binary.ts"
 import { WorkMeter } from "../meter.ts"
 import { numberCell } from "../numFmt.ts"
-import { mergeSpans } from "../sheet/layout.ts"
-import { compact } from "../sheet/rows.ts"
+import { LayoutBuilder } from "../sheet/layout.ts"
+import { HeldRows, NO_ROWS } from "../sheet/rows.ts"
 import { readString } from "./fields.ts"
 import type { Globals } from "./globals.ts"
 
@@ -203,28 +203,19 @@ export type FormulaWait =
 
 const IDLE: FormulaWait = { _tag: "Idle" }
 
-interface OpenRow {
-  cells: Array<Cell.Cell>
-  /** Columns came in increasing order so far. */
-  sorted: boolean
-  lastColumn: number
-}
-
 /**
- * Builds rows from cell records and the `RowScan`'s ROW records. Cells of a
- * row are gathered until the record holding its last cell is handled, then
- * rows are emitted in row order. Rows waiting for later cells hold only
- * cells already counted against `maxCellsPerSheet`.
+ * Builds rows from cell records and the `RowScan`'s ROW records, through
+ * the shared `HeldRows`. Cells of a row are gathered until the record
+ * holding its last cell is handled, then rows are emitted in row order.
+ * Rows waiting for later cells hold only cells already counted against
+ * `maxCellsPerSheet`.
  */
 export class Rows {
   /** Rows ready to emit; `out[outAt]` is the next one (see `take`). */
-  private out: Array<Row> = []
+  private out: ReadonlyArray<Row> = NO_ROWS
   private outAt = 0
-  /** Rows with cells, not emitted yet. */
-  private readonly open = new Map<number, OpenRow>()
-  /** The row the last cell went to (most cells follow the one before). */
-  private hotRow = -1
-  private hotEntry: OpenRow | undefined
+  /** The rows' cells, limits and compaction. */
+  private readonly rows: HeldRows
   /** Offset of each row's last cell record, -1 for a row with ROW records only (see `RowScan`). */
   private lastAt: ReadonlyMap<number, number> = new Map()
   /** Rows the scan placed, ascending; `order[nextRow]` is the next one to emit. */
@@ -238,33 +229,41 @@ export class Rows {
   /** Rows the scan didn't place, in row order (set by `end`); `left[leftAt]` is the next one. */
   private left: Uint32Array | undefined
   private leftAt = 0
-  private rowCount = 0
-  /** Cells read so far (repeats included): counted against maxCellsPerSheet. */
-  cellCount = 0
-  /** Cells in `open` rows: exactly those held, not emitted yet (see `HELD_CELLS`). */
-  held = 0
-  /**
-   * Cells read, cells sorted (compacting a row) and rows emitted: the
-   * work that a batch spends, up to `budget`. Emitting rows stops at the
-   * budget and goes on in the next batch.
-   */
-  effort = 0
+  /** Emitting rows stops once `effort` reaches it, and goes on in the next batch. */
   budget = Infinity
   /**
-   * Steps of its loops (cells, rows, queue and sort steps), and of the
-   * caller's record loop: the work meter's units, handed over by the
-   * caller once per batch.
+   * Steps of its loops (cells, rows, queue steps), and of the caller's
+   * record loop, since the work meter was last told (see `takeSteps`).
    */
   steps = 0
+  /** The rows' sorting work already handed to the work meter. */
+  private sortedTold = 0
   /** Depth of substreams nested in this one (embedded charts: BOF ... EOF). */
   nested = 0
   /** Whether a FORMULA waits for its text result in the next STRING record (see `handle`). */
   wait: FormulaWait = IDLE
 
-  private readonly context: SheetContext
-
   constructor(context: SheetContext) {
-    this.context = context
+    this.rows = new HeldRows(context.limits)
+  }
+
+  /** Cells in rows not emitted yet (see `HELD_CELLS`). */
+  get held(): number {
+    return this.rows.held
+  }
+
+  /** Cells read, cells sorted (compacting a row) and rows emitted: the work that a batch spends, up to `budget`. */
+  get effort(): number {
+    return this.rows.work
+  }
+
+  /** The steps since the last call, sorting steps included: the work meter's units. */
+  takeSteps(): number {
+    const sorted = this.rows.sorted
+    const steps = this.steps + sorted - this.sortedTold
+    this.sortedTold = sorted
+    this.steps = 0
+    return steps
   }
 
   /** Whether row `index` waits for its formula's STRING. */
@@ -283,40 +282,23 @@ export class Rows {
     this.nextAt = this.order.length > 0 ? lastAt.get(this.order[0]!)! : Infinity
   }
 
-  private push(index: number, hidden: boolean, cells: Array<Cell.Cell>): SpreadsheetError | undefined {
-    const limits = this.context.limits
-    if (index >= limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: index + 1 })
-    if (++this.rowCount > limits.maxRows) return new LimitExceeded({ limit: "maxRows", max: limits.maxRows, actual: this.rowCount })
-    this.out.push({ index, hidden, cells })
-    return undefined
-  }
-
   /** Emits row `index` with its cells, or without any if only ROW records declared it. */
   private finishRow(index: number): SpreadsheetError | undefined {
-    const entry = this.open.get(index)
-    if (entry === undefined) {
-      if (!this.declared.has(index)) return undefined
-      this.effort++
-      return this.push(index, this.hidden.has(index), [])
-    }
-    this.open.delete(index)
-    this.held -= entry.cells.length
-    if (this.hotRow === index) {
-      this.hotRow = -1
-      this.hotEntry = undefined
-    }
-    this.effort += entry.sorted ? 1 : 1 + entry.cells.length
-    if (!entry.sorted) this.steps += entry.cells.length
-    return this.push(index, this.hidden.has(index), entry.sorted ? entry.cells : compact(entry.cells))
+    if (!this.rows.has(index) && !this.declared.has(index)) return undefined
+    return this.rows.finishRow(index, this.hidden.has(index))
   }
 
   /** Whether rows wait to be taken. */
   queued(): boolean {
-    return this.outAt < this.out.length
+    return this.outAt < this.out.length || this.rows.ready
   }
 
   /** The next chunk of rows: at least one, at most `BATCH_RECORDS` rows or until `BATCH_CELLS` cells are passed. */
   take(): Arr.NonEmptyReadonlyArray<Row> {
+    if (this.outAt === this.out.length) {
+      this.out = this.rows.take()
+      this.outAt = 0
+    }
     const from = this.outAt
     let cells = 0
     // progress: outAt increases up to out.length
@@ -326,7 +308,7 @@ export class Rows {
     } while (this.outAt < this.out.length && this.outAt - from < BATCH_RECORDS && cells < BATCH_CELLS)
     const chunk = this.out.slice(from, this.outAt) as unknown as Arr.NonEmptyReadonlyArray<Row>
     if (this.outAt === this.out.length) {
-      this.out = []
+      this.out = NO_ROWS
       this.outAt = 0
     }
     return chunk
@@ -356,39 +338,10 @@ export class Rows {
     return this.nextRow < this.order.length && this.nextAt <= offset && !this.waiting(this.order[this.nextRow]!)
   }
 
+  /** Adds `cell` to row `row`. */
   cell(row: number, cell: Cell.Cell): SpreadsheetError | undefined {
     this.steps++
-    const limits = this.context.limits
-    if (cell.column >= limits.maxColumns) {
-      return new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: cell.column + 1 })
-    }
-    if (++this.cellCount > limits.maxCellsPerSheet) {
-      return new LimitExceeded({ limit: "maxCellsPerSheet", max: limits.maxCellsPerSheet, actual: this.cellCount })
-    }
-    let entry = this.hotRow === row ? this.hotEntry : this.open.get(row)
-    if (entry === undefined) {
-      entry = { cells: [], sorted: true, lastColumn: -1 }
-      this.open.set(row, entry)
-    }
-    this.hotRow = row
-    this.hotEntry = entry
-    if (cell.column <= entry.lastColumn) entry.sorted = false
-    entry.lastColumn = cell.column
-    entry.cells.push(cell)
-    this.held++
-    this.effort++
-    // repeated columns don't pile up: past 2 x maxColumns cells a row is
-    // compacted (to at most maxColumns), so the work is amortized
-    if (!entry.sorted && entry.cells.length > 2 * limits.maxColumns) {
-      this.effort += entry.cells.length
-      this.steps += entry.cells.length
-      this.held -= entry.cells.length
-      compact(entry.cells)
-      this.held += entry.cells.length
-      entry.sorted = true
-      entry.lastColumn = entry.cells[entry.cells.length - 1]!.column
-    }
-    return undefined
+    return this.rows.addCell(row, cell)
   }
 
   /**
@@ -398,7 +351,7 @@ export class Rows {
    */
   end(): SpreadsheetError | boolean {
     // rows the scan didn't place (none when both passes agree), in row order
-    const left = this.left ??= Uint32Array.from(this.open.keys()).sort()
+    const left = this.left ??= this.rows.indexes()
     // progress: leftAt increases up to left.length
     while (this.leftAt < left.length) {
       if (this.effort >= this.budget) return false
@@ -596,8 +549,7 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
     const maxStringBytes = stringMaxBytes(context.limits)
     /** Hands the steps of the last batch to the meter. */
     const report = Effect.sync(() => {
-      meter.add("steps", rows.steps)
-      rows.steps = 0
+      meter.add("steps", rows.takeSteps())
     })
     const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
       // progress: each iteration takes queued rows, or scans up to
@@ -707,10 +659,7 @@ const walkDetails = (context: SheetContext, walked: Walked, report: Effect.Effec
     const opened = openSubstream(context)
     if (!(opened instanceof RecordReader)) return yield* Effect.fail(opened)
     const { part, limits, globals } = context
-    const hidden: Array<ColumnSpan> = []
-    const merges: Array<Range> = []
-    let dimension: Range | undefined
-    let colInfos = 0
+    const layout = new LayoutBuilder(limits)
     let nested = 0
     // progress: every next() advances the reader
     for (let k = 1;; k++) {
@@ -736,20 +685,19 @@ const walkDetails = (context: SheetContext, walked: Walked, report: Effect.Effec
       if (record.type === DIMENSIONS) {
         const [r1, r2, c1, c2] = globals.biff8 ? [f.u32(0), f.u32(4), f.u16(8), f.u16(10)] : [f.u16(0), f.u16(2), f.u16(4), f.u16(6)]
         if (r1 !== undefined && r2 !== undefined && c1 !== undefined && c2 !== undefined && r2 > r1 && c2 > c1) {
-          dimension = { firstRow: r1, firstColumn: c1, lastRow: r2 - 1, lastColumn: c2 - 1 }
+          layout.dimension({ firstRow: r1, firstColumn: c1, lastRow: r2 - 1, lastColumn: c2 - 1 })
         }
       } else if (record.type === COLINFO) {
-        if (++colInfos > limits.maxColumns) {
-          return yield* Effect.fail(new LimitExceeded({ limit: "maxColumns", max: limits.maxColumns, actual: colInfos }))
-        }
+        const tooMany = layout.columnRecord()
+        if (tooMany !== undefined) return yield* Effect.fail(tooMany)
         const first = f.u16(0)
         const last = f.u16(2)
         const grbit = f.u16(8)
         if (first === undefined || last === undefined || grbit === undefined) {
           return yield* Effect.fail(malformed(part, "truncated COLINFO", record.offset))
         }
-        // spans starting past the last column are ignored, as in XLSX
-        if ((grbit & 0x01) !== 0 && last >= first && first < limits.maxColumns) hidden.push({ first, last: Math.min(last, limits.maxColumns - 1) })
+        // the part at or past maxColumns is dropped, as in XLSX
+        if ((grbit & 0x01) !== 0) layout.hideColumns(first, last)
       } else if (record.type === MERGECELLS) {
         const count = f.u16(0)
         if (count === undefined || 2 + 8 * count > record.data.length) {
@@ -757,15 +705,12 @@ const walkDetails = (context: SheetContext, walked: Walked, report: Effect.Effec
         }
         // progress: j up to count (bounded by the record length)
         for (let j = 0; j < count; j++) {
-          if (merges.length >= limits.maxCellsPerSheet) {
-            return yield* Effect.fail(new LimitExceeded({ limit: "maxCellsPerSheet", max: limits.maxCellsPerSheet, actual: merges.length + 1 }))
-          }
           const at = 2 + 8 * j
           const [r1, r2, c1, c2] = [f.u16(at)!, f.u16(at + 2)!, f.u16(at + 4)!, f.u16(at + 6)!]
-          merges.push({ firstRow: Math.min(r1, r2), firstColumn: Math.min(c1, c2), lastRow: Math.max(r1, r2), lastColumn: Math.max(c1, c2) })
+          const tooMany = layout.merge({ firstRow: Math.min(r1, r2), firstColumn: Math.min(c1, c2), lastRow: Math.max(r1, r2), lastColumn: Math.max(c1, c2) })
+          if (tooMany !== undefined) return yield* Effect.fail(tooMany)
         }
       }
     }
-    const details: SheetDetails = { hiddenColumns: mergeSpans(hidden), merges, ...(dimension === undefined ? {} : { dimension }) }
-    return details
+    return layout.result()
   })

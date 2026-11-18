@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { LayoutBuilder } from "../src/internal/sheet/layout.ts"
-import { type RowRules, RowBuilder } from "../src/internal/sheet/rows.ts"
+import { HeldRows, type RowRules, RowBuilder } from "../src/internal/sheet/rows.ts"
 import { MalformedFile } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 
@@ -149,6 +149,64 @@ describe("row builder", () => {
     expect(rows.closeRow()).toBeUndefined()
     expect(rows.held).toBe(0)
     expect(shape(rows)).toEqual([[0, false, [[0, 99], [1, 98], [2, 97], [3, 96]]]])
+  })
+})
+
+describe("held rows", () => {
+  const held = (rows: HeldRows) => rows.take().map((r) => [r.index, r.hidden, r.cells.map((c) => [c.column, Cell.value(c)])])
+
+  it("holds each row's cells until it is finished, in any row order; sorted, the last of a column kept", () => {
+    const rows = new HeldRows(limits())
+    expect(rows.addCell(5, Cell.number(2, 1))).toBeUndefined()
+    expect(rows.addCell(2, Cell.number(1, 2))).toBeUndefined()
+    expect(rows.addCell(5, Cell.number(0, 3))).toBeUndefined()
+    expect(rows.addCell(5, Cell.number(2, 4))).toBeUndefined()
+    expect(rows.held).toBe(4)
+    expect([rows.has(2), rows.has(3), rows.has(5)]).toEqual([true, false, true])
+    expect(Array.from(rows.indexes())).toEqual([2, 5])
+    expect(rows.ready).toBe(false)
+    expect(rows.finishRow(2, true)).toBeUndefined()
+    expect(rows.finishRow(3, false)).toBeUndefined()
+    expect(rows.held).toBe(3)
+    expect(rows.ready).toBe(true)
+    expect(rows.finishRow(5, false)).toBeUndefined()
+    expect(rows.held).toBe(0)
+    expect(held(rows)).toEqual([[2, true, [[1, 2]]], [3, false, []], [5, false, [[0, 3], [2, 4]]]])
+    expect(rows.ready).toBe(false)
+    expect(rows.take()).toEqual([])
+  })
+
+  it("a column at maxColumns and a cell past maxCellsPerSheet fail as they are added; a row at maxRows as it is finished", () => {
+    const rows = new HeldRows(limits({ maxRows: 10, maxColumns: 4, maxCellsPerSheet: 2 }))
+    expect(rows.addCell(0, Cell.number(4, 1))).toMatchObject({ _tag: "LimitExceeded", limit: "maxColumns", max: 4, actual: 5 })
+    expect(rows.addCell(0, Cell.number(0, 1))).toBeUndefined()
+    expect(rows.addCell(12, Cell.number(0, 2))).toBeUndefined()
+    expect(rows.addCell(1, Cell.number(0, 3))).toMatchObject({ _tag: "LimitExceeded", limit: "maxCellsPerSheet", max: 2, actual: 3 })
+    expect(rows.finishRow(0, false)).toBeUndefined()
+    expect(rows.finishRow(12, false)).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows", max: 10, actual: 13 })
+    expect(rows.take().map((r) => r.index)).toEqual([0])
+  })
+
+  it("a row repeating its columns holds at most 2 x maxColumns cells; the work counts cells, sorting and rows", () => {
+    const rows = new HeldRows(limits({ maxColumns: 4 }))
+    let most = 0
+    // progress: k up to 100
+    for (let k = 0; k < 100; k++) {
+      expect(rows.addCell(k % 2, Cell.number(3 - (k % 4), k))).toBeUndefined()
+      most = Math.max(most, rows.held)
+    }
+    // two rows, each compacted past 8 cells
+    expect(most).toBeLessThanOrEqual(2 * 8)
+    expect(rows.sorted).toBeGreaterThan(0)
+    expect(rows.work).toBe(100 + rows.sorted)
+    const sorted = rows.sorted
+    expect(rows.finishRow(0, false)).toBeUndefined()
+    expect(rows.finishRow(1, false)).toBeUndefined()
+    expect(rows.held).toBe(0)
+    expect(rows.work).toBe(100 + rows.sorted + 2)
+    // both rows were left unsorted, and were sorted when finished
+    expect(rows.sorted).toBeGreaterThan(sorted)
+    expect(held(rows)).toEqual([[0, false, [[1, 98], [3, 96]]], [1, false, [[0, 99], [2, 97]]]])
   })
 })
 

@@ -367,8 +367,8 @@ describe("xls sheet: rows whose cells come in several places", () => {
     const limits = { ...SpreadsheetLimits.defaults, maxColumns: 8 }
     const rows = new Rows({ limits } as unknown as SheetContext)
     rows.start(new Map([[0, 10_000], [1, 20_000]]))
-    const open = rows as unknown as { open: Map<number, { cells: Array<unknown> }> }
-    const heldNow = () => [...open.open.values()].reduce((n, r) => n + r.cells.length, 0)
+    const open = (rows as unknown as { rows: { rows: Map<number, { cells: Array<unknown> }> } }).rows.rows
+    const heldNow = () => [...open.values()].reduce((n, r) => n + r.cells.length, 0)
     // progress: k up to 100
     for (let k = 0; k < 100; k++) {
       expect(rows.cell(k % 2, Cell.number(7 - (k % 8), k))).toBeUndefined()
@@ -523,7 +523,7 @@ describe("xls sheet: repeated columns", () => {
     // 1 000 passes over columns 7..0 (unsorted): 8 000 cells for 8 columns
     for (let k = 0; k < 8000; k++) {
       expect(rows.cell(0, Cell.number(7 - (k % 8), k))).toBeUndefined()
-      most = Math.max(most, (rows as unknown as { open: Map<number, { cells: Array<unknown> }> }).open.get(0)!.cells.length)
+      most = Math.max(most, (rows as unknown as { rows: { rows: Map<number, { cells: Array<unknown> }> } }).rows.rows.get(0)!.cells.length)
     }
     expect(most).toBeLessThanOrEqual(2 * 8 + 1)
     expect(rows.end()).toBe(true)
