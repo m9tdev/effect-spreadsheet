@@ -16,8 +16,8 @@ import type { ColumnSpan, Range, SheetDetails } from "../../Workbook.ts"
 import { parseRange } from "../refs.ts"
 import { mergeSpans } from "../sheet.ts"
 import { parse } from "../xml/parse.ts"
-import type { XmlHandler } from "../xml/tokenizer.ts"
-import { attr, isTrue, malformed } from "./parts.ts"
+import { attr, type XmlHandler } from "../xml/tokenizer.ts"
+import { isTrue, malformed } from "./parts.ts"
 
 export const sheetDetails = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,

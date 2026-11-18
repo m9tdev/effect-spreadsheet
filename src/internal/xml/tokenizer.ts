@@ -46,6 +46,13 @@ import { type Meter, noMeter } from "../meter.ts"
 /** Attributes of a start tag: `[qualified name, decoded value]` pairs, in document order. */
 export type XmlAttributes = ReadonlyArray<readonly [string, string]>
 
+/** The value of attribute `name` (as written, e.g. `name`, `r:id`). */
+export const attr = (attributes: XmlAttributes, name: string): string | undefined => {
+  // progress: one attribute per iteration (bounded by maxXmlAttributes)
+  for (const [key, value] of attributes) if (key === name) return value
+  return undefined
+}
+
 /**
  * Receives tokens. Names are local names (any `prefix:` removed); attribute
  * names are kept as written (e.g. `r:id`). Consecutive `text` calls belong

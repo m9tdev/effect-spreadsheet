@@ -49,8 +49,8 @@ import { serialToDate } from "../numFmt.ts"
 import { parseCellRef } from "../refs.ts"
 import { compact, DONE, type PullState, READING } from "../sheet.ts"
 import { XmlDecoder } from "../xml/parse.ts"
-import { type XmlAttributes, type XmlHandler, XmlTokenizer } from "../xml/tokenizer.ts"
-import { attr, isTrue, malformed, RichText, type Styles, unescapeXstring } from "./parts.ts"
+import { attr, type XmlAttributes, type XmlHandler, XmlTokenizer } from "../xml/tokenizer.ts"
+import { isTrue, malformed, RichText, type Styles, unescapeXstring } from "./parts.ts"
 
 export interface SheetContext {
   readonly part: string

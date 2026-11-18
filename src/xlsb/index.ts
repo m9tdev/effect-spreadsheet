@@ -35,10 +35,10 @@
  * @since 0.1.0
  */
 import { Effect, Stream } from "effect"
+import { readRelationships, relationshipKind } from "../internal/opc.ts"
 import { sheetDetails, sheetRows } from "../internal/xlsb/sheet.ts"
 import { type CellStyles, NO_STYLES, readSharedStrings, readStyles } from "../internal/xlsb/parts.ts"
 import { definedNames, malformed, readExternalBooks, readWorkbookBin } from "../internal/xlsb/workbook.ts"
-import { readRelationships, relationshipKind } from "../internal/xlsx/parts.ts"
 import { open } from "../internal/zip/archive.ts"
 import { LimitExceeded, type SpreadsheetError } from "../SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../SpreadsheetLimits.ts"

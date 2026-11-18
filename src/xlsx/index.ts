@@ -33,16 +33,8 @@
  */
 import { Effect, Stream } from "effect"
 import { open } from "../internal/zip/archive.ts"
-import {
-  malformed,
-  NO_STYLES,
-  readRelationships,
-  readSharedStrings,
-  readStyles,
-  readWorkbookPart,
-  relationshipKind,
-  type Styles
-} from "../internal/xlsx/parts.ts"
+import { readRelationships, relationshipKind } from "../internal/opc.ts"
+import { malformed, NO_STYLES, readSharedStrings, readStyles, readWorkbookPart, type Styles } from "../internal/xlsx/parts.ts"
 import { sheetDetails } from "../internal/xlsx/details.ts"
 import { sheetRows } from "../internal/xlsx/sheet.ts"
 import { LimitExceeded, type SpreadsheetError } from "../SpreadsheetError.ts"
