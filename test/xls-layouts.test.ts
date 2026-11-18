@@ -188,3 +188,73 @@ describe("xls record layouts: globals records", () => {
     }
   })
 })
+
+describe("xls record layouts: strings with rich runs and a phonetic block", () => {
+  /**
+   * A BIFF8 XLUnicodeRichExtendedString with both formatting runs and a
+   * phonetic block (flags 0x0C): count, flags, cRun u16, cbExtRst u32, the
+   * 8-bit characters, 4 bytes per run, then the phonetic block.
+   */
+  const richPhonetic = (text: string, runs: number, phonetic: number) => [
+    ...X.u16(text.length), 0x0C, ...X.u16(runs), ...X.u32(phonetic),
+    ...Array.from(text, (c) => c.charCodeAt(0)), ...new Array(4 * runs).fill(0x11), ...new Array(phonetic).fill(0x22)
+  ]
+  const errorWith = async (book: X.TestBook, limits: LimitOverrides) => failureOf(await readExit(book, limits))
+  const dateCell = [X.row(0), X.number(0, 0, 1, 1)]
+
+  it("in a LABEL, FORMAT or STRING it reads whole, and is truncated when cut inside its runs or its phonetic block", async () => {
+    // cRun 2 and cbExtRst 3: the phonetic size sits after the run count, not at it
+    const string = richPhonetic("rich", 2, 3)
+    const header = 9
+    const charsEnd = header + 4
+    const runsEnd = charsEnd + 8
+    const label = X.record(0x0204, [...X.u16(0), ...X.u16(0), ...X.u16(0), ...string])
+    expect(await values(one([label]))).toEqual(["rich"])
+    // a date code with runs and a phonetic block: the cell is a Date only if the code is read
+    const code = richPhonetic("yyyy-mm-dd", 1, 2)
+    const format = X.record(0x041E, [...X.u16(164), ...code])
+    expect(await values(one(dateCell, [X.xf(0), X.xf(164), format]))).toEqual([new Date(Date.UTC(1900, 0, 1))])
+    // progress: k from the end of the code's characters up to its length
+    for (let k = header + 10; k < code.length; k++) {
+      expect(await values(one(dateCell, [X.xf(0), X.xf(164), cutTo(format, 2 + k)])), `FORMAT cut to ${k} code bytes (${k < header + 14 ? "runs" : "phonetic block"})`)
+        .toEqual([1])
+    }
+    const stringRecord = X.record(0x0207, string)
+    expect(await values(one([X.formula(0, 0, 0, { kind: 0 }), stringRecord]))).toEqual(["rich"])
+    // progress: k from the end of the characters up to the string's length (inside the runs, then the phonetic block)
+    for (let k = charsEnd; k < string.length; k++) {
+      const where = k < runsEnd ? "runs" : "phonetic block"
+      expect(await errorOf(one([cutTo(label, 6 + k)])), `LABEL cut to ${k} string bytes (${where})`)
+        .toMatchObject({ _tag: "MalformedFile", reason: "truncated record 0x204" })
+      expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), cutTo(stringRecord, k)])), `STRING cut to ${k} bytes (${where})`)
+        .toMatchObject({ _tag: "MalformedFile", reason: "truncated record 0x207" })
+    }
+  })
+
+  it("a header cut inside its run or phonetic sizes is truncated, even when its count is over maxStringLength", async () => {
+    const limits = { maxStringLength: 10 }
+    // count 50 (over the limit), then flags and as many size bytes as the cut leaves
+    const cases: ReadonlyArray<readonly [number, number]> = [[0x08, 2], [0x04, 4], [0x0C, 6]]
+    // progress: one flags value per iteration
+    for (const [flags, sizes] of cases) {
+      const head = [...X.u16(50), flags, ...new Array(sizes).fill(1)]
+      // the whole header: the count is checked, LimitExceeded with it
+      const sstWhole = X.record(0x00FC, [...X.u32(2), ...X.u32(2), ...X.xlString("a"), ...head])
+      expect(await errorWith(one([X.labelSst(0, 0, 0, 0)], [sstWhole]), limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 50 })
+      expect(await errorWith(one([X.record(0x0204, [...X.u16(0), ...X.u16(0), ...X.u16(0), ...head])]), limits))
+        .toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 50 })
+      // progress: j up to the size bytes
+      for (let j = 0; j < sizes; j++) {
+        const cut = head.slice(0, 3 + j)
+        const label = `flags 0x${flags.toString(16)}, ${j} of ${sizes} size bytes`
+        // the SST ends there: the strings before it are kept
+        const sst = X.record(0x00FC, [...X.u32(2), ...X.u32(2), ...X.xlString("a"), ...cut])
+        expect(await errorWith(one([X.labelSst(0, 0, 0, 0)], [sst]), limits), `SST, ${label}`).toBeUndefined()
+        expect(await errorWith(one([X.record(0x0204, [...X.u16(0), ...X.u16(0), ...X.u16(0), ...cut])]), limits), `LABEL, ${label}`)
+          .toMatchObject({ _tag: "MalformedFile", reason: "truncated record 0x204" })
+        expect(await errorWith(one(dateCell, [X.xf(0), X.xf(164), X.record(0x041E, [...X.u16(164), ...cut])]), limits), `FORMAT, ${label}`)
+          .toBeUndefined()
+      }
+    }
+  })
+})

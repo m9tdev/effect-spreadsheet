@@ -220,7 +220,8 @@ class RowScan {
         }
         this.nested--
       } else if (this.nested === 0) {
-        // a record too short for its row is reported by the main pass
+        // a cell or ROW record too short for its row is reported by the
+        // main pass; any other record isn't read here
         const f = this.fields.fixed(record.data, ROW_FIELD_MIN)
         if (f === undefined) continue
         const row = f.u16(0)
