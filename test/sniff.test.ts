@@ -113,10 +113,13 @@ describe("format detection", () => {
     assert.strictEqual(await formatOf(enc("<?xml version=\"1.0\"?><foo/>")), "xml")
   })
 
-  it("raw BIFF needs a real BOF: UTF-16LE text starting with tabs is CSV", async () => {
+  it("raw BIFF needs a real BOF; UTF-16LE text starting with a tab is CSV after a BOM, a broken BIFF2 BOF without", async () => {
     const utf16le = (text: string) => new Uint8Array([...text].flatMap((c) => [c.charCodeAt(0), 0]))
-    assert.strictEqual(await formatOf(utf16le("\t\tname\tx\n1\t2\t3\n")), "csv")
-    assert.strictEqual(await formatOf(utf16le("\t\na\tb\n")), "csv")
+    const bom = (bytes: Uint8Array) => new Uint8Array([0xFF, 0xFE, ...bytes])
+    assert.strictEqual(await formatOf(bom(utf16le("\t\tname\tx\n1\t2\t3\n"))), "csv")
+    assert.strictEqual(await formatOf(bom(utf16le("\t\na\tb\n"))), "csv")
+    assert.strictEqual(await formatOf(utf16le("name\t\tx\n1\t2\t3\n")), "csv")
+    assert.strictEqual(String(await formatOf(utf16le("\t\na\tb\n"))).includes("MalformedFile"), true)
     // BIFF8 BOF: length 16, version 0x0600, workbook globals; BIFF5: length 8, version 0x0500
     assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x08, 0x10, 0x00, 0x00, 0x06, 0x05, 0x00, ...new Uint8Array(12)])), "xls")
     assert.strictEqual(await formatOf(new Uint8Array([0x09, 0x08, 0x08, 0x00, 0x00, 0x05, 0x10, 0x00, ...new Uint8Array(8)])), "xls")
