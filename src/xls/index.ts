@@ -73,22 +73,24 @@ const workbookStream = (
   bytes: Uint8Array,
   limits: SpreadsheetLimits.Limits,
   meter: Meter
-): Result.Result<Uint8Array, SpreadsheetError> =>
-  Result.gen(function*() {
-    if (CFB_MAGIC.every((b, k) => bytes[k] === b)) {
-      const cfb = yield* openCfb(bytes, limits, meter)
-      const entry = cfb.find("Workbook") ?? cfb.find("Book")
-      if (entry === undefined || entry.type !== "stream") {
-        if (cfb.find("EncryptedPackage") !== undefined) return yield* Result.fail(new Encrypted({ format: "xlsx" }))
-        return yield* Result.fail(new UnsupportedFormat({ format: "cfb", reason: "compound file without a Workbook or Book stream" }))
-      }
-      const stream = yield* cfb.read(entry)
-      return yield* notOldBiff(stream)
+): Result.Result<Uint8Array, SpreadsheetError> => {
+  if (CFB_MAGIC.every((b, k) => bytes[k] === b)) {
+    const opened = openCfb(bytes, limits, meter)
+    if (Result.isFailure(opened)) return Result.fail(opened.failure)
+    const cfb = opened.success
+    const entry = cfb.find("Workbook") ?? cfb.find("Book")
+    if (entry === undefined || entry.type !== "stream") {
+      if (cfb.find("EncryptedPackage") !== undefined) return Result.fail(new Encrypted({ format: "xlsx" }))
+      return Result.fail(new UnsupportedFormat({ format: "cfb", reason: "compound file without a Workbook or Book stream" }))
     }
-    yield* notOldBiff(bytes)
-    if (bytes.length >= 2 && (bytes[0]! | (bytes[1]! << 8)) === 0x0809) return bytes // a bare BIFF5/8 workbook stream
-    return yield* Result.fail(new MalformedFile({ format: "xls", reason: "neither a compound file nor a BIFF stream" }))
-  })
+    const stream = cfb.read(entry)
+    return Result.isFailure(stream) ? stream : notOldBiff(stream.success)
+  }
+  const old = notOldBiff(bytes)
+  if (Result.isFailure(old)) return old
+  if (bytes.length >= 2 && (bytes[0]! | (bytes[1]! << 8)) === 0x0809) return old // a bare BIFF5/8 workbook stream
+  return Result.fail(new MalformedFile({ format: "xls", reason: "neither a compound file nor a BIFF stream" }))
+}
 
 /**
  * Opens an XLS workbook from its bytes.

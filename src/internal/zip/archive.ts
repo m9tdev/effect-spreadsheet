@@ -122,18 +122,21 @@ export const open = (
   bytes: Uint8Array,
   limits: Limits,
   inflate: InflateRaw = inflateRawWeb
-): Result.Result<Archive, MalformedFile | LimitExceeded> =>
-  Result.gen(function*() {
-    const directory = yield* readDirectory(bytes, limits)
-    const byName = new Map<string, ZipEntry>()
-    // progress: one entry per iteration
-    for (const entry of directory.entries) {
-      const key = normalizeName(entry.name)
-      if (byName.has(key)) return yield* fail("duplicate entry name", entry.name, entry.localOffset)
-      byName.set(key, entry)
-    }
-    return archive(bytes, limits, inflate, directory.entries, byName, yield* locate(bytes, directory))
-  })
+): Result.Result<Archive, MalformedFile | LimitExceeded> => {
+  const read = readDirectory(bytes, limits)
+  if (Result.isFailure(read)) return Result.fail(read.failure)
+  const directory = read.success
+  const byName = new Map<string, ZipEntry>()
+  // progress: one entry per iteration
+  for (const entry of directory.entries) {
+    const key = normalizeName(entry.name)
+    if (byName.has(key)) return fail("duplicate entry name", entry.name, entry.localOffset)
+    byName.set(key, entry)
+  }
+  const located = locate(bytes, directory)
+  if (Result.isFailure(located)) return Result.fail(located.failure)
+  return Result.succeed(archive(bytes, limits, inflate, directory.entries, byName, located.success))
+}
 
 /** The archive over entries `open` has checked and located. */
 const archive = (

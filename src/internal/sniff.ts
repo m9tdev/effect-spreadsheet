@@ -37,8 +37,10 @@ const ZIP_MAGICS: ReadonlyArray<ReadonlyArray<number>> = [
 const CFB_MAGIC = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 const ODS_MIME = "application/vnd.oasis.opendocument.spreadsheet"
 
-const detectZip = (bytes: Uint8Array, limits: Limits): Result.Result<Format, MalformedFile | LimitExceeded> =>
-  Result.map(readDirectory(bytes, limits), (directory) => zipFormat(bytes, directory.entries))
+const detectZip = (bytes: Uint8Array, limits: Limits): Result.Result<Format, MalformedFile | LimitExceeded> => {
+  const directory = readDirectory(bytes, limits)
+  return Result.isFailure(directory) ? Result.fail(directory.failure) : Result.succeed(zipFormat(bytes, directory.success.entries))
+}
 
 /** What a zip archive holds, from its entry names (and an ODF `mimetype`). */
 const zipFormat = (bytes: Uint8Array, entries: ReadonlyArray<ZipEntry>): Format => {
@@ -122,10 +124,10 @@ export const detect = (bytes: Uint8Array, limits: Limits): Result.Result<Format,
   if (bytes.length === 0) return Result.succeed("csv")
   if (startsWith(bytes, CFB_MAGIC)) {
     // a compound file: an .xls if it has a workbook stream (BIFF8 or BIFF5)
-    return Result.map(openCfb(bytes, limits), (cfb): Format => {
-      const entry = cfb.find("Workbook") ?? cfb.find("Book")
-      return entry !== undefined && entry.type === "stream" ? "xls" : "cfb"
-    })
+    const cfb = openCfb(bytes, limits)
+    if (Result.isFailure(cfb)) return Result.fail(cfb.failure)
+    const entry = cfb.success.find("Workbook") ?? cfb.success.find("Book")
+    return Result.succeed(entry !== undefined && entry.type === "stream" ? "xls" : "cfb")
   }
   if (ZIP_MAGICS.some((magic) => startsWith(bytes, magic))) {
     return detectZip(bytes, limits)
