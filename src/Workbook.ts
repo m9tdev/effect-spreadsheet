@@ -188,6 +188,7 @@ export const RowsSource: unique symbol = Symbol.for("effect-spreadsheet/Workbook
 export interface Workbook {
   /** The format the workbook was read from, e.g. `"csv"`, `"xlsx"`. */
   readonly format: Format
+  /** In workbook order. Names are unique without case: readers rename a later duplicate (`Name (2)`) and name a nameless sheet (`Sheet<n>`). */
   readonly sheets: ReadonlyArray<SheetInfo>
   /** Defined names (metadata only; empty for formats without them). */
   readonly definedNames: ReadonlyArray<DefinedName>

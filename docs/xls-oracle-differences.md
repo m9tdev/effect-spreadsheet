@@ -47,6 +47,7 @@ These are the intended differences:
 | BLANK / MULBLANK cells (styled blanks) | `Empty` cells | no cell (`sheetStubs: false`) |
 | one bad record in a sheet (truncated, a shared string out of range, a MULRK whose count doesn't match its columns) | the sheet's rows fail with `MalformedFile` at that record | a value for the cell |
 | code pages `TextDecoder` doesn't know (DOS 437, 850, ..., and 28602, which isn't a real ISO-8859 part) for BIFF5 strings | decoded as windows-1252 | its own code-page tables |
+| sheets with the same name (also differing only in case) | every sheet is read; a later sheet with the same name in any case is reported as `Name (2)` (or the next free `Name (n)`), and defined names refer to it by that name; see the README | keeps duplicate names, and both name one sheet's cells (names differing only in case stay apart) |
 | built-in number format 14 | `numFmt: "mm-dd-yy"` (as ECMA-376 lists it) | `z: "m/d/yy"` |
 | formatted text (`w`) | not produced | `w` |
 

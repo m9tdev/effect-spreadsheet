@@ -35,6 +35,15 @@ A `Row` is `{ index, hidden, cells }`; each cell is a tagged object
 (`Empty | Text | Number | Boolean | Date | Error`) with its own `column`, plus
 `formula` / `numFmt` when the file has them.
 
+Sheet names are unique in a workbook, compared without case (as Excel compares them, and as
+`Workbook.rows` and `Workbook.sheetDetails` look a name up), so every sheet can be found by
+name. Files that break this keep all their sheets: the first sheet with a name keeps it, and a
+later sheet with the same name in any case (in XLSX also after `_xHHHH_` decoding: `A` and
+`_x0041_`) becomes `Name (2)`, or the first of `Name (3)`, `Name (4)`, ... that no other sheet
+has. An XLSX sheet without a `name` becomes `Sheet<n>`, `n` its position (from 1), or the next
+`Sheet<n>` that no other sheet has. Defined names keep their `scope` index; XLS and XLSB
+defined names refer to a renamed sheet by its new name (XLSX formula text is kept as stored).
+
 Errors: `UnsupportedFormat { format, reason }`, `MalformedFile { format, part?, offset?, reason }`,
 `LimitExceeded { limit, max, actual }`, `Encrypted { format }`, `SheetNotFound { sheet }`,
 `InvalidOption { option, reason }` (e.g. a bad delimiter, encoding label or records header).

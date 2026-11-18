@@ -255,6 +255,45 @@ describe("xlsx: cells and rows", () => {
   })
 })
 
+describe("xlsx: duplicate and missing sheet names", () => {
+  const cell = (v: number) => `<row r="1"><c r="A1"><v>${v}</v></c></row>`
+  const rowsOf = async (wb: Workbook.Workbook, sheet: string | number) =>
+    values(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, sheet)))))
+
+  it("a sheet without a name gets the first Sheet<n>, from its position on, that no other sheet has in any case", async () => {
+    const { wb } = await readOk({
+      sheets: [{ name: "", data: cell(1) }, { name: "", data: cell(2) }, { name: "", data: cell(3) }, { name: "", data: cell(4) }],
+      workbookXml: `<sheets><sheet sheetId="1" r:id="rId1"/><sheet name="Sheet1" sheetId="2" r:id="rId2"/>` +
+        `<sheet name="SHEET2" sheetId="3" r:id="rId3"/><sheet sheetId="4" r:id="rId4"/></sheets>`
+    })
+    expect(wb.sheets.map((s) => s.name)).toEqual(["Sheet3", "Sheet1", "SHEET2", "Sheet4"])
+    expect(await rowsOf(wb, "Sheet1")).toEqual([[0, false, [[0, "Number", 2]]]])
+    expect(await rowsOf(wb, "Sheet3")).toEqual([[0, false, [[0, "Number", 1]]]])
+  })
+
+  it("a later sheet with the same name gets a suffix; visibility, details and scoped names stay with their sheet", async () => {
+    const hiddenColumn = sheetXml(cell(2)).replace("<sheetData>", `<cols><col min="2" max="2" hidden="1"/></cols><sheetData>`)
+    const { wb } = await readOk({
+      sheets: [{ name: "A", data: cell(1) }, { name: "A", raw: hiddenColumn, state: "hidden" }],
+      definedNames: `<definedName name="N" localSheetId="1">A!$A$1</definedName>`
+    })
+    expect(wb.sheets).toEqual([{ name: "A", index: 0, visibility: "visible" }, { name: "A (2)", index: 1, visibility: "hidden" }])
+    expect(wb.definedNames).toEqual([{ name: "N", formula: "A!$A$1", hidden: false, scope: 1 }])
+    expect(await rowsOf(wb, "A")).toEqual([[0, false, [[0, "Number", 1]]]])
+    expect(await rowsOf(wb, "A (2)")).toEqual([[0, false, [[0, "Number", 2]]]])
+    expect(await rowsOf(wb, "a (2)")).toEqual([[0, false, [[0, "Number", 2]]]])
+    expect((await Effect.runPromise(Workbook.sheetDetails(wb, "A (2)"))).hiddenColumns).toEqual([{ first: 1, last: 1 }])
+    expect((await Effect.runPromise(Workbook.sheetDetails(wb, "A"))).hiddenColumns).toEqual([])
+  })
+
+  it("names are compared without case and after _xHHHH_ decoding, and a suffix skips names other sheets have", async () => {
+    const names = ["Sheet1", "sheet1", "A", "_x0041_", "a (2)", "A"]
+    const { wb } = await readOk({ sheets: names.map((name, k) => ({ name, data: cell(k) })) })
+    expect(wb.sheets.map((s) => s.name)).toEqual(["Sheet1", "sheet1 (2)", "A", "A (3)", "a (2)", "A (4)"])
+    for (const [k, s] of wb.sheets.entries()) expect(await rowsOf(wb, s.name), s.name).toEqual([[0, false, [[0, "Number", k]]]])
+  })
+})
+
 describe("xlsx: row order", () => {
   const sheet = (data: string): TestWorkbook => ({ sheets: [{ name: "S", data }] })
   const malformedAt = (reason: string) => ({ _tag: "MalformedFile", format: "xlsx", reason })

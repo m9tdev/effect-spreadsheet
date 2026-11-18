@@ -21,6 +21,7 @@ import type { DefinedName } from "../../Workbook.ts"
 import { type BiffRecord, BOF_BIFF5_8, EOF, type Gathering, RecordReader, readBof } from "../biff/records.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
+import { uniqueSheetNames } from "../sheetNames.ts"
 import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
 import { codepageLabel, Fields, readString, type Text, textDecoder } from "./fields.ts"
 import { BATCH_CELLS, BATCH_RECORDS } from "./sheet.ts"
@@ -539,7 +540,8 @@ class GlobalsWalk {
 /**
  * Reads the globals of a workbook stream (its first substream), in batches
  * of bounded work with a yield to the event loop between them, and so are
- * its number formats and defined names.
+ * its number formats and defined names. Sheet names are made unique
+ * (`uniqueSheetNames`).
  */
 export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<Globals, SpreadsheetError> =>
   Effect.gen(function*() {
@@ -554,7 +556,8 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
       if (outcome !== "more") return yield* Effect.fail(outcome)
     }
     const { sheets, xtis, books, custom } = walk
-    const ended = sheetEnds(stream, walk.reader.offset, sheets, walk.modules)
+    const unique = uniqueSheetNames(sheets.map((s) => s.name))
+    const ended = sheetEnds(stream, walk.reader.offset, sheets.map((s, k) => ({ ...s, name: unique[k]! })), walk.modules)
     if (ended instanceof MalformedFile) return yield* Effect.fail(ended)
 
     // one NumberFormat per format id, not per XF (an id's code is parsed once)

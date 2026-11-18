@@ -544,6 +544,39 @@ describe("xlsb defined names", () => {
   })
 })
 
+describe("xlsb duplicate sheet names", () => {
+  it("a later sheet with the same name, in any case, gets a suffix; rows, details and defined names stay with their sheet", async () => {
+    const part = (v: number, hiddenColumn = false) =>
+      B.sheetBin([B.rowHdr(0), B.real(0, v)], { before: hiddenColumn ? [B.beginColInfos(), B.colInfo(1, 1, true), B.endColInfos()] : [] })
+    const { wb, sheets, details } = await readOk({
+      sheets: [{ name: "A", part: part(1) }, { name: "A", part: part(2, true), state: 1 }, { name: "Data", part: part(3) }, { name: "DATA", part: part(4) }],
+      globals: [
+        B.supSelf(),
+        B.externSheet([[0, 1, 1], [0, 3, 3]]),
+        B.name("First", B.ref3d(0, 0, 0), { itab: 1 }),
+        B.name("Second", B.ref3d(1, 0, 0))
+      ]
+    })
+    expect(wb.sheets).toEqual([
+      { name: "A", index: 0, visibility: "visible" },
+      { name: "A (2)", index: 1, visibility: "hidden" },
+      { name: "Data", index: 2, visibility: "visible" },
+      { name: "DATA (2)", index: 3, visibility: "visible" }
+    ])
+    expect(wb.definedNames).toEqual([
+      { name: "First", formula: "'A (2)'!$A$1", scope: 1, hidden: false },
+      { name: "Second", formula: "'DATA (2)'!$A$1", hidden: false }
+    ])
+    expect(sheets.map(values)).toEqual([1, 2, 3, 4].map((v) => [[0, false, [[0, "Number", v]]]]))
+    expect(details[1]!.hiddenColumns).toEqual([{ first: 1, last: 1 }])
+    for (const [k, s] of wb.sheets.entries()) {
+      expect(values(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, s.name))))), s.name)
+        .toEqual([[0, false, [[0, "Number", k + 1]]]])
+    }
+    expect((await Effect.runPromise(Workbook.sheetDetails(wb, "A (2)"))).hiddenColumns).toEqual([{ first: 1, last: 1 }])
+  })
+})
+
 describe("xlsb limits and malformed input", () => {
   it("row and column indexes, rows, cells and strings are limited", async () => {
     expect(await errorOf(one([B.rowHdr(10)]), { maxRows: 10 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows", actual: 11 })
