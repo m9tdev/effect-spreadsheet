@@ -47,7 +47,7 @@ import { type Biff12Record, readRecords, RecordSplitter } from "../biff12/record
 import { WorkMeter } from "../meter.ts"
 import { decodeRk, ERROR_CODES } from "../xls/fields.ts"
 import { mergeSpans } from "../xlsx/details.ts"
-import { serialToDate } from "../xlsx/numFmt.ts"
+import { serialToDate } from "../numFmt.ts"
 import { compact, DONE, type PullState, READING } from "../xlsx/sheet.ts"
 import type { CellStyles } from "./parts.ts"
 import { malformed, tooLong } from "./workbook.ts"

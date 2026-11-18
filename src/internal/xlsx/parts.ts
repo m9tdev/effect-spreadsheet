@@ -14,7 +14,7 @@ import { parse } from "../xml/parse.ts"
 import type { XmlAttributes, XmlHandler } from "../xml/tokenizer.ts"
 import type { Archive } from "../zip/archive.ts"
 import type { ZipEntry } from "../zip/directory.ts"
-import { builtinFormat, isDateCode, type NumberFormat } from "./numFmt.ts"
+import { builtinFormat, isDateCode, type NumberFormat } from "../numFmt.ts"
 
 export const malformed = (reason: string, part?: string) =>
   new MalformedFile({ format: "xlsx", reason, ...(part === undefined ? {} : { part }) })

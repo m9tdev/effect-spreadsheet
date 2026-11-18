@@ -47,9 +47,9 @@ import type { Row } from "../../Workbook.ts"
 import { WorkMeter } from "../meter.ts"
 import { XmlDecoder } from "../xml/parse.ts"
 import { type XmlAttributes, type XmlHandler, XmlTokenizer } from "../xml/tokenizer.ts"
-import { serialToDate } from "./numFmt.ts"
+import { serialToDate } from "../numFmt.ts"
 import { attr, isTrue, malformed, RichText, type Styles, unescapeXstring } from "./parts.ts"
-import { parseCellRef } from "./refs.ts"
+import { parseCellRef } from "../refs.ts"
 
 export interface SheetContext {
   readonly part: string

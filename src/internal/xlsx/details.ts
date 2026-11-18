@@ -16,7 +16,7 @@ import type { ColumnSpan, Range, SheetDetails } from "../../Workbook.ts"
 import { parse } from "../xml/parse.ts"
 import type { XmlHandler } from "../xml/tokenizer.ts"
 import { attr, isTrue, malformed } from "./parts.ts"
-import { parseRange } from "./refs.ts"
+import { parseRange } from "../refs.ts"
 
 /** Sorts spans and merges overlapping or adjacent ones. */
 export const mergeSpans = (spans: ReadonlyArray<ColumnSpan>): Array<ColumnSpan> => {

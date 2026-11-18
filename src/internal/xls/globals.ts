@@ -23,7 +23,7 @@ import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { WorkMeter } from "../meter.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
-import { formatFor, type NumberFormat } from "../xlsx/numFmt.ts"
+import { formatFor, type NumberFormat } from "../numFmt.ts"
 import { codepageLabel, Fields, readString, type Text, textDecoder } from "./fields.ts"
 import { BATCH_CELLS, BATCH_RECORDS } from "./sheet.ts"
 
