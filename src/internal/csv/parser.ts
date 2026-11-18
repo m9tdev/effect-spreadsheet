@@ -17,6 +17,7 @@
  * @internal
  */
 import { absurd } from "effect/Function"
+import * as Result from "effect/Result"
 import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
@@ -75,26 +76,26 @@ export class CsvParser {
   }
 
   /**
-   * Feeds a piece of text; `final` marks the end of input. Returns the rows
-   * completed by this piece, or the error that stopped parsing. If the
-   * piece completed rows before the error, those rows are returned first;
-   * the error is then in `error` and returned by the next call. After the
-   * final piece, later calls return no rows.
+   * Feeds a piece of text; `final` marks the end of input. Succeeds with the
+   * rows completed by this piece, or fails with the error that stopped
+   * parsing. If the piece completed rows before the error, those rows come
+   * first; the error is then in `error` and is the failure of the next
+   * call. After the final piece, later calls give no rows.
    */
-  feed(text: string, final: boolean): Array<Row> | SpreadsheetError {
+  feed(text: string, final: boolean): Result.Result<Array<Row>, SpreadsheetError> {
     const phase = this.phase
     switch (phase._tag) {
       case "Failed":
-        return phase.error
+        return Result.fail(phase.error)
       case "Done":
-        return []
+        return Result.succeed([])
       case "Sniffing": {
         const pending = phase.pending + text
         // collect one character past the sample, so that a sample that is
         // the whole text is known to be whole even before the final piece
         if (pending.length <= SNIFF_CHARS && !final) {
           this.phase = { _tag: "Sniffing", pending }
-          return []
+          return Result.succeed([])
         }
         const tokenizer = this.sniff(pending, final && pending.length <= SNIFF_CHARS)
         this.phase = { _tag: "Parsing", tokenizer }
@@ -112,15 +113,19 @@ export class CsvParser {
    * any): ends the input on `final`, takes the completed rows and moves to
    * Done or Failed. The tokenizer is not used again after an error.
    */
-  private step(tokenizer: Tokenizer, parsed: SpreadsheetError | undefined, final: boolean): Array<Row> | SpreadsheetError {
+  private step(
+    tokenizer: Tokenizer,
+    parsed: SpreadsheetError | undefined,
+    final: boolean
+  ): Result.Result<Array<Row>, SpreadsheetError> {
     const error = parsed ?? (final ? tokenizer.finish() : undefined)
     const rows = tokenizer.takeRows()
     if (error !== undefined) {
       this.phase = { _tag: "Failed", error }
-      return rows.length === 0 ? error : rows
+      return rows.length === 0 ? Result.fail(error) : Result.succeed(rows)
     }
     if (final) this.phase = { _tag: "Done" }
-    return rows
+    return Result.succeed(rows)
   }
 
   /**

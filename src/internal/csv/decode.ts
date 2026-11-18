@@ -6,6 +6,7 @@
  * @internal
  */
 import { absurd } from "effect/Function"
+import * as Result from "effect/Result"
 import { InvalidOption } from "../../SpreadsheetError.ts"
 
 /** Bytes buffered before deciding the encoding in `"auto"` mode. */
@@ -115,42 +116,44 @@ export class ByteDecoder {
     this.requested = requested
   }
 
-  /** Decodes a chunk. Returns the text available so far, or an error. */
-  push(bytes: Uint8Array): string | InvalidOption {
+  /** Decodes a chunk. Succeeds with the text available so far, or fails. */
+  push(bytes: Uint8Array): Result.Result<string, InvalidOption> {
     const phase = this.phase
     switch (phase._tag) {
       case "Detecting": {
         phase.head.push(bytes)
         phase.bytes += bytes.length
-        if (phase.bytes < (this.requested === "auto" ? DETECT_BYTES : 3)) return ""
+        if (phase.bytes < (this.requested === "auto" ? DETECT_BYTES : 3)) return Result.succeed("")
         const head = concat(phase.head, phase.bytes)
         const next = this.phase = decide(this.requested, head, false)
-        return next._tag === "Decoding" ? next.decoder.decode(head, { stream: true }) : next.error
+        return next._tag === "Decoding"
+          ? Result.succeed(next.decoder.decode(head, { stream: true }))
+          : Result.fail(next.error)
       }
       case "Decoding":
-        return phase.decoder.decode(bytes, { stream: true })
+        return Result.succeed(phase.decoder.decode(bytes, { stream: true }))
       case "Failed":
-        return phase.error
+        return Result.fail(phase.error)
       default:
         return absurd(phase)
     }
   }
 
   /** Flushes at end of input (an incomplete trailing sequence becomes U+FFFD). */
-  end(): string | InvalidOption {
+  end(): Result.Result<string, InvalidOption> {
     const phase = this.phase
     switch (phase._tag) {
       case "Detecting": {
         const head = concat(phase.head, phase.bytes)
         const next = this.phase = decide(this.requested, head, true)
         return next._tag === "Decoding"
-          ? next.decoder.decode(head, { stream: true }) + next.decoder.decode()
-          : next.error
+          ? Result.succeed(next.decoder.decode(head, { stream: true }) + next.decoder.decode())
+          : Result.fail(next.error)
       }
       case "Decoding":
-        return phase.decoder.decode()
+        return Result.succeed(phase.decoder.decode())
       case "Failed":
-        return phase.error
+        return Result.fail(phase.error)
       default:
         return absurd(phase)
     }

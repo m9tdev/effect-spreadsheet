@@ -1,4 +1,5 @@
 import { assert, describe, it } from "@effect/vitest"
+import * as Result from "effect/Result"
 import * as Cell from "../src/Cell.ts"
 import { CsvParser } from "../src/internal/csv/parser.ts"
 import { SNIFF_CHARS } from "../src/internal/csv/sniff.ts"
@@ -21,18 +22,25 @@ const aoa = (rows: ReadonlyArray<Row>): Array<Array<unknown>> =>
     return Array.from(out)
   })
 
-const isError = (r: Array<Row> | SpreadsheetError): r is SpreadsheetError => !Array.isArray(r)
+type Fed = Result.Result<Array<Row>, SpreadsheetError>
 
 /** The rows of a feed that must not fail. */
-const rowsOf = (r: Array<Row> | SpreadsheetError): Array<Row> => {
-  if (isError(r)) return assert.fail(`unexpected ${r._tag}`)
-  return r
+const rowsOf = (r: Fed): Array<Row> => {
+  if (Result.isFailure(r)) return assert.fail(`unexpected ${r.failure._tag}`)
+  return r.success
+}
+
+/** The error of a feed that must fail. */
+const errorOf = (r: Fed): SpreadsheetError => {
+  if (Result.isSuccess(r)) return assert.fail("expected an error")
+  return r.failure
 }
 
 /** The offset of a MalformedFile error, from a feed that must fail. */
-const malformedOffset = (r: Array<Row> | SpreadsheetError): number | undefined => {
-  if (!isError(r) || r._tag !== "MalformedFile") return assert.fail("expected a MalformedFile error")
-  return r.offset
+const malformedOffset = (r: Fed): number | undefined => {
+  const error = errorOf(r)
+  if (error._tag !== "MalformedFile") return assert.fail("expected a MalformedFile error")
+  return error.offset
 }
 
 /**
@@ -44,8 +52,8 @@ const feedAll = (pieces: ReadonlyArray<string>, options: { delimiter?: string; s
   const rows: Array<Row> = []
   for (let k = 0; k < pieces.length; k++) {
     const r = p.feed(pieces[k]!, k === pieces.length - 1)
-    if (isError(r)) return { rows: aoa(rows), error: r._tag }
-    rows.push(...r)
+    if (Result.isFailure(r)) return { rows: aoa(rows), error: r.failure._tag }
+    rows.push(...r.success)
     if (p.error !== undefined) return { rows: aoa(rows), error: p.error._tag }
   }
   return { rows: aoa(rows), error: undefined }
@@ -126,8 +134,8 @@ describe("csv parser: tokenizer states across pieces", () => {
 describe("csv parser: lifecycle", () => {
   it("a sep= line split across pieces sets the delimiter and is not a row", () => {
     const p = parser()
-    assert.deepStrictEqual(p.feed("se", false), [])
-    assert.deepStrictEqual(p.feed("p=;\r", false), [])
+    assert.deepStrictEqual(rowsOf(p.feed("se", false)), [])
+    assert.deepStrictEqual(rowsOf(p.feed("p=;\r", false)), [])
     assert.deepStrictEqual(aoa(rowsOf(p.feed("\na;b,c\n", true))), [["a", "b,c"]])
   })
 
@@ -147,7 +155,7 @@ describe("csv parser: lifecycle", () => {
   it("a sep= line whose CR and LF are split, before a sample of more than 16 Ki chars", () => {
     const body = "a;b\n".repeat(SNIFF_CHARS / 4)
     const p = parser()
-    assert.deepStrictEqual(p.feed("sep=|\r", false), [])
+    assert.deepStrictEqual(rowsOf(p.feed("sep=|\r", false)), [])
     const rows = rowsOf(p.feed("\n" + body, false))
     assert.strictEqual(rows.length, SNIFF_CHARS / 4)
     assert.deepStrictEqual(aoa(rows)[0], ["a;b"])
@@ -155,15 +163,15 @@ describe("csv parser: lifecycle", () => {
 
   it("with fewer than 16 Ki chars, sniffing waits for the final piece", () => {
     const p = parser()
-    assert.deepStrictEqual(p.feed("a;b\n", false), [])
-    assert.deepStrictEqual(p.feed("c;d", false), [])
+    assert.deepStrictEqual(rowsOf(p.feed("a;b\n", false)), [])
+    assert.deepStrictEqual(rowsOf(p.feed("c;d", false)), [])
     assert.deepStrictEqual(aoa(rowsOf(p.feed("", true))), [["a", "b"], ["c", "d"]])
   })
 
   it("sniffing starts once more than 16 Ki chars are collected", () => {
     const text = "a;b\n".repeat(SNIFF_CHARS / 4) + "c"
     const p = parser()
-    assert.deepStrictEqual(p.feed(text.slice(0, -1), false), [])
+    assert.deepStrictEqual(rowsOf(p.feed(text.slice(0, -1), false)), [])
     const rows = rowsOf(p.feed(text.slice(-1), false))
     assert.strictEqual(rows.length, SNIFF_CHARS / 4)
     assert.deepStrictEqual(aoa(rows)[0], ["a", "b"])
@@ -179,7 +187,7 @@ describe("csv parser: lifecycle", () => {
     assert.deepStrictEqual(cellsPerRow(rowsOf(parser().feed(text, true))), expected)
     // or with the end of input in a later, empty piece, as the reader does
     const p = parser()
-    assert.deepStrictEqual(p.feed(text, false), [])
+    assert.deepStrictEqual(rowsOf(p.feed(text, false)), [])
     assert.deepStrictEqual(cellsPerRow(rowsOf(p.feed("", true))), expected)
   })
 
@@ -188,24 +196,24 @@ describe("csv parser: lifecycle", () => {
     assert.deepStrictEqual(aoa(rowsOf(p.feed('a\n"b"x\nc\n', false))), [["a"]])
     const error = p.error
     assert.strictEqual(error?._tag, "MalformedFile")
-    assert.strictEqual(p.feed("d\n", false), error)
-    assert.strictEqual(p.feed("e\n", true), error)
+    assert.strictEqual(errorOf(p.feed("d\n", false)), error)
+    assert.strictEqual(errorOf(p.feed("e\n", true)), error)
     assert.strictEqual(p.error, error)
   })
 
   it("an error with no rows before it is returned at once", () => {
     const p = parser({ delimiter: ",", strict: true })
-    const error = p.feed('"b"x', false)
-    assert.isTrue(isError(error))
+    const error = errorOf(p.feed('"b"x', false))
+    assert.strictEqual(error._tag, "MalformedFile")
     assert.strictEqual(p.error, error)
-    assert.strictEqual(p.feed("", true), error)
+    assert.strictEqual(errorOf(p.feed("", true)), error)
   })
 
   it("after the final piece, later feeds give no rows", () => {
     const p = parser({ delimiter: "," })
     assert.deepStrictEqual(aoa(rowsOf(p.feed("a\nb", true))), [["a"], ["b"]])
-    assert.deepStrictEqual(p.feed("c\n", false), [])
-    assert.deepStrictEqual(p.feed("d\n", true), [])
+    assert.deepStrictEqual(rowsOf(p.feed("c\n", false)), [])
+    assert.deepStrictEqual(rowsOf(p.feed("d\n", true)), [])
     assert.strictEqual(p.error, undefined)
   })
 })
