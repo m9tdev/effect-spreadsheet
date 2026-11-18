@@ -108,6 +108,8 @@ export interface BuildEntry {
   readonly zip64?: boolean
   /** Bytes appended after the compressed data (inside the entry's declared size). */
   readonly trailing?: Uint8Array
+  /** An extra field written into the local header only (the central directory gets none). */
+  readonly localExtra?: Uint8Array
 }
 
 /** A zip with real CRCs and optional deflate (tests only). */
@@ -126,7 +128,8 @@ export const buildZip = async (entries: ReadonlyArray<BuildEntry>): Promise<Uint
     const csize = entry.compressedSize ?? body.length
     const method = entry.methodCode ?? (deflate ? 8 : 0)
     const flags = entry.flags ?? 0x800
-    const local = new Uint8Array(30 + name.length + body.length)
+    const localExtra = entry.localExtra ?? new Uint8Array(0)
+    const local = new Uint8Array(30 + name.length + localExtra.length + body.length)
     const lv = new DataView(local.buffer)
     lv.setUint32(0, 0x04034b50, true)
     lv.setUint16(4, 20, true)
@@ -136,8 +139,10 @@ export const buildZip = async (entries: ReadonlyArray<BuildEntry>): Promise<Uint
     lv.setUint32(18, csize, true)
     lv.setUint32(22, usize, true)
     lv.setUint16(26, name.length, true)
+    lv.setUint16(28, localExtra.length, true)
     local.set(name, 30)
-    local.set(body, 30 + name.length)
+    local.set(localExtra, 30 + name.length)
+    local.set(body, 30 + name.length + localExtra.length)
     const extra = entry.zip64 ? new Uint8Array(4 + 24) : new Uint8Array(0)
     if (entry.zip64) {
       const ev = new DataView(extra.buffer)

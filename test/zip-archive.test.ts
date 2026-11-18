@@ -442,6 +442,11 @@ describe("zip archive: hostile input", () => {
     const plain = archive.find("plain.xml")!
     expect(new TextDecoder().decode(zip.subarray(plain.data.start, plain.data.end))).toBe("stored")
     expect(plain.data.start).toBe(plain.localOffset + 30 + "plain.xml".length)
+    // a local extra field (here the 0x5455 timestamp field, absent from the directory) comes before the data
+    const stamped = openOk(await buildZip([{ name: "t.xml", data: enc("timed"), method: "store", localExtra: new Uint8Array([0x55, 0x54, 5, 0, 1, 0, 0, 0, 0]) }]))
+    const timed = stamped.find("t.xml")!
+    expect(timed.data).toEqual({ start: 30 + "t.xml".length + 9, end: 30 + "t.xml".length + 9 + 5 })
+    expect(new TextDecoder().decode(await Effect.runPromise(readAll(stamped, timed)))).toBe("timed")
     const packed = archive.find("PACKED.xml")!
     expect(packed.data.end - packed.data.start).toBe(packed.compressedSize)
     expect(new TextDecoder().decode(await Effect.runPromise(readAll(archive, plain)))).toBe("stored")
