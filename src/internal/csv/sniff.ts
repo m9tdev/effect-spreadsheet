@@ -28,7 +28,9 @@ type Mode = "FieldStart" | "Unquoted" | "Quoted" | "QuoteInQuoted"
 
 /**
  * Guesses the delimiter of `sample`. Candidates inside quoted fields are
- * skipped.
+ * skipped. `complete` says that the sample is the whole text, so a last line
+ * without a line break is a whole line; otherwise the sample may end inside
+ * that line, which is then left out.
  *
  * 1. A candidate that occurs the same non-zero number of times on every
  *    line (at least 2 non-blank lines) wins; among several, the one with
@@ -36,7 +38,7 @@ type Mode = "FieldStart" | "Unquoted" | "Quoted" | "QuoteInQuoted"
  * 2. Otherwise the most frequent candidate wins, then the
  *    tie-break order; with none at all, `,`.
  */
-export const guessDelimiter = (sample: string): number => {
+export const guessDelimiter = (sample: string, complete: boolean): number => {
   const k = CANDIDATES.length
   const totals = [0, 0, 0, 0]
   const lineCounts: Array<Array<number>> = []
@@ -83,9 +85,7 @@ export const guessDelimiter = (sample: string): number => {
         absurd(mode)
     }
   }
-  // A last line without a line break counts only if the sample is the whole
-  // text (it could be cut otherwise).
-  if (lineHasText && n < SNIFF_CHARS && lineCounts.length < MAX_LINES) lineCounts.push(current)
+  if (lineHasText && complete && lineCounts.length < MAX_LINES) lineCounts.push(current)
 
   let best = -1
   let bestPerLine = 0

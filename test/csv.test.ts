@@ -151,6 +151,26 @@ describe("csv: delimiters", () => {
     assert.deepStrictEqual(rows[0], ["a," + "x".repeat(290), "c", "d"])
   })
 
+  it("sniffing counts an unterminated last line when the whole text fits the 16 Ki sample", async () => {
+    // two `;` lines, then one long line of `x,x,…` with no line break: `;`
+    // is consistent only if the last line is left out, so the guess shows
+    // whether it was counted
+    const text = (n: number) => ("a;b\nc;d\n" + "x,".repeat(n)).slice(0, n)
+    // a detected encoding hands over the text at the end of input; a given
+    // one hands it over before the end is known
+    for (const encoding of [undefined, "utf-8"] as const) {
+      const cellsPerRow = async (n: number) =>
+        [encoding, (await csvAoa(text(n), encoding === undefined ? {} : { encoding })).map((row) => row.length)]
+      // the whole text is in the sample: its last line counts and `,` wins
+      // (at 16 Ki the text ends in a `,`, which adds no cell)
+      assert.deepStrictEqual(await cellsPerRow(16 * 1024 - 1), [encoding, [1, 1, 8188]])
+      assert.deepStrictEqual(await cellsPerRow(16 * 1024), [encoding, [1, 1, 8188]])
+      // one more character: the sample may end inside a line, so its last
+      // line is left out and `;` wins
+      assert.deepStrictEqual(await cellsPerRow(16 * 1024 + 1), [encoding, [2, 2, 1]])
+    }
+  })
+
   it("equal consistent counts: the tie-break order , \\t ; | decides", async () => {
     assert.deepStrictEqual(await csvAoa("a,b;c\nd,e;f\n"), [["a", "b;c"], ["d", "e;f"]])
     assert.deepStrictEqual(await csvAoa("a;b|c\nd;e|f\n"), [["a", "b|c"], ["d", "e|f"]])
@@ -534,7 +554,7 @@ describe("csv: rows before an error", () => {
   const sizes = [1, 2, 3, 5, 7, 64, 4096, 65_536, 65_537]
   // A given encoding decodes each chunk at once; a detected one waits for
   // 64 KiB or the end. A given delimiter parses at once; a sniffed one
-  // waits for 16 Ki characters or the end.
+  // waits for more than 16 Ki characters or the end.
   const settings: Array<[string | undefined, Csv.Encoding | undefined]> = [
     [",", "utf-8"],
     [undefined, "utf-8"],
