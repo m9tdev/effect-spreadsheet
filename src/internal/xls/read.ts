@@ -9,7 +9,7 @@ import { Encrypted, MalformedFile, type SpreadsheetError, UnsupportedFormat } fr
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Workbook } from "../../Workbook.ts"
 import { open as openCfb } from "../cfb/cfb.ts"
-import type { Accepted } from "../input.ts"
+import { type Accepted, stored } from "../input.ts"
 import { type Meter, WorkMeter } from "../meter.ts"
 import { fromSources } from "../workbook.ts"
 import { readGlobals, type SheetEntry } from "./globals.ts"
@@ -79,6 +79,6 @@ export const readXls = ({ bytes, limits }: Accepted): Effect.Effect<Workbook, Sp
         }
       })),
       definedNames: globals.definedNames,
-      limits
+      limits: stored(limits)
     })
   })

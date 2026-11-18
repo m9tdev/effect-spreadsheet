@@ -55,7 +55,7 @@ export const detectFormat = (
   bytes: Uint8Array,
   options?: { readonly limits?: SpreadsheetLimits.LimitOverrides | undefined }
 ): Effect.Effect<Format, SpreadsheetError> =>
-  Effect.flatMap(accept(bytes, options?.limits), detected)
+  accept(bytes, options?.limits, detected)
 
 /** The formats `read` hands to a reader; see the `switch` in `read`. */
 type Readable = "csv" | "xlsx" | "xlsb" | "xls" | "cfb"
@@ -94,33 +94,36 @@ const unsupported: Record<Exclude<Format, Readable>, string> = {
  * @category readers
  */
 export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Workbook, SpreadsheetError> =>
-  Effect.flatMap(accept(bytes, options?.limits), (input) =>
-    Effect.flatMap(detected(input), (format): Effect.Effect<Workbook, SpreadsheetError> => {
-      switch (format) {
-        case "csv":
-          return readCsvWorkbook(input.bytes, input.limits, options?.csv)
-        case "xlsx":
-          return readXlsx(input)
-        case "xlsb":
-          return readXlsb(input)
-        case "xls":
-        case "cfb": // an encrypted OOXML package (Encrypted), or no workbook stream
-          return readXls(input)
-        case "ods":
-        case "spreadsheetml":
-        case "sylk":
-        case "zip":
-        case "html":
-        case "xml":
-        case "pdf":
-        case "image":
-        case "rtf":
-        case "unknown":
-          return Effect.fail(new UnsupportedFormat({ format, reason: unsupported[format] }))
-        default:
-          return absurd(format)
-      }
-    }))
+  // suspend: the options are read when the effect runs, each time it runs
+  Effect.suspend(() =>
+    accept(bytes, options?.limits, (input) =>
+      Effect.flatMap(detected(input), (format): Effect.Effect<Workbook, SpreadsheetError> => {
+        switch (format) {
+          case "csv":
+            return readCsvWorkbook(input.bytes, input.limits, options?.csv)
+          case "xlsx":
+            return readXlsx(input)
+          case "xlsb":
+            return readXlsb(input)
+          case "xls":
+          case "cfb": // an encrypted OOXML package (Encrypted), or no workbook stream
+            return readXls(input)
+          case "ods":
+          case "spreadsheetml":
+          case "sylk":
+          case "zip":
+          case "html":
+          case "xml":
+          case "pdf":
+          case "image":
+          case "rtf":
+          case "unknown":
+            return Effect.fail(new UnsupportedFormat({ format, reason: unsupported[format] }))
+          default:
+            return absurd(format)
+        }
+      }))
+  )
 
 /**
  * Opens delimited text (CSV/TSV/...). Same as `effect-spreadsheet/csv`'s

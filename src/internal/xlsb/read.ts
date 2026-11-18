@@ -5,7 +5,7 @@
 import { Effect } from "effect"
 import type { SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Workbook } from "../../Workbook.ts"
-import type { Accepted } from "../input.ts"
+import { type Accepted, stored } from "../input.ts"
 import { type PackageFormat, readPackage } from "../package.ts"
 import { open } from "../zip/archive.ts"
 import { readSharedStrings, readStyles } from "./parts.ts"
@@ -35,4 +35,4 @@ const XLSB: PackageFormat<WorkbookBin> = {
 
 /** Opens the zip package and reads the workbook. */
 export const readXlsb = ({ bytes, limits }: Accepted): Effect.Effect<Workbook, SpreadsheetError> =>
-  Effect.flatMap(Effect.fromResult(open(bytes, limits)), (archive) => readPackage(archive, limits, XLSB))
+  Effect.flatMap(Effect.fromResult(open(bytes, limits)), (archive) => readPackage(archive, stored(limits), XLSB))

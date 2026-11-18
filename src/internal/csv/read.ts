@@ -7,7 +7,7 @@ import type { ReadOptions } from "../../csv/index.ts"
 import type { InvalidOption, SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import * as Workbook from "../../Workbook.ts"
-import type { ValidLimits } from "../input.ts"
+import { stored, type ValidLimits } from "../input.ts"
 import { validateEncoding } from "./decode.ts"
 import { rowsFromByteStream, validateDelimiter } from "./reader.ts"
 
@@ -38,7 +38,7 @@ export const readCsvWorkbook = (
   return Effect.succeed(Workbook.make({
     format: "csv",
     sheets: [sheet],
-    limits,
+    limits: stored(limits),
     rows: (_, effective) => rowsFromByteStream(toStream(input), resolved(options, effective))
   }))
 }

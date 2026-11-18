@@ -108,6 +108,22 @@ describe("input: limits and size, once at the entry point", () => {
       assert.match(yield* dies(Csv.read(Stream.make(bytes.csv), { limits: { maxRows: -1 } })), /maxRows/)
     }))
 
+  it.effect("the options are read when the effect runs: a re-run sees options changed after it was built", () =>
+    Effect.gen(function*() {
+      const bytes = yield* inputs
+      for (const [name, format, read] of readers) {
+        const input = bytes[format]
+        const options: { limits?: SpreadsheetLimits.LimitOverrides } = {}
+        const effect = read(input, options)
+        assert.strictEqual((yield* effect).format, format, name)
+        options.limits = { maxInputBytes: input.length - 1 }
+        const error = yield* Effect.flip(effect)
+        assert.strictEqual(error._tag === "LimitExceeded" && error.limit, "maxInputBytes", name)
+        options.limits = { maxRows: 2 }
+        assert.strictEqual((yield* effect).limits.maxRows, 2, name)
+      }
+    }))
+
   it.effect("the reader reads with the call's limits, on top of the context's", () =>
     Effect.gen(function*() {
       const bytes = yield* inputs
@@ -173,6 +189,20 @@ describe("Workbook.rows and sheetDetails: the call's overrides on the workbook's
       // valid hand-made limits read as before
       const valid = Workbook.make({ format: "csv", sheets: [sheet], limits: SpreadsheetLimits.defaults, rows: () => Stream.empty })
       assert.strictEqual((yield* Stream.runCollect(Workbook.rows(valid, 0, { limits: { maxRows: 1 } }))).length, 0)
+    }))
+
+  it.effect("a reader's workbook limits are trusted: changing them in place is not checked again", () =>
+    Effect.gen(function*() {
+      const bytes = yield* inputs
+      for (const [name, format, read] of readers) {
+        const workbook = yield* read(bytes[format])
+        // the fields are readonly; a cast writes an invalid value anyway
+        ;(workbook.limits as { maxRows: number }).maxRows = NaN
+        // NaN disables the row check rather than making the read die
+        const rows = yield* Stream.runCollect(Workbook.rows(workbook, 0))
+        assert.strictEqual(rows.length, 3, name)
+        assert.strictEqual((yield* Stream.runCollect(Workbook.rows(workbook, 0, { limits: { maxColumns: 5 } }))).length, 3, name)
+      }
     }))
 
   it.effect("ValidLimits come only from validation", () =>

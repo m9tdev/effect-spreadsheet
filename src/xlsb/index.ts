@@ -64,4 +64,5 @@ export interface ReadOptions {
  * @category readers
  */
 export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Workbook.Workbook, SpreadsheetError> =>
-  Effect.flatMap(accept(bytes, options?.limits), readXlsb)
+  // suspend: the options are read when the effect runs, each time it runs
+  Effect.suspend(() => accept(bytes, options?.limits, readXlsb))

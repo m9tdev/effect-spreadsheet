@@ -114,9 +114,9 @@ export const read = (
   input: Uint8Array | Stream.Stream<Uint8Array, SpreadsheetError>,
   options?: ReadOptions
 ): Effect.Effect<Workbook.Workbook, SpreadsheetError> =>
-  Effect.flatMap(
+  // suspend: the options are read when the effect runs, each time it runs
+  Effect.suspend(() =>
     input instanceof Uint8Array
-      ? Effect.map(accept(input, options?.limits), (accepted) => accepted.limits)
-      : resolveLimits(options?.limits),
-    (limits) => readCsvWorkbook(input, limits, options)
+      ? accept(input, options?.limits, (accepted) => readCsvWorkbook(input, accepted.limits, options))
+      : Effect.flatMap(resolveLimits(options?.limits), (limits) => readCsvWorkbook(input, limits, options))
   )
