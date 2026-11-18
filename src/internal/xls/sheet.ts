@@ -36,10 +36,11 @@ import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../Sprea
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { ColumnSpan, Range, Row, SheetDetails } from "../../Workbook.ts"
 import { BOF_BIFF5_8, type BiffRecord, CONTINUE, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
+import { readRichString, SegmentReader } from "../biff/segments.ts"
+import { decodeRk, ERROR_CODES, Fields } from "../binary.ts"
 import { WorkMeter } from "../meter.ts"
 import { serialToDate } from "../numFmt.ts"
-import { readRichString, SegmentReader } from "../biff/segments.ts"
-import { decodeRk, ERROR_CODES, Fields, readString } from "./fields.ts"
+import { readString } from "./fields.ts"
 import type { Globals } from "./globals.ts"
 
 /** Records handled per pull: bounded work between event-loop turns. */
