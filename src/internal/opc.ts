@@ -10,6 +10,7 @@ import type { Limits } from "../SpreadsheetLimits.ts"
 import { parse } from "./xml/parse.ts"
 import { attr, type XmlHandler } from "./xml/tokenizer.ts"
 import type { Archive, LocatedEntry } from "./zip/archive.ts"
+import { normalizeName } from "./zip/directory.ts"
 
 /** Tokenizes one part with `handler`. */
 export const parsePart = (
@@ -161,3 +162,41 @@ export const packageRels = (archive: Archive, limits: Limits): Effect.Effect<Rel
 /** The relationships of `part`, targets resolved against its directory. */
 export const partRels = (archive: Archive, part: LocatedEntry, limits: Limits): Effect.Effect<Rels, SpreadsheetError> =>
   readRels(archive, relsPartOf(part.name), part.name.split("/").slice(0, -1), limits)
+
+/**
+ * The content type `[Content_Types].xml` gives `part`: the first `Override`
+ * naming it, else the first `Default` for its extension; `undefined` if
+ * there's neither, or no content types part. Part names match as the
+ * archive matches entry names (`%`-escapes decoded, case-insensitive),
+ * extensions case-insensitively.
+ */
+export const contentType = (
+  archive: Archive,
+  part: LocatedEntry,
+  limits: Limits
+): Effect.Effect<string | undefined, SpreadsheetError> => {
+  const entry = archive.find("[Content_Types].xml")
+  if (entry === undefined) return Effect.succeed(undefined)
+  const key = normalizeName(part.name)
+  const dot = key.lastIndexOf(".")
+  const extension = dot > key.lastIndexOf("/") ? key.slice(dot + 1) : undefined
+  let override: string | undefined
+  let byExtension: string | undefined
+  const handler: XmlHandler = {
+    open: (name, attributes) => {
+      if (name === "Override" && override === undefined) {
+        const partName = attr(attributes, "PartName")
+        const type = attr(attributes, "ContentType")
+        if (partName === undefined || type === undefined) return
+        const resolved = resolveName([], partName)
+        if (typeof resolved === "string" && normalizeName(resolved) === key) override = type
+      } else if (name === "Default" && byExtension === undefined && extension !== undefined) {
+        const type = attr(attributes, "ContentType")
+        if (type !== undefined && attr(attributes, "Extension")?.toLowerCase() === extension) byExtension = type
+      }
+    },
+    close: () => undefined,
+    text: () => undefined
+  }
+  return Effect.map(parsePart(archive, entry, handler, limits), () => override ?? byExtension)
+}

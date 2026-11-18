@@ -5,7 +5,6 @@
  * @since 0.1.0
  */
 import { absurd, Effect, Stream } from "effect"
-import * as Result from "effect/Result"
 import type * as Cell from "./Cell.ts"
 import * as Csv from "./csv/index.ts"
 import { readCsvWorkbook } from "./internal/csv/read.ts"
@@ -14,8 +13,8 @@ import { WorkMeter } from "./internal/meter.ts"
 import { type Detected, detect, probe } from "./internal/probe.ts"
 import { type RecordsOptions, recordsStream } from "./internal/records.ts"
 import { readProbed } from "./internal/xls/read.ts"
-import { readXlsb } from "./internal/xlsb/read.ts"
-import { readXlsx } from "./internal/xlsx/read.ts"
+import { readXlsbPackage } from "./internal/xlsb/read.ts"
+import { readXlsxPackage } from "./internal/xlsx/read.ts"
 import { type InvalidOption, LimitExceeded, type SpreadsheetError, UnsupportedFormat } from "./SpreadsheetError.ts"
 import * as SpreadsheetLimits from "./SpreadsheetLimits.ts"
 import type { Format, Row, Workbook } from "./Workbook.ts"
@@ -39,16 +38,20 @@ export interface ReadOptions {
 }
 
 /** The format of an accepted input. */
-const detected = (input: Accepted): Effect.Effect<Format, SpreadsheetError> =>
-  Effect.fromResult(detect(input.bytes, input.limits))
+const detected = (input: Accepted): Effect.Effect<Format, SpreadsheetError> => detect(input.bytes, input.limits)
 
 /**
  * Detects the format from the bytes alone (magic numbers and structure;
- * there is no file-name input, on purpose). Containers are looked into, so
- * this stays cheap: a zip's central directory, and a compound file's
- * directory (`"xls"` if it has a Workbook or Book stream, `"cfb"` if not).
- * A broken container fails with a typed error (`MalformedFile`,
- * `LimitExceeded`) rather than giving a format.
+ * there is no file-name input, on purpose). Containers are looked into as
+ * far as reading them would: a compound file's directory (`"xls"` if it has
+ * a Workbook or Book stream, `"cfb"` if not), and a zip's central
+ * directory. A zip that looks like an OOXML package (it has `_rels/.rels`,
+ * `xl/workbook.xml` or `xl/workbook.bin`) is opened, and its workbook part
+ * found through the package relationships, as the XLSX and XLSB readers
+ * find it: `"xlsx"` or `"xlsb"` by that part, `"zip"` if it isn't a
+ * workbook. A broken container fails with a typed error (`MalformedFile`,
+ * `LimitExceeded`, or what reading the package relationships fails with)
+ * rather than giving a format.
  *
  * @since 0.1.0
  * @category detection
@@ -61,10 +64,10 @@ export const detectFormat = (
 
 /**
  * The formats `read` hands to a reader by format; see the `switch` in
- * `read`. Compound files and bare BIFF streams aren't among them: they go
- * by what the probe found in them.
+ * `read`. Compound files, bare BIFF streams and packages aren't among
+ * them: they go by what the probe found in them.
  */
-type Readable = "csv" | "xlsx" | "xlsb"
+type Readable = "csv"
 
 /**
  * Why each format without a reader fails. Typed over every detected
@@ -104,34 +107,45 @@ export const read = (bytes: Uint8Array, options?: ReadOptions): Effect.Effect<Wo
   // suspend: the options are read when the effect runs, each time it runs
   Effect.suspend(() =>
     accept(bytes, options?.limits, (input) =>
-      Effect.flatMap(WorkMeter, (meter): Effect.Effect<Workbook, SpreadsheetError> => {
-        const probed = probe(input.bytes, input.limits, meter)
-        if (Result.isFailure(probed)) return Effect.fail(probed.failure)
-        if (probed.success._tag !== "Detected") return readProbed(probed.success, input.limits)
-        const format = probed.success.format
-        switch (format) {
-          case "csv":
-            return readCsvWorkbook(input.bytes, input.limits, options?.csv)
-          case "xlsx":
-            return readXlsx(input)
-          case "xlsb":
-            return readXlsb(input)
-          case "ods":
-          case "spreadsheetml":
-          case "sylk":
-          case "zip":
-          case "html":
-          case "xml":
-          case "pdf":
-          case "image":
-          case "rtf":
-          case "unknown":
-            return Effect.fail(new UnsupportedFormat({ format, reason: unsupported[format] }))
-          default:
-            return absurd(format)
-        }
-      }))
+      Effect.flatMap(WorkMeter, (meter) =>
+        Effect.flatMap(probe(input.bytes, input.limits, meter), (probed): Effect.Effect<Workbook, SpreadsheetError> => {
+          switch (probed._tag) {
+            case "Package":
+              return probed.kind === "xlsx"
+                ? readXlsxPackage(probed.archive, probed.workbook, input.limits)
+                : readXlsbPackage(probed.archive, probed.workbook, input.limits)
+            case "Detected":
+              return readDetected(probed.format, input, options)
+            default:
+              return readProbed(probed, input.limits)
+          }
+        })))
   )
+
+/** Reads an input by the format detection gave it; formats without a reader fail. */
+const readDetected = (
+  format: Detected["format"],
+  input: Accepted,
+  options: ReadOptions | undefined
+): Effect.Effect<Workbook, SpreadsheetError> => {
+  switch (format) {
+    case "csv":
+      return readCsvWorkbook(input.bytes, input.limits, options?.csv)
+    case "ods":
+    case "spreadsheetml":
+    case "sylk":
+    case "zip":
+    case "html":
+    case "xml":
+    case "pdf":
+    case "image":
+    case "rtf":
+    case "unknown":
+      return Effect.fail(new UnsupportedFormat({ format, reason: unsupported[format] }))
+    default:
+      return absurd(format)
+  }
+}
 
 /**
  * Opens delimited text (CSV/TSV/...). Same as `effect-spreadsheet/csv`'s

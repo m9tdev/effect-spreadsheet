@@ -5,17 +5,17 @@
 import { Effect } from "effect"
 import type { SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Workbook } from "../../Workbook.ts"
-import { type Accepted, stored } from "../input.ts"
-import { type PackageFormat, readPackage } from "../package.ts"
+import { type Accepted, stored, type ValidLimits } from "../input.ts"
+import type { Named } from "../opc.ts"
+import { fixedWorkbook, type PackageFormat, readPackage, workbookPart } from "../package.ts"
 import { toDefinedNames } from "../workbook.ts"
-import { open } from "../zip/archive.ts"
+import { type Archive, open } from "../zip/archive.ts"
 import { sheetDetails } from "./details.ts"
 import { malformed, readSharedStrings, readStyles, readWorkbookPart, type WorkbookPart } from "./parts.ts"
 import { sheetRows } from "./sheet.ts"
 
 const XLSX: PackageFormat<WorkbookPart> = {
   format: "xlsx",
-  fallbackWorkbook: "xl/workbook.xml",
   malformed,
   readWorkbook: readWorkbookPart,
   readStrings: readSharedStrings,
@@ -25,6 +25,14 @@ const XLSX: PackageFormat<WorkbookPart> = {
   details: sheetDetails
 }
 
+/** Reads the workbook of an opened package from its workbook part. */
+export const readXlsxPackage = (
+  archive: Archive,
+  workbook: Named,
+  limits: ValidLimits
+): Effect.Effect<Workbook, SpreadsheetError> => readPackage(archive, workbook, stored(limits), XLSX)
+
 /** Opens the zip package and reads the workbook. */
 export const readXlsx = ({ bytes, limits }: Accepted): Effect.Effect<Workbook, SpreadsheetError> =>
-  Effect.flatMap(Effect.fromResult(open(bytes, limits)), (archive) => readPackage(archive, stored(limits), XLSX))
+  Effect.flatMap(Effect.fromResult(open(bytes, limits)), (archive) =>
+    Effect.flatMap(workbookPart(archive, fixedWorkbook.xlsx, limits), (workbook) => readXlsxPackage(archive, workbook, limits)))
