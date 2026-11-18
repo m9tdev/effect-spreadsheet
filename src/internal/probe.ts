@@ -9,8 +9,11 @@
  * trusted to be one (its first record is only checked to name BIFF2-4,
  * when the stream is read). A bare BIFF stream has no container to vouch
  * for it, so it must start with a well-formed BOF record (`biffBof`). Bytes
- * that start with a BIFF2-4 BOF record type without one are a broken
- * BIFF2-4 stream: detection and both readers fail with `MalformedFile`.
+ * that start with a BIFF3 or BIFF4 BOF record type without one are a broken
+ * stream: detection and both readers fail with `MalformedFile`. Bytes that
+ * start with the BIFF2 BOF record type without one fail only `Xls.read`;
+ * detection reads them as text or unknown data, as UTF-16LE text that
+ * starts with a tab begins the same way (`09 00`).
  *
  * @internal
  */
@@ -98,16 +101,17 @@ const oldBiff = (stream: Uint8Array): string | undefined =>
 /**
  * A bare BIFF stream, by its BOF record, or `undefined` if it doesn't start
  * with a BOF record type. A BIFF2-4 BOF record type without a well-formed
- * BOF record fails.
+ * BOF record fails, but a BIFF2 one only if `strictBiff2`, and is
+ * `undefined` otherwise.
  */
-const probeBare = (bytes: Uint8Array): Result.Result<XlsProbe, MalformedFile> | undefined => {
+const probeBare = (bytes: Uint8Array, strictBiff2: boolean): Result.Result<XlsProbe, MalformedFile> | undefined => {
   const version = biffBof(bytes)
   if (version === "biff5/8") return Result.succeed({ _tag: "Biff", source: { _tag: "Bare", stream: bytes } })
   if (version !== undefined) {
     return Result.succeed({ _tag: "Unreadable", format: "xls", found: version, reason: OLD_BIFF_REASON(version) })
   }
   const old = oldBiff(bytes)
-  return old === undefined
+  return old === undefined || (old === "biff2" && !strictBiff2)
     ? undefined
     : Result.fail(new MalformedFile({ format: "xls", reason: `malformed ${old.toUpperCase()} BOF record` }))
 }
@@ -129,7 +133,8 @@ export const probe = (
     const zip = detectZip(bytes, limits)
     return Result.isFailure(zip) ? Result.fail(zip.failure) : Result.succeed({ _tag: "Detected", format: zip.success })
   }
-  return probeBare(bytes) ?? Result.succeed({ _tag: "Detected", format: plainFormat(bytes) })
+  // a malformed BIFF2 BOF may be UTF-16LE text starting with a tab: left to plain detection
+  return probeBare(bytes, false) ?? Result.succeed({ _tag: "Detected", format: plainFormat(bytes) })
 }
 
 /** The format detection reports for a probe. */
@@ -151,7 +156,8 @@ export const detect = (bytes: Uint8Array, limits: Limits): Result.Result<Format,
 
 /**
  * What the XLS reader reads: the same probe, for a compound file or a bare
- * BIFF stream; anything else is no XLS file.
+ * BIFF stream; anything else is no XLS file. Unlike detection, it rejects a
+ * malformed BIFF2 BOF record too: the caller asked for an XLS file.
  */
 export const probeXls = (
   bytes: Uint8Array,
@@ -159,7 +165,7 @@ export const probeXls = (
   meter: Meter
 ): Result.Result<XlsProbe, MalformedFile | LimitExceeded> => {
   if (startsWith(bytes, CFB_MAGIC)) return probeCfb(bytes, limits, meter)
-  return probeBare(bytes) ??
+  return probeBare(bytes, true) ??
     Result.fail(new MalformedFile({ format: "xls", reason: "neither a compound file nor a BIFF stream" }))
 }
 
