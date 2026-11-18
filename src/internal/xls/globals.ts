@@ -20,7 +20,7 @@ import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { DefinedName } from "../../Workbook.ts"
 import { type BiffRecord, BOF_BIFF5_8, EOF, type Gathering, RecordReader, readBof } from "../biff/records.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
-import { FixedReader, type StringFailure } from "../binary/layout.ts"
+import { FixedReader } from "../binary/layout.ts"
 import { WorkMeter } from "../meter.ts"
 import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
@@ -53,7 +53,8 @@ const BOUNDSHEET_MIN = 6
 const FORMAT_MIN = 2
 /** XF: ifnt u16, ifmt u16 (the rest isn't read). */
 const XF_MIN = 4
-/** SUPBOOK of this workbook or of add-ins: ctab u16, then the marker u16, and nothing else. */
+/** SUPBOOK: ctab u16, then a marker u16 and nothing else (this workbook, add-ins), or the path and sheet names. */
+const SUPBOOK_CTAB = 2
 const SUPBOOK_MARKER_LENGTH = 4
 /** SST: cstTotal u32, cstUnique u32, then the strings. */
 const SST_HEADER = 8
@@ -406,7 +407,8 @@ class GlobalsWalk {
     const state = f.u8(4)
     const dt = f.u8(5)
     const name = readString(record.data, BOUNDSHEET_MIN, this.text, 1)
-    if (name._tag !== "Ok") return this.stringFailed(name, () => malformed("truncated BOUNDSHEET", record.offset))
+    if (name._tag === "TooLong") return tooLong(limits, name.count)
+    if (name._tag === "Truncated") return malformed("truncated BOUNDSHEET", record.offset)
     if (dt === 6) {
       // a VB module, not a sheet; real workbooks have a few, so they share maxSheets' bound
       if (this.modules.length >= limits.maxSheets) {
@@ -425,11 +427,6 @@ class GlobalsWalk {
       kind: dt === 0 ? "worksheet" : dt === 1 ? "macrosheet" : dt === 2 ? "chartsheet" : "other"
     })
     return undefined
-  }
-
-  /** The error of a failed string read: `truncated`'s, or LimitExceeded with the string's length. */
-  private stringFailed(read: StringFailure, truncated: () => SpreadsheetError): SpreadsheetError {
-    return read._tag === "TooLong" ? tooLong(this.limits, read.count) : truncated()
   }
 
   /**
@@ -530,7 +527,7 @@ class GlobalsWalk {
           this.pending = RECORDS
           return undefined
         }
-        const ctab = segments.has(2) ? segments.u16() : 0
+        const ctab = segments.has(SUPBOOK_CTAB) ? segments.u16() : 0
         const path = readRichString(segments, limits.maxStringLength) // the path's character count is the marker's place
         if (path._tag === "TooLong") return tooLong(limits, path.count)
         this.units++

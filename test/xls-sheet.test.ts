@@ -173,7 +173,7 @@ describe("xls sheet: formula string results", () => {
 
   it("a continued STRING over maxStringLength, by its count or by its bytes, is LimitExceeded", async () => {
     const long = [X.record(STRING, [...X.u16(20), 0, ...chars("0123456789")]), X.record(CONTINUE, [0, ...chars("0123456789")])]
-    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), ...long]), { maxStringLength: 10 })).toMatchObject({ limit: "maxStringLength", max: 10 })
+    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), ...long]), { maxStringLength: 10 })).toMatchObject({ limit: "maxStringLength", max: 10, actual: 20 })
     expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), ...long])).toEqual([[0, 0, "Text", "01234567890123456789"]])
     // a short count but CONTINUEs far over any string of maxStringLength characters
     const filler = Array.from({ length: 40 }, () => X.record(CONTINUE, new Array(8000).fill(0)))

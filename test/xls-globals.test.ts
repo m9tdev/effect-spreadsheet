@@ -195,10 +195,10 @@ describe("xls defined names: which workbook a reference points at", () => {
 
   it("SUPBOOK strings and sizes are limited", async () => {
     const long = { globals: [selfBook(1), externalBook("\u0001p.xls", ["x".repeat(40)])], sheets: sheets("S") }
-    expect(await errorOf(long, { maxStringLength: 20 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    expect(await errorOf(long, { maxStringLength: 20 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 20, actual: 40 })
     // the path too: a book with no sheet names, so only the path can be too long
     const longPath = { globals: [selfBook(1), externalBook(`\u0001${"p".repeat(40)}.xls`, [])], sheets: sheets("S") }
-    expect(await errorOf(longPath, { maxStringLength: 20 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    expect(await errorOf(longPath, { maxStringLength: 20 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 20, actual: 45 })
     const names = Array.from({ length: 100 }, (_, k) => `Sheet${k}`)
     const big = { globals: [X.record(SUPBOOK, [...X.u16(100), ...X.xlString("\u0001p.xls")]), X.record(CONTINUE, names.flatMap(X.xlString))], sheets: sheets("S") }
     expect(await errorOf(big, { maxDecompressedBytes: 200 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes" })
@@ -430,8 +430,11 @@ describe("xls globals: limits and string bounds", () => {
 
   it("FORMAT codes and NAME names longer than maxStringLength are LimitExceeded", async () => {
     const limits = { maxStringLength: 20 }
-    expect(await errorOf({ globals: [X.format(164, "0".repeat(21))], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
-    expect(await errorOf({ biff: 5, globals: [X.format(164, "0".repeat(21), 5)], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    expect(await errorOf({ globals: [X.format(164, "0".repeat(21))], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 21 })
+    expect(await errorOf({ biff: 5, globals: [X.format(164, "0".repeat(23), 5)], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 23 })
+    // exactly at the limit is read
+    const atLimit = await read({ globals: [X.format(164, "0".repeat(20)), X.format(165, "0".repeat(20), 8)], sheets: sheets("S") }, limits)
+    expect(atLimit.sheets.map((s) => s.name)).toEqual(["S"])
     expect(await errorOf({ globals: [X.name("N".repeat(21), ref3d(0x3A, 0, 0, 0))], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 20, actual: 21 })
     const wb = await read({ globals: [X.format(164, "0".repeat(20)), X.xf(164), X.name("N".repeat(20), ref3d(0x3A, 0, 0, 0))], sheets: sheets("S") }, limits)
     expect(wb.definedNames.map((d) => d.name)).toEqual(["N".repeat(20)])

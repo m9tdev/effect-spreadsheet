@@ -94,6 +94,8 @@ const MERGECELLS = 0x00E5
  * fields are read without a check each. Strings and cell lists after them
  * check their own bounds.
  */
+/** Every cell and ROW record starts with its row: rw u16. */
+const ROW_FIELD_MIN = 2
 /** Cell: rw u16, col u16, ixfe u16. BLANK is just that; LABEL and RSTRING add a string. */
 const CELL_MIN = 6
 /** ROW: rw u16 ... grbit u16 at 12 (the flags with fDyZero). */
@@ -218,9 +220,8 @@ class RowScan {
         }
         this.nested--
       } else if (this.nested === 0) {
-        // the row (u16) every cell and ROW record starts with; a shorter
-        // record is reported by the main pass
-        const f = this.fields.fixed(record.data, 2)
+        // a record too short for its row is reported by the main pass
+        const f = this.fields.fixed(record.data, ROW_FIELD_MIN)
         if (f === undefined) continue
         const row = f.u16(0)
         if (CELL_RECORDS.has(record.type)) this.lastAt.set(row, record.offset)
