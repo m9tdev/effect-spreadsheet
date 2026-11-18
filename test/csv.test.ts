@@ -196,6 +196,43 @@ describe("csv: delimiters", () => {
     const atRead = await Effect.runPromise(Effect.flip(Csv.read(enc("a"), { delimiter: ";;" })))
     assert.deepStrictEqual(atRead._tag === "InvalidOption" && atRead.option, "delimiter")
   })
+
+  it("a delimiter that is not a string (plain JavaScript) is an InvalidOption error, when streaming and at read", async () => {
+    const invalid: ReadonlyArray<unknown> = [
+      null,
+      true,
+      false,
+      0,
+      59,
+      NaN,
+      10n,
+      Symbol(","),
+      {},
+      { length: 1 },
+      [","],
+      [],
+      new String(","),
+      () => ","
+    ]
+    for (const delimiter of invalid) {
+      const options = { delimiter } as unknown as Csv.ReadOptions
+      const label = typeof delimiter === "symbol" ? "symbol" : String(delimiter)
+      const streamed = failureOf(await csvExit("a,b\n", options))
+      assert.deepStrictEqual(streamed?._tag === "InvalidOption" && streamed.option, "delimiter", label)
+      const atRead = failureOf(await Effect.runPromise(Effect.exit(Csv.read(enc("a,b\n"), options))))
+      assert.deepStrictEqual(atRead?._tag === "InvalidOption" && atRead.option, "delimiter", label)
+      const viaSpreadsheet = failureOf(
+        await Effect.runPromise(Effect.exit(Spreadsheet.read(enc("a,b\n"), { csv: options })))
+      )
+      assert.deepStrictEqual(viaSpreadsheet?._tag === "InvalidOption" && viaSpreadsheet.option, "delimiter", label)
+    }
+    // an absent or undefined delimiter is still guessed
+    const guessed = [["a", "b"]]
+    assert.deepStrictEqual(await csvAoa("a;b\n", { delimiter: undefined }), guessed)
+    assert.deepStrictEqual(await csvAoa("a;b\n", {}), guessed)
+    const wb = await Effect.runPromise(Csv.read(enc("a;b\n"), { delimiter: undefined }))
+    assert.deepStrictEqual(toAoa(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, 0)))), guessed)
+  })
 })
 
 describe("csv: encodings", () => {

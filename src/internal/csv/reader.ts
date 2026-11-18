@@ -25,13 +25,31 @@ export interface ResolvedOptions {
   readonly limits: Limits
 }
 
-export const validateDelimiter = (delimiter: string | undefined): InvalidOption | undefined =>
-  delimiter === undefined || (delimiter.length === 1 && delimiter !== '"' && delimiter !== "\r" && delimiter !== "\n")
+/**
+ * Checks `options.delimiter` at runtime, since the type can be bypassed
+ * (plain JavaScript, casts): `undefined` (guess it) or a one-character
+ * string other than a quote, CR or LF.
+ */
+export const validateDelimiter = (delimiter: unknown): InvalidOption | undefined => {
+  if (delimiter === undefined) return undefined
+  if (typeof delimiter !== "string") {
+    const type = typeof delimiter
+    const kind = delimiter === null
+      ? "null"
+      : Array.isArray(delimiter)
+      ? "an array"
+      : type === "object"
+      ? "an object"
+      : `a ${type}`
+    return new InvalidOption({ option: "delimiter", reason: `must be a one-character string, not ${kind}` })
+  }
+  return delimiter.length === 1 && delimiter !== '"' && delimiter !== "\r" && delimiter !== "\n"
     ? undefined
     : new InvalidOption({
       option: "delimiter",
       reason: `${JSON.stringify(delimiter)} must be one character other than a quote, CR or LF`
     })
+}
 
 const isError = (u: Array<Row> | SpreadsheetError): u is SpreadsheetError => !Array.isArray(u)
 
