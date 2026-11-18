@@ -74,10 +74,10 @@ export const effectOf = (task: FuzzTask): Effect.Effect<unknown, unknown> => {
               if ("_tag" in record) return Effect.fail(record)
               if (record.type !== 0x00FC) continue
               const strings = new SegmentReader(record.segments)
-              strings.skip(8)
+              if (!strings.skip(8)) continue
               // progress: each string read consumes at least 3 bytes or fails
-              while (!strings.failed && strings.remaining() > 0) {
-                if (readRichString(strings, limits.maxStringLength) === undefined) break
+              while (strings.remaining() > 0) {
+                if (readRichString(strings, limits.maxStringLength)._tag === "Truncated") break
               }
             }
           }

@@ -2,6 +2,7 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { CONTINUE, RecordReader, readBof } from "../src/internal/biff/records.ts"
 import { readRichString, SegmentReader, type Segments } from "../src/internal/biff/segments.ts"
+import type { StringRead } from "../src/internal/binary/layout.ts"
 import { LimitExceeded, MalformedFile } from "../src/SpreadsheetError.ts"
 
 const record = (type: number, data: ReadonlyArray<number> | Uint8Array): Uint8Array => {
@@ -232,31 +233,40 @@ const splitString = (text: string, wide: boolean, cuts: ReadonlyArray<number>, e
   return segments.map((s) => new Uint8Array(s))
 }
 
+/** A string read's text, or the failure itself. */
+const textOf = (read: StringRead) => (read._tag === "Ok" ? read.value : read)
+
 describe("biff segments", () => {
-  it("numbers cross segment boundaries; reads past the end fail and stay failed", () => {
+  it("numbers cross segment boundaries; has() checks what is left; skips past the end fail", () => {
     const r = new SegmentReader([new Uint8Array([1]), new Uint8Array([2, 3]), new Uint8Array([]), new Uint8Array([4, 5])])
+    expect(r.has(5)).toBe(true)
+    expect(r.has(6)).toBe(false)
     expect(r.u16()).toBe(0x0201)
     expect(r.u16()).toBe(0x0403)
     expect(r.remaining()).toBe(1)
+    expect(r.consumed()).toBe(4)
+    expect(r.has(1)).toBe(true)
+    expect(r.has(2)).toBe(false)
     expect(r.skip(1)).toBe(true)
     expect(r.remaining()).toBe(0)
-    expect(r.u8()).toBeUndefined()
-    expect(r.failed).toBe(true)
-    expect(r.u8()).toBeUndefined()
+    expect(r.has(1)).toBe(false)
     const s = new SegmentReader([new Uint8Array(3)])
     expect(s.skip(4)).toBe(false)
+    expect(s.remaining()).toBe(3)
+    const u = new SegmentReader([new Uint8Array([0x78, 0x56]), new Uint8Array([0x34, 0x12])])
+    expect(u.u32()).toBe(0x12345678)
   })
 
   it("strings switch width at each CONTINUE (option byte), including right after the header", () => {
     // header ends its segment: the characters start with an option byte
     const segments = [new Uint8Array([3, 0, 0]), new Uint8Array([1, 0x41, 0, 0x42, 0, 0x43, 0])]
-    expect(readRichString(new SegmentReader(segments), 100)).toBe("ABC")
+    expect(textOf(readRichString(new SegmentReader(segments), 100))).toBe("ABC")
     // 8-bit, then 16-bit, then 8-bit again
-    expect(readRichString(new SegmentReader(splitString("héllo wörld", false, [3, 7])), 100)).toBe("héllo wörld")
+    expect(textOf(readRichString(new SegmentReader(splitString("héllo wörld", false, [3, 7])), 100))).toBe("héllo wörld")
     // 16-bit characters on both sides of a boundary
     const wide = (s: string) => s.split("").flatMap((c) => [c.charCodeAt(0) & 0xFF, c.charCodeAt(0) >> 8])
     const cjk = [new Uint8Array([4, 0, 1, ...wide("日本")]), new Uint8Array([1, ...wide("語!")])]
-    expect(readRichString(new SegmentReader(cjk), 100)).toBe("日本語!")
+    expect(textOf(readRichString(new SegmentReader(cjk), 100))).toBe("日本語!")
   })
 
   it("a segment holding only an option byte is followed by the next segment's option byte, not a character", () => {
@@ -266,12 +276,12 @@ describe("biff segments", () => {
       new Uint8Array([0]),
       new Uint8Array([0, 0x63, 3, 0, 0, 0x78, 0x79, 0x7A])
     ])
-    expect(readRichString(narrow, 100)).toBe("abc")
-    expect(readRichString(narrow, 100)).toBe("xyz")
+    expect(textOf(readRichString(narrow, 100))).toBe("abc")
+    expect(textOf(readRichString(narrow, 100))).toBe("xyz")
     expect(narrow.remaining()).toBe(0)
     // 16-bit: "a" | [01] | [01 "b" "c"]
     const wide = new SegmentReader([new Uint8Array([3, 0, 0, 0x61]), new Uint8Array([1]), new Uint8Array([1, 0x62, 0, 0x63, 0])])
-    expect(readRichString(wide, 100)).toBe("abc")
+    expect(textOf(readRichString(wide, 100))).toBe("abc")
     // several in a row, right after the header, widths switching: the last option byte wins
     const many = new SegmentReader([
       new Uint8Array([2, 0, 0]),
@@ -280,15 +290,15 @@ describe("biff segments", () => {
       new Uint8Array([1]),
       new Uint8Array([1, 0xE5, 0x65, 0x2C, 0x67])
     ])
-    expect(readRichString(many, 100)).toBe("日本")
+    expect(textOf(readRichString(many, 100))).toBe("日本")
     // option bytes and then nothing left: truncated
-    expect(readRichString(new SegmentReader([new Uint8Array([2, 0, 0, 0x61]), new Uint8Array([0]), new Uint8Array([0])]), 100))
-      .toBeUndefined()
+    expect(textOf(readRichString(new SegmentReader([new Uint8Array([2, 0, 0, 0x61]), new Uint8Array([0]), new Uint8Array([0])]), 100)))
+      .toEqual({ _tag: "Truncated" })
   })
 
   it("8-bit characters are code units: 0x80-0x9F are C1 controls, not windows-1252", () => {
     const r = new SegmentReader([new Uint8Array([3, 0, 0, 0x80, 0x93, 0x9F])])
-    expect(readRichString(r, 100)).toBe("\u0080\u0093\u009F")
+    expect(textOf(readRichString(r, 100))).toBe("\u0080\u0093\u009F")
   })
 
   it("remaining() is O(1): it doesn't walk the segments", () => {
@@ -311,15 +321,15 @@ describe("biff segments", () => {
     const total = segments.reduce((n, s) => n + s.length, 0)
     const r = new SegmentReader(segments)
     expect(r.remaining()).toBe(total)
-    expect(readRichString(r, 100)).toBe("abcdef")
+    expect(textOf(readRichString(r, 100))).toBe("abcdef")
     expect(r.remaining()).toBe(0)
   })
 
   it("rich-text runs and phonetic data are skipped, across boundaries", () => {
     const segments = splitString("rich", false, [2], { runs: 2, ext: 5 })
     const reader = new SegmentReader([...segments, new Uint8Array([3, 0, 0, 0x78, 0x79, 0x7A])])
-    expect(readRichString(reader, 100)).toBe("rich")
-    expect(readRichString(reader, 100)).toBe("xyz")
+    expect(textOf(readRichString(reader, 100))).toBe("rich")
+    expect(textOf(readRichString(reader, 100))).toBe("xyz")
     expect(reader.remaining()).toBe(0)
   })
 
@@ -330,7 +340,7 @@ describe("biff segments", () => {
         fc.boolean(),
         fc.array(fc.nat(60), { maxLength: 6 }),
         (text, wide, cuts) => {
-          expect(readRichString(new SegmentReader(splitString(text, wide, cuts)), 1000)).toBe(text)
+          expect(textOf(readRichString(new SegmentReader(splitString(text, wide, cuts)), 1000))).toBe(text)
         }
       ),
       { numRuns: 1000 }
@@ -338,11 +348,11 @@ describe("biff segments", () => {
   })
 
   it("strings past maxLength, truncated strings and half characters fail", () => {
-    expect(readRichString(new SegmentReader([new Uint8Array([200, 0, 0, ...new Uint8Array(200)])]), 100)).toBeNull()
-    expect(readRichString(new SegmentReader([new Uint8Array([5, 0, 0, 0x41])]), 100)).toBeUndefined()
-    expect(readRichString(new SegmentReader([new Uint8Array([2, 0, 1, 0x41])]), 100)).toBeUndefined()
+    expect(textOf(readRichString(new SegmentReader([new Uint8Array([200, 0, 0, ...new Uint8Array(200)])]), 100))).toEqual({ _tag: "TooLong", count: 200 })
+    expect(textOf(readRichString(new SegmentReader([new Uint8Array([5, 0, 0, 0x41])]), 100))).toEqual({ _tag: "Truncated" })
+    expect(textOf(readRichString(new SegmentReader([new Uint8Array([2, 0, 1, 0x41])]), 100))).toEqual({ _tag: "Truncated" })
     // a huge phonetic block size can't skip past the end
     const huge = new SegmentReader([new Uint8Array([1, 0, 4, 0xFF, 0xFF, 0xFF, 0x7F, 0x41])])
-    expect(readRichString(huge, 100)).toBeUndefined()
+    expect(textOf(readRichString(huge, 100))).toEqual({ _tag: "Truncated" })
   })
 })

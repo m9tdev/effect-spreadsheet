@@ -37,7 +37,8 @@ import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row, SheetDetails } from "../../Workbook.ts"
 import { BOF_BIFF5_8, type BiffRecord, CONTINUE, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
-import { decodeRk, ERROR_CODES, Fields } from "../binary.ts"
+import { decodeRk, ERROR_CODES } from "../binary.ts"
+import { FixedReader, type StringFailure } from "../binary/layout.ts"
 import { WorkMeter } from "../meter.ts"
 import { numberCell } from "../numFmt.ts"
 import { LayoutBuilder } from "../sheet/layout.ts"
@@ -87,6 +88,38 @@ const DIMENSIONS = 0x0200
 const COLINFO = 0x007D
 const MERGECELLS = 0x00E5
 
+/*
+ * The declared minimum lengths of the fixed fields each record is read
+ * with (MS-XLS 2.4): a record is checked once against its minimum, then its
+ * fields are read without a check each. Strings and cell lists after them
+ * check their own bounds.
+ */
+/** Every cell and ROW record starts with its row: rw u16. */
+const ROW_FIELD_MIN = 2
+/** Cell: rw u16, col u16, ixfe u16. BLANK is just that; LABEL and RSTRING add a string. */
+const CELL_MIN = 6
+/** ROW: rw u16 ... grbit u16 at 12 (the flags with fDyZero). */
+const ROW_MIN = 14
+/** LABELSST: cell, isst u32. */
+const LABELSST_MIN = 10
+/** NUMBER: cell, num f64. FORMULA: cell, result (8 bytes; its last u16 0xFFFF for a special result). */
+const NUMBER_MIN = 14
+const FORMULA_MIN = 14
+/** RK: cell, rk u32. */
+const RK_MIN = 10
+/** BOOLERR: cell, bBoolErr u8, fError u8. */
+const BOOLERR_MIN = 8
+/** MULRK, MULBLANK: rw u16, colFirst u16, the cells (6 or 2 bytes each), colLast u16. */
+const MUL_MIN = 6
+/** DIMENSIONS: rows (u32 each in BIFF8, u16 in BIFF5), then columns (u16 each). */
+const DIMENSIONS_MIN_BIFF8 = 12
+const DIMENSIONS_MIN_BIFF5 = 8
+/** COLINFO: colFirst u16, colLast u16, coldx u16, ixfe u16, flags u16. */
+const COLINFO_MIN = 10
+/** MERGECELLS: cmcs u16, then 8 bytes per range (rwFirst, rwLast, colFirst, colLast: u16 each). */
+const MERGECELLS_COUNT = 2
+const MERGE_SIZE = 8
+
 export interface SheetContext {
   readonly stream: Uint8Array
   readonly offset: number
@@ -115,6 +148,14 @@ const stringMaxBytes = (limits: Limits): number => 16 + 7 * limits.maxStringLeng
  * as the XLSX reader, which keeps whatever error text a cell has.
  */
 const errorCode = (code: number): string => ERROR_CODES.get(code) ?? "#N/A"
+
+const truncated = (part: string, record: BiffRecord) => malformed(part, `truncated record 0x${record.type.toString(16)}`, record.offset)
+
+/** The error of a failed string read in `record`: truncated, or LimitExceeded with the string's length. */
+const stringFailed = (read: StringFailure, part: string, record: BiffRecord, limits: Limits): SpreadsheetError =>
+  read._tag === "TooLong"
+    ? new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: read.count })
+    : truncated(part, record)
 
 /** Opens the substream: checks the offset and the worksheet BOF; the reader after it, or why not. */
 const openSubstream = (context: SheetContext): RecordReader | SpreadsheetError => {
@@ -152,6 +193,7 @@ class RowScan {
   done = false
   private nested = 0
   private readonly reader: RecordReader
+  private readonly fields = new FixedReader()
 
   constructor(context: SheetContext, offset: number) {
     this.reader = new RecordReader(context.stream, context.part, offset, context.end)
@@ -177,12 +219,18 @@ class RowScan {
           return k + 1
         }
         this.nested--
-      } else if (this.nested === 0 && record.data.length >= 2) {
-        const row = record.data[0]! | (record.data[1]! << 8)
+      } else if (this.nested === 0) {
+        // a cell or ROW record too short for its row is reported by the
+        // main pass; any other record isn't read here
+        const f = this.fields.fixed(record.data, ROW_FIELD_MIN)
+        if (f === undefined) continue
+        const row = f.u16(0)
         if (CELL_RECORDS.has(record.type)) this.lastAt.set(row, record.offset)
         else if (record.type === ROW) {
           this.declared.add(row)
-          if (((record.data[12] ?? 0) & 0x20) !== 0) this.hidden.add(row)
+          // the flags byte, if the record reaches it (a ROW cut before
+          // ROW_MIN fails in the main pass, after rows before it are out)
+          if (record.data.length > 12 && (f.u8(12) & 0x20) !== 0) this.hidden.add(row)
           if (!this.lastAt.has(row)) this.lastAt.set(row, -1)
         }
       }
@@ -242,6 +290,8 @@ export class Rows {
   nested = 0
   /** Whether a FORMULA waits for its text result in the next STRING record (see `handle`). */
   wait: FormulaWait = IDLE
+  /** Pointed at each record whose fixed fields are read (see `handle`). */
+  readonly fields = new FixedReader()
 
   constructor(context: SheetContext) {
     this.rows = new HeldRows(context.limits)
@@ -401,70 +451,61 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
     if (record.type === EOF) rows.nested--
     return false
   }
-  const f = new Fields(record.data)
-  const truncated = () => malformed(part, `truncated record 0x${record.type.toString(16)}`, record.offset)
-  const tooLong = () => new LimitExceeded({ limit: "maxStringLength", max: context.limits.maxStringLength, actual: context.limits.maxStringLength + 1 })
-  const rc = (): readonly [number, number, number] | undefined => {
-    const row = f.u16(0)
-    const col = f.u16(2)
-    const xf = f.u16(4)
-    return row === undefined || col === undefined || xf === undefined ? undefined : [row, col, xf]
-  }
+  const { data } = record
+  const fields = rows.fields
   switch (record.type) {
     case EOF:
       return true
-    case ROW: {
-      const row = f.u16(0)
-      const grbit = f.u16(12)
+    case ROW:
       // the `RowScan` already took the declared row and its hidden flag
-      if (row === undefined || grbit === undefined) return truncated()
-      return false
-    }
+      return fields.fixed(data, ROW_MIN) === undefined ? truncated(part, record) : false
     case LABELSST: {
-      const at = rc()
+      const f = fields.fixed(data, LABELSST_MIN)
+      if (f === undefined) return truncated(part, record)
       const isst = f.u32(6)
-      if (at === undefined || isst === undefined) return truncated()
       const value = globals.strings[isst]
       if (value === undefined) return malformed(part, `shared string ${isst} doesn't exist`, record.offset)
-      return rows.cell(at[0], Cell.text(at[1], value)) ?? false
+      return rows.cell(f.u16(0), Cell.text(f.u16(2), value)) ?? false
     }
     case LABEL:
     case RSTRING: {
-      const at = rc()
-      if (at === undefined) return truncated()
-      const text = readString(record.data, 6, globals.text, 2)
-      if (text === undefined) return truncated()
-      if (text === null) return tooLong()
-      return rows.cell(at[0], Cell.text(at[1], text.value)) ?? false
+      const f = fields.fixed(data, CELL_MIN)
+      if (f === undefined) return truncated(part, record)
+      const row = f.u16(0)
+      const column = f.u16(2)
+      const text = readString(data, CELL_MIN, globals.text, 2)
+      if (text._tag !== "Ok") return stringFailed(text, part, record, context.limits)
+      return rows.cell(row, Cell.text(column, text.value)) ?? false
     }
     case NUMBER: {
-      const at = rc()
-      const value = f.f64(6)
-      if (at === undefined || value === undefined) return truncated()
-      return rows.cell(at[0], xfNumber(globals, at[1], at[2], value)) ?? false
+      const f = fields.fixed(data, NUMBER_MIN)
+      if (f === undefined) return truncated(part, record)
+      return rows.cell(f.u16(0), xfNumber(globals, f.u16(2), f.u16(4), f.f64(6))) ?? false
     }
     case RK: {
-      const at = rc()
-      const rk = f.u32(6)
-      if (at === undefined || rk === undefined) return truncated()
-      return rows.cell(at[0], xfNumber(globals, at[1], at[2], decodeRk(rk))) ?? false
+      const f = fields.fixed(data, RK_MIN)
+      if (f === undefined) return truncated(part, record)
+      return rows.cell(f.u16(0), xfNumber(globals, f.u16(2), f.u16(4), decodeRk(f.u32(6)))) ?? false
     }
     case MULRK:
     case MULBLANK: {
+      const f = fields.fixed(data, MUL_MIN)
+      if (f === undefined) return truncated(part, record)
       const row = f.u16(0)
       const first = f.u16(2)
-      const last = f.u16(record.data.length - 2)
+      const last = f.u16(data.length - 2)
       const width = record.type === MULRK ? 6 : 2
-      if (row === undefined || first === undefined || last === undefined || record.data.length < 6) return truncated()
-      const count = (record.data.length - 6) / width
+      const count = (data.length - MUL_MIN) / width
       if (!Number.isInteger(count) || last - first + 1 !== count) {
         return malformed(part, `record 0x${record.type.toString(16)} doesn't match its column range`, record.offset)
       }
+      // the cells fill the record between colFirst and colLast: cell k's
+      // ixfe at 4 + width * k (and its rk after it) ends by data.length - 2.
       // progress: k up to count (bounded by the record length)
       for (let k = 0; k < count; k++) {
-        const xf = f.u16(4 + width * k)!
+        const xf = f.u16(4 + width * k)
         const cell = record.type === MULRK
-          ? xfNumber(globals, first + k, xf, decodeRk(f.u32(6 + width * k)!))
+          ? xfNumber(globals, first + k, xf, decodeRk(f.u32(6 + width * k)))
           : Cell.empty(first + k)
         const error = rows.cell(row, cell)
         if (error !== undefined) return error
@@ -472,38 +513,38 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
       return false
     }
     case BOOLERR: {
-      const at = rc()
+      const f = fields.fixed(data, BOOLERR_MIN)
+      if (f === undefined) return truncated(part, record)
+      const row = f.u16(0)
+      const column = f.u16(2)
       const value = f.u8(6)
-      const isError = f.u8(7)
-      if (at === undefined || value === undefined || isError === undefined) return truncated()
-      if (isError === 1) {
-        return rows.cell(at[0], Cell.error(at[1], errorCode(value))) ?? false
-      }
-      return rows.cell(at[0], Cell.boolean(at[1], value !== 0)) ?? false
+      if (f.u8(7) === 1) return rows.cell(row, Cell.error(column, errorCode(value))) ?? false
+      return rows.cell(row, Cell.boolean(column, value !== 0)) ?? false
     }
     case BLANK: {
-      const at = rc()
-      if (at === undefined) return truncated()
-      return rows.cell(at[0], Cell.empty(at[1])) ?? false
+      const f = fields.fixed(data, CELL_MIN)
+      if (f === undefined) return truncated(part, record)
+      return rows.cell(f.u16(0), Cell.empty(f.u16(2))) ?? false
     }
     case FORMULA:
     case FORMULA_BIFF4: {
-      const at = rc()
-      if (at === undefined || record.data.length < 14) return truncated()
+      const f = fields.fixed(data, FORMULA_MIN)
+      if (f === undefined) return truncated(part, record)
+      const row = f.u16(0)
+      const column = f.u16(2)
       if (f.u16(12) === 0xFFFF) {
         // a special result: string (in the next STRING record), boolean, error, empty string
-        const kind = f.u8(6)!
-        const value = f.u8(8)!
+        const kind = f.u8(6)
+        const value = f.u8(8)
         if (kind === 0) {
-          rows.wait = { _tag: "AwaitingString", row: at[0], column: at[1] }
+          rows.wait = { _tag: "AwaitingString", row, column }
           return false
         }
-        if (kind === 1) return rows.cell(at[0], Cell.boolean(at[1], value !== 0)) ?? false
-        if (kind === 2) return rows.cell(at[0], Cell.error(at[1], errorCode(value))) ?? false
-        return rows.cell(at[0], Cell.text(at[1], "")) ?? false
+        if (kind === 1) return rows.cell(row, Cell.boolean(column, value !== 0)) ?? false
+        if (kind === 2) return rows.cell(row, Cell.error(column, errorCode(value))) ?? false
+        return rows.cell(row, Cell.text(column, "")) ?? false
       }
-      const value = f.f64(6)!
-      return rows.cell(at[0], xfNumber(globals, at[1], at[2], value)) ?? false
+      return rows.cell(row, xfNumber(globals, column, f.u16(4), f.f64(6))) ?? false
     }
     case STRING: {
       const pending = rows.wait
@@ -513,11 +554,9 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
       // with an option byte); BIFF5: a u16-count code-page string
       const read = "segments" in record
         ? readRichString(new SegmentReader(record.segments), context.limits.maxStringLength)
-        : readString(record.data, 0, globals.text, 2)
-      if (read === undefined) return truncated()
-      if (read === null) return tooLong()
-      const text = typeof read === "string" ? read : read.value
-      return rows.cell(pending.row, Cell.text(pending.column, text)) ?? false
+        : readString(data, 0, globals.text, 2)
+      if (read._tag !== "Ok") return stringFailed(read, part, record, context.limits)
+      return rows.cell(pending.row, Cell.text(pending.column, read.value)) ?? false
     }
     default:
       return false
@@ -663,6 +702,7 @@ const walkDetails = (context: SheetContext, walked: Walked, report: Effect.Effec
     if (!(opened instanceof RecordReader)) return yield* Effect.fail(opened)
     const { part, limits, globals } = context
     const layout = new LayoutBuilder(limits)
+    const fields = new FixedReader()
     let nested = 0
     // progress: every next() advances the reader
     for (let k = 1;; k++) {
@@ -684,32 +724,31 @@ const walkDetails = (context: SheetContext, walked: Walked, report: Effect.Effec
         continue
       }
       if (nested > 0) continue
-      const f = new Fields(record.data)
+      const { data } = record
       if (record.type === DIMENSIONS) {
-        const [r1, r2, c1, c2] = globals.biff8 ? [f.u32(0), f.u32(4), f.u16(8), f.u16(10)] : [f.u16(0), f.u16(2), f.u16(4), f.u16(6)]
-        if (r1 !== undefined && r2 !== undefined && c1 !== undefined && c2 !== undefined && r2 > r1 && c2 > c1) {
-          layout.dimension({ firstRow: r1, firstColumn: c1, lastRow: r2 - 1, lastColumn: c2 - 1 })
-        }
+        // a cut DIMENSIONS is ignored, as is an empty one
+        const biff8 = globals.biff8
+        const f = fields.fixed(data, biff8 ? DIMENSIONS_MIN_BIFF8 : DIMENSIONS_MIN_BIFF5)
+        if (f === undefined) continue
+        const [r1, r2, c1, c2] = biff8 ? [f.u32(0), f.u32(4), f.u16(8), f.u16(10)] : [f.u16(0), f.u16(2), f.u16(4), f.u16(6)]
+        if (r2 > r1 && c2 > c1) layout.dimension({ firstRow: r1, firstColumn: c1, lastRow: r2 - 1, lastColumn: c2 - 1 })
       } else if (record.type === COLINFO) {
         const tooMany = layout.columnRecord()
         if (tooMany !== undefined) return yield* Effect.fail(tooMany)
-        const first = f.u16(0)
-        const last = f.u16(2)
-        const grbit = f.u16(8)
-        if (first === undefined || last === undefined || grbit === undefined) {
-          return yield* Effect.fail(malformed(part, "truncated COLINFO", record.offset))
-        }
+        const f = fields.fixed(data, COLINFO_MIN)
+        if (f === undefined) return yield* Effect.fail(malformed(part, "truncated COLINFO", record.offset))
         // the part at or past maxColumns is dropped, as in XLSX
-        if ((grbit & 0x01) !== 0) layout.hideColumns(first, last)
+        if ((f.u16(8) & 0x01) !== 0) layout.hideColumns(f.u16(0), f.u16(2))
       } else if (record.type === MERGECELLS) {
-        const count = f.u16(0)
-        if (count === undefined || 2 + 8 * count > record.data.length) {
+        const f = fields.fixed(data, MERGECELLS_COUNT)
+        if (f === undefined || MERGECELLS_COUNT + MERGE_SIZE * f.u16(0) > data.length) {
           return yield* Effect.fail(malformed(part, "truncated MERGECELLS", record.offset))
         }
-        // progress: j up to count (bounded by the record length)
+        const count = f.u16(0)
+        // progress: j up to count (the ranges fit in the record: checked above)
         for (let j = 0; j < count; j++) {
-          const at = 2 + 8 * j
-          const [r1, r2, c1, c2] = [f.u16(at)!, f.u16(at + 2)!, f.u16(at + 4)!, f.u16(at + 6)!]
+          const at = MERGECELLS_COUNT + MERGE_SIZE * j
+          const [r1, r2, c1, c2] = [f.u16(at), f.u16(at + 2), f.u16(at + 4), f.u16(at + 6)]
           const tooMany = layout.merge({ firstRow: Math.min(r1, r2), firstColumn: Math.min(c1, c2), lastRow: Math.max(r1, r2), lastColumn: Math.max(c1, c2) })
           if (tooMany !== undefined) return yield* Effect.fail(tooMany)
         }

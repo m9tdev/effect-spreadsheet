@@ -195,10 +195,10 @@ describe("xls defined names: which workbook a reference points at", () => {
 
   it("SUPBOOK strings and sizes are limited", async () => {
     const long = { globals: [selfBook(1), externalBook("\u0001p.xls", ["x".repeat(40)])], sheets: sheets("S") }
-    expect(await errorOf(long, { maxStringLength: 20 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    expect(await errorOf(long, { maxStringLength: 20 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 20, actual: 40 })
     // the path too: a book with no sheet names, so only the path can be too long
     const longPath = { globals: [selfBook(1), externalBook(`\u0001${"p".repeat(40)}.xls`, [])], sheets: sheets("S") }
-    expect(await errorOf(longPath, { maxStringLength: 20 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    expect(await errorOf(longPath, { maxStringLength: 20 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 20, actual: 45 })
     const names = Array.from({ length: 100 }, (_, k) => `Sheet${k}`)
     const big = { globals: [X.record(SUPBOOK, [...X.u16(100), ...X.xlString("\u0001p.xls")]), X.record(CONTINUE, names.flatMap(X.xlString))], sheets: sheets("S") }
     expect(await errorOf(big, { maxDecompressedBytes: 200 })).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes" })
@@ -430,36 +430,40 @@ describe("xls globals: limits and string bounds", () => {
 
   it("FORMAT codes and NAME names longer than maxStringLength are LimitExceeded", async () => {
     const limits = { maxStringLength: 20 }
-    expect(await errorOf({ globals: [X.format(164, "0".repeat(21))], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
-    expect(await errorOf({ biff: 5, globals: [X.format(164, "0".repeat(21), 5)], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    expect(await errorOf({ globals: [X.format(164, "0".repeat(21))], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 21 })
+    expect(await errorOf({ biff: 5, globals: [X.format(164, "0".repeat(23), 5)], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 23 })
+    // exactly at the limit is read
+    const atLimit = await read({ globals: [X.format(164, "0".repeat(20)), X.format(165, "0".repeat(20), 8)], sheets: sheets("S") }, limits)
+    expect(atLimit.sheets.map((s) => s.name)).toEqual(["S"])
     expect(await errorOf({ globals: [X.name("N".repeat(21), ref3d(0x3A, 0, 0, 0))], sheets: sheets("S") }, limits)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 20, actual: 21 })
     const wb = await read({ globals: [X.format(164, "0".repeat(20)), X.xf(164), X.name("N".repeat(20), ref3d(0x3A, 0, 0, 0))], sheets: sheets("S") }, limits)
     expect(wb.definedNames.map((d) => d.name)).toEqual(["N".repeat(20)])
   })
 
-  it("readString: strings end where their characters end, and running past the data is undefined", () => {
+  it("readString: strings end where their characters end, and running past the data is Truncated", () => {
     const biff8: Text = { biff8: true, decoder: new TextDecoder("windows-1252"), maxLength: 100 }
     const biff5: Text = { ...biff8, biff8: false }
     const bytes = (...parts: ReadonlyArray<ReadonlyArray<number>>) => new Uint8Array(parts.flat())
     const pad = [9, 9, 9]
+    const TRUNCATED = { _tag: "Truncated" }
     // BIFF8 XLUnicodeString: u16 count, flags, characters
-    expect(readString(bytes(pad, X.xlString("abc"), [7, 7]), 3, biff8, 2)).toEqual({ value: "abc", end: 9 })
-    expect(readString(bytes(pad, X.xlString("añ\u0101")), 3, biff8, 2)).toEqual({ value: "añ\u0101", end: 12 })
-    expect(readString(bytes(pad, X.xlString("abc").slice(0, 5)), 3, biff8, 2)).toBeUndefined()
+    expect(readString(bytes(pad, X.xlString("abc"), [7, 7]), 3, biff8, 2)).toEqual({ _tag: "Ok", value: "abc", end: 9 })
+    expect(readString(bytes(pad, X.xlString("añ\u0101")), 3, biff8, 2)).toEqual({ _tag: "Ok", value: "añ\u0101", end: 12 })
+    expect(readString(bytes(pad, X.xlString("abc").slice(0, 5)), 3, biff8, 2)).toEqual(TRUNCATED)
     // BIFF8 ShortXLUnicodeString: u8 count, flags, characters
-    expect(readString(bytes(pad, X.shortString("abc"), [7]), 3, biff8, 1)).toEqual({ value: "abc", end: 8 })
-    expect(readString(bytes(pad, X.shortString("abc").slice(0, 4)), 3, biff8, 1)).toBeUndefined()
-    expect(readString(bytes(pad, X.shortString("\u0101b").slice(0, 5)), 3, biff8, 1)).toBeUndefined()
-    expect(readString(bytes(pad, [3]), 3, biff8, 1)).toBeUndefined()
+    expect(readString(bytes(pad, X.shortString("abc"), [7]), 3, biff8, 1)).toEqual({ _tag: "Ok", value: "abc", end: 8 })
+    expect(readString(bytes(pad, X.shortString("abc").slice(0, 4)), 3, biff8, 1)).toEqual(TRUNCATED)
+    expect(readString(bytes(pad, X.shortString("\u0101b").slice(0, 5)), 3, biff8, 1)).toEqual(TRUNCATED)
+    expect(readString(bytes(pad, [3]), 3, biff8, 1)).toEqual(TRUNCATED)
     // BIFF5: u8 or u16 count, code-page bytes
-    expect(readString(bytes(pad, X.string5([0x61, 0x80], 1), [7]), 3, biff5, 1)).toEqual({ value: "a\u20AC", end: 6 })
-    expect(readString(bytes(pad, X.string5([0x61, 0x80], 2), [7]), 3, biff5, 2)).toEqual({ value: "a\u20AC", end: 7 })
-    expect(readString(bytes(pad, X.string5([0x61, 0x80], 1).slice(0, 2)), 3, biff5, 1)).toBeUndefined()
-    expect(readString(bytes(pad, X.string5([0x61, 0x80], 2).slice(0, 3)), 3, biff5, 2)).toBeUndefined()
-    expect(readString(bytes(pad, [1]), 3, biff5, 2)).toBeUndefined()
+    expect(readString(bytes(pad, X.string5([0x61, 0x80], 1), [7]), 3, biff5, 1)).toEqual({ _tag: "Ok", value: "a\u20AC", end: 6 })
+    expect(readString(bytes(pad, X.string5([0x61, 0x80], 2), [7]), 3, biff5, 2)).toEqual({ _tag: "Ok", value: "a\u20AC", end: 7 })
+    expect(readString(bytes(pad, X.string5([0x61, 0x80], 1).slice(0, 2)), 3, biff5, 1)).toEqual(TRUNCATED)
+    expect(readString(bytes(pad, X.string5([0x61, 0x80], 2).slice(0, 3)), 3, biff5, 2)).toEqual(TRUNCATED)
+    expect(readString(bytes(pad, [1]), 3, biff5, 2)).toEqual(TRUNCATED)
     // past the data, and over the limit
-    expect(readString(bytes(pad), 4, biff8, 2)).toBeUndefined()
-    expect(readString(bytes(X.string5([0x61, 0x62], 1)), 0, { ...biff5, maxLength: 1 }, 1)).toBeNull()
+    expect(readString(bytes(pad), 4, biff8, 2)).toEqual(TRUNCATED)
+    expect(readString(bytes(X.string5([0x61, 0x62], 1)), 0, { ...biff5, maxLength: 1 }, 1)).toEqual({ _tag: "TooLong", count: 2 })
   })
 })
 

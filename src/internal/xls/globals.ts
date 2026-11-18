@@ -20,7 +20,7 @@ import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { DefinedName } from "../../Workbook.ts"
 import { type BiffRecord, BOF_BIFF5_8, EOF, type Gathering, RecordReader, readBof } from "../biff/records.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
-import { Fields } from "../binary.ts"
+import { FixedReader } from "../binary/layout.ts"
 import { WorkMeter } from "../meter.ts"
 import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
@@ -39,6 +39,38 @@ const FILEPASS = 0x002F
 const NAME = 0x0018
 const EXTERNSHEET = 0x0017
 const SUPBOOK = 0x01AE
+
+/*
+ * The declared minimum lengths of the fixed fields each record is read
+ * with (MS-XLS 2.4): a record is checked once against its minimum, then its
+ * fields are read without a check each. Strings after them check their own.
+ */
+/** CODEPAGE, DATEMODE: one u16. */
+const U16_RECORD_MIN = 2
+/** BOUNDSHEET: lbPlyPos u32, hsState u8, dt u8, then the name. */
+const BOUNDSHEET_MIN = 6
+/** FORMAT: ifmt u16, then the format code. */
+const FORMAT_MIN = 2
+/** XF: ifnt u16, ifmt u16 (the rest isn't read). */
+const XF_MIN = 4
+/** SUPBOOK: ctab u16, then a marker u16 and nothing else (this workbook, add-ins), or the path and sheet names. */
+const SUPBOOK_CTAB = 2
+const SUPBOOK_MARKER_LENGTH = 4
+/** SST: cstTotal u32, cstUnique u32, then the strings. */
+const SST_HEADER = 8
+/** EXTERNSHEET: cXTI u16, then 6-byte XTIs (iSupBook, itabFirst, itabLast: u16 each). */
+const EXTERNSHEET_COUNT = 2
+const XTI_SIZE = 6
+/**
+ * NAME: grbit u16, chKey u8, cch u8, cce u16, reserved u16, itab u16,
+ * 4 reserved bytes, then the name's option byte (its characters and the
+ * formula follow).
+ */
+const NAME_HEADER = 15
+/** A name formula of one PtgRef3d / PtgRefErr3d: ptg u8, ixti u16, row u16, column u16. */
+const REF3D_LENGTH = 7
+/** A name formula of one PtgArea3d / PtgAreaErr3d: ptg u8, ixti u16, rows u16 x2, columns u16 x2. */
+const AREA3D_LENGTH = 11
 
 export type SheetKind = "worksheet" | "macrosheet" | "chartsheet" | "other"
 
@@ -68,9 +100,8 @@ export interface Globals {
   readonly definedNames: ReadonlyArray<DefinedName>
 }
 
-/** A string longer than maxStringLength (`actual` when its length is known). */
-const tooLong = (limits: Limits, actual = limits.maxStringLength + 1) =>
-  new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual })
+/** A string longer than maxStringLength: `actual` is its character count. */
+const tooLong = (limits: Limits, actual: number) => new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual })
 
 const malformed = (reason: string, offset?: number) =>
   new MalformedFile({ format: "xls", part: "workbook globals", reason, ...(offset === undefined ? {} : { offset }) })
@@ -112,13 +143,12 @@ interface Xti {
  * the entries of SUPBOOK 0 are taken to point at this workbook.
  */
 const nameFormula = (
+  reader: FixedReader,
   rgce: Uint8Array,
   xtis: ReadonlyArray<Xti>,
   books: ReadonlyArray<Book>,
   sheetNames: ReadonlyArray<string>
 ): string => {
-  const f = new Fields(rgce)
-  const ptg = f.u8(0)
   const prefix = (ixti: number): string | undefined => {
     const xti = xtis[ixti]
     if (xti === undefined) return undefined
@@ -130,17 +160,24 @@ const nameFormula = (
     if (first === undefined || last === undefined || xti.last < xti.first) return "#REF!"
     return sheetPrefix(book.kind === "self" ? "" : `[${book.link}]`, xti.first === xti.last ? [first] : [first, last])
   }
-  if ((ptg === 0x3A || ptg === 0x5A || ptg === 0x7A) && rgce.length === 7) {
-    const sheet = prefix(f.u16(1)!)
-    return sheet === undefined ? "" : sheet + cellText(f.u16(3)!, f.u16(5)!)
+  // only a formula of exactly one of these tokens is read: its length is the token's
+  const f = reader.fixed(rgce, REF3D_LENGTH)
+  if (f === undefined) return ""
+  const ptg = f.u8(0)
+  if ((ptg === 0x3A || ptg === 0x5A || ptg === 0x7A) && rgce.length === REF3D_LENGTH) {
+    const sheet = prefix(f.u16(1))
+    return sheet === undefined ? "" : sheet + cellText(f.u16(3), f.u16(5))
   }
-  if ((ptg === 0x3B || ptg === 0x5B || ptg === 0x7B) && rgce.length === 11) {
-    const sheet = prefix(f.u16(1)!)
-    return sheet === undefined ? "" : sheet + areaText(f.u16(3)!, f.u16(5)!, f.u16(7)!, f.u16(9)!, BIFF8_GRID)
+  if ((ptg === 0x3B || ptg === 0x5B || ptg === 0x7B) && rgce.length === AREA3D_LENGTH) {
+    const sheet = prefix(f.u16(1))
+    return sheet === undefined ? "" : sheet + areaText(f.u16(3), f.u16(5), f.u16(7), f.u16(9), BIFF8_GRID)
   }
   // PtgRefErr3d / PtgAreaErr3d: a reference whose cells were deleted
-  if (((ptg === 0x3C || ptg === 0x5C || ptg === 0x7C) && rgce.length === 7) || ((ptg === 0x3D || ptg === 0x5D || ptg === 0x7D) && rgce.length === 11)) {
-    const sheet = prefix(f.u16(1)!)
+  if (
+    ((ptg === 0x3C || ptg === 0x5C || ptg === 0x7C) && rgce.length === REF3D_LENGTH) ||
+    ((ptg === 0x3D || ptg === 0x5D || ptg === 0x7D) && rgce.length === AREA3D_LENGTH)
+  ) {
+    const sheet = prefix(f.u16(1))
     return sheet === undefined ? "" : sheet === "#REF!" ? sheet : `${sheet}#REF!`
   }
   return ""
@@ -239,6 +276,8 @@ class GlobalsWalk {
   externalBooks = 0
   xtis: Array<Xti> = []
   pending: Pending = RECORDS
+  /** Pointed at each record whose fixed fields are read. */
+  private readonly fields = new FixedReader()
   /** Work done in the current batch: records, CONTINUEs and strings read, and their bytes. */
   private units = 0
   private bytes = 0
@@ -304,7 +343,7 @@ class GlobalsWalk {
     if (record instanceof MalformedFile) return record
     this.units++
     this.bytes += 4 + record.data.length
-    const f = new Fields(record.data)
+    const { data } = record
     switch (record.type) {
       case EOF:
         return "done"
@@ -320,46 +359,27 @@ class GlobalsWalk {
       case NAME:
         return biff8 ? this.startContinues(record, "Name") : undefined
       case CODEPAGE: {
-        const cp = f.u16(0)
-        if (cp !== undefined) this.text = { ...this.text, decoder: textDecoder(codepageLabel(cp)) }
+        // a cut CODEPAGE is ignored
+        const f = this.fields.fixed(data, U16_RECORD_MIN)
+        if (f !== undefined) this.text = { ...this.text, decoder: textDecoder(codepageLabel(f.u16(0))) }
         return undefined
       }
-      case DATEMODE:
-        this.date1904 = f.u16(0) === 1
-        return undefined
-      case BOUNDSHEET: {
-        const offset = f.u32(0)
-        const state = f.u8(4)
-        const dt = f.u8(5)
-        const name = readString(record.data, 6, this.text, 1)
-        if (offset === undefined || state === undefined || dt === undefined || name === undefined) {
-          return malformed("truncated BOUNDSHEET", record.offset)
-        }
-        if (name === null) return tooLong(limits)
-        if (dt === 6) {
-          // a VB module, not a sheet; real workbooks have a few, so they share maxSheets' bound
-          if (this.modules.length >= limits.maxSheets) {
-            return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: this.modules.length + 1 })
-          }
-          this.modules.push(offset)
-          return undefined
-        }
-        if (this.sheets.length >= limits.maxSheets) {
-          return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: this.sheets.length + 1 })
-        }
-        this.sheets.push({
-          name: name.value,
-          visibility: (state & 0x03) === 1 ? "hidden" : (state & 0x03) === 2 ? "veryHidden" : "visible",
-          offset,
-          kind: dt === 0 ? "worksheet" : dt === 1 ? "macrosheet" : dt === 2 ? "chartsheet" : "other"
-        })
+      case DATEMODE: {
+        // a cut DATEMODE means the 1900 system
+        const f = this.fields.fixed(data, U16_RECORD_MIN)
+        this.date1904 = f !== undefined && f.u16(0) === 1
         return undefined
       }
+      case BOUNDSHEET:
+        return this.boundSheet(record)
       case FORMAT: {
+        // a cut FORMAT is ignored; a code over the limit is not
+        const f = this.fields.fixed(data, FORMAT_MIN)
+        if (f === undefined) return undefined
         const id = f.u16(0)
-        const code = readString(record.data, 2, this.text, biff8 ? 2 : 1)
-        if (code === null) return tooLong(limits)
-        if (id !== undefined && code !== undefined) {
+        const code = readString(data, FORMAT_MIN, this.text, biff8 ? 2 : 1)
+        if (code._tag === "TooLong") return tooLong(limits, code.count)
+        if (code._tag === "Ok") {
           // classified here (a later FORMAT with the same id wins); the
           // scan counts in the batch, by the code's length
           addFormat(this.custom, id, code.value)
@@ -367,12 +387,46 @@ class GlobalsWalk {
         }
         return undefined
       }
-      case XF:
-        this.xfFormats.push(f.u16(2) ?? 0)
+      case XF: {
+        // a cut XF still takes its index, with the General format
+        const f = this.fields.fixed(data, XF_MIN)
+        this.xfFormats.push(f === undefined ? 0 : f.u16(2))
         return undefined
+      }
       default:
         return undefined
     }
+  }
+
+  /** A BOUNDSHEET: a sheet, or a VB module's offset. A cut one is MalformedFile. */
+  private boundSheet(record: BiffRecord): SpreadsheetError | undefined {
+    const { limits } = this
+    const f = this.fields.fixed(record.data, BOUNDSHEET_MIN)
+    if (f === undefined) return malformed("truncated BOUNDSHEET", record.offset)
+    const offset = f.u32(0)
+    const state = f.u8(4)
+    const dt = f.u8(5)
+    const name = readString(record.data, BOUNDSHEET_MIN, this.text, 1)
+    if (name._tag === "TooLong") return tooLong(limits, name.count)
+    if (name._tag === "Truncated") return malformed("truncated BOUNDSHEET", record.offset)
+    if (dt === 6) {
+      // a VB module, not a sheet; real workbooks have a few, so they share maxSheets' bound
+      if (this.modules.length >= limits.maxSheets) {
+        return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: this.modules.length + 1 })
+      }
+      this.modules.push(offset)
+      return undefined
+    }
+    if (this.sheets.length >= limits.maxSheets) {
+      return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: this.sheets.length + 1 })
+    }
+    this.sheets.push({
+      name: name.value,
+      visibility: (state & 0x03) === 1 ? "hidden" : (state & 0x03) === 2 ? "veryHidden" : "visible",
+      offset,
+      kind: dt === 0 ? "worksheet" : dt === 1 ? "macrosheet" : dt === 2 ? "chartsheet" : "other"
+    })
+    return undefined
   }
 
   /**
@@ -381,11 +435,11 @@ class GlobalsWalk {
    * all counted in the batch's bytes while its CONTINUEs were read.
    */
   private externSheet(segments: SegmentReader): undefined {
-    const count = segments.u16() ?? 0
+    const count = segments.has(EXTERNSHEET_COUNT) ? segments.u16() : 0
     this.xtis = []
     // progress: k up to count; each entry reads 6 of the bytes left
-    for (let k = 0; k < count && segments.remaining() >= 6; k++) {
-      this.xtis.push({ book: segments.u16()!, first: segments.u16()!, last: segments.u16()! })
+    for (let k = 0; k < count && segments.has(XTI_SIZE); k++) {
+      this.xtis.push({ book: segments.u16(), first: segments.u16(), last: segments.u16() })
     }
     return undefined
   }
@@ -397,6 +451,7 @@ class GlobalsWalk {
    */
   private name(segments: SegmentReader): LimitExceeded | undefined {
     const { limits } = this
+    if (!segments.has(NAME_HEADER)) return undefined
     const grbit = segments.u16()
     segments.u8() // keyboard shortcut
     const cch = segments.u8()
@@ -405,18 +460,18 @@ class GlobalsWalk {
     const itab = segments.u16()
     segments.skip(4)
     const flags = segments.u8()
-    if (grbit === undefined || cch === undefined || cce === undefined || itab === undefined || flags === undefined) return undefined
     if (cch > limits.maxStringLength) return tooLong(limits, cch)
     const chars = segments.chars(cch, (flags & 0x01) !== 0)
-    if (chars === undefined || segments.remaining() < cce) return undefined
+    if (chars._tag !== "Ok" || !segments.has(cce)) return undefined
     if (this.names.length >= limits.maxDefinedNames) {
       return new LimitExceeded({ limit: "maxDefinedNames", max: limits.maxDefinedNames, actual: this.names.length + 1 })
     }
     const rgce = new Uint8Array(cce)
     // progress: k up to cce, with at least cce bytes left
-    for (let k = 0; k < cce; k++) rgce[k] = segments.u8()!
+    for (let k = 0; k < cce; k++) rgce[k] = segments.u8()
     const builtin = (grbit & 0x20) !== 0
-    const name = builtin ? `_xlnm.${BUILTIN_NAMES[chars.charCodeAt(0)] ?? chars}` : chars
+    const text = chars.value
+    const name = builtin ? `_xlnm.${BUILTIN_NAMES[text.charCodeAt(0)] ?? text}` : text
     this.names.push({ name, hidden: (grbit & 0x01) !== 0, scope: itab > 0 ? itab - 1 : undefined, rgce })
     return undefined
   }
@@ -452,9 +507,9 @@ class GlobalsWalk {
         this.pending = RECORDS
         return this.name(segments)
       case "Sst": {
+        if (!segments.has(SST_HEADER)) return malformed("truncated SST", record.offset)
         segments.u32() // total count
         const unique = segments.u32()
-        if (unique === undefined) return malformed("truncated SST", record.offset)
         if (unique > limits.maxSharedStrings) {
           return new LimitExceeded({ limit: "maxSharedStrings", max: limits.maxSharedStrings, actual: unique })
         }
@@ -465,18 +520,19 @@ class GlobalsWalk {
       case "Supbook": {
         // this workbook and add-ins are exactly ctab + marker (4 bytes); an
         // external book's path can have a character count equal to a marker
-        const marker = record.data.length === 4 ? new Fields(record.data).u16(2) : undefined
+        const head = record.data.length === SUPBOOK_MARKER_LENGTH ? this.fields.fixed(record.data, SUPBOOK_MARKER_LENGTH) : undefined
+        const marker = head?.u16(2)
         if (marker === 0x0401 || marker === 0x3A01) {
           this.books.push(marker === 0x0401 ? SELF : { kind: "addin" })
           this.pending = RECORDS
           return undefined
         }
-        const ctab = segments.u16() ?? 0
+        const ctab = segments.has(SUPBOOK_CTAB) ? segments.u16() : 0
         const path = readRichString(segments, limits.maxStringLength) // the path's character count is the marker's place
-        if (path === null) return tooLong(limits)
+        if (path._tag === "TooLong") return tooLong(limits, path.count)
         this.units++
         // without a path, no sheet names follow
-        this.pending = { _tag: "SupbookSheets", segments, ctab: path === undefined ? 0 : ctab, sheets: [] }
+        this.pending = { _tag: "SupbookSheets", segments, ctab: path._tag === "Truncated" ? 0 : ctab, sheets: [] }
         return undefined
       }
       default:
@@ -510,14 +566,14 @@ class GlobalsWalk {
         ended = true
         break
       }
-      const value = readRichString(segments, limits.maxStringLength)
-      if (value === null) return tooLong(limits)
+      const read = readRichString(segments, limits.maxStringLength)
+      if (read._tag === "TooLong") return tooLong(limits, read.count)
       this.units++
-      if (value === undefined) {
+      if (read._tag === "Truncated") {
         ended = true // fewer strings than declared: keep those read
         break
       }
-      list.push(value)
+      list.push(read.value)
     }
     this.bytes += left - segments.remaining()
     if (!ended && list.length < count) return undefined
@@ -564,6 +620,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
     const styles = cellStyles(walk.xfFormats, walk.xfFormats.length, custom)
     const definedNames: Array<DefinedNameEntry> = []
     const sheetNames = ended.map((s) => s.name) // once, not per name
+    const formulas = new FixedReader()
     // progress: k up to names.length (at most maxDefinedNames), yielding every BATCH_RECORDS
     for (let k = 0; k < walk.names.length; k++) {
       if (k % BATCH_RECORDS === 0) {
@@ -571,7 +628,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
         meter.add("batches", 1)
       }
       const n = walk.names[k]!
-      const formula = nameFormula(n.rgce, xtis, books, sheetNames)
+      const formula = nameFormula(formulas, n.rgce, xtis, books, sheetNames)
       definedNames.push({ name: n.name, formula, hidden: n.hidden, scope: n.scope })
     }
     return {
