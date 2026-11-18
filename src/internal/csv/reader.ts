@@ -5,6 +5,7 @@
  */
 import { Cause, Effect, Pull, Stream } from "effect"
 import type * as Arr from "effect/Array"
+import * as Result from "effect/Result"
 import { InvalidOption, LimitExceeded, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
@@ -45,8 +46,6 @@ export const validateDelimiter = (delimiter: unknown): InvalidOption | undefined
       reason: `${JSON.stringify(delimiter)} must be one character other than a quote, CR or LF`
     })
 }
-
-const isError = (u: Array<Row> | SpreadsheetError): u is SpreadsheetError => !Array.isArray(u)
 
 /**
  * The input, failing with `LimitExceeded` once its bytes add up past
@@ -96,25 +95,25 @@ export const rowsFromByteStream = <E, R>(
           // the error comes now, before any more input is read or decoded
           if (parser.error !== undefined) return yield* Effect.fail(parser.error)
           if (finished) return yield* Cause.done()
-          let rows: Array<Row> | SpreadsheetError
+          let rows: Result.Result<Array<Row>, SpreadsheetError>
           const next = yield* pullUpstream
           if (next !== undefined) {
             let text = ""
             // progress: one slice per iteration (one per pull, as `sliced` emits them)
             for (const slice of next) {
               const decoded = decoder.push(slice)
-              if (typeof decoded !== "string") return yield* Effect.fail(decoded)
-              text += decoded
+              if (Result.isFailure(decoded)) return yield* Effect.fail(decoded.failure)
+              text += decoded.success
             }
             rows = parser.feed(text, false)
           } else {
             finished = true
             const text = decoder.end()
-            if (typeof text !== "string") return yield* Effect.fail(text)
-            rows = parser.feed(text, true)
+            if (Result.isFailure(text)) return yield* Effect.fail(text.failure)
+            rows = parser.feed(text.success, true)
           }
-          if (isError(rows)) return yield* Effect.fail(rows)
-          if (rows.length > 0) return rows as unknown as Arr.NonEmptyReadonlyArray<Row>
+          if (Result.isFailure(rows)) return yield* Effect.fail(rows.failure)
+          if (rows.success.length > 0) return rows.success as unknown as Arr.NonEmptyReadonlyArray<Row>
         }
       })
       return pull
