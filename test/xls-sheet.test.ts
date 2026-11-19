@@ -1051,6 +1051,15 @@ describe("xls sheet: each sheet reads its own substream once", () => {
     const ok = await Effect.runPromise(Xls.read(fromStream(stale)))
     const rows = await rowsOf(ok, 1)
     expect(Exit.isSuccess(rows) && Array.from(rows.value).flatMap((r) => r.cells.map(Cell.value))).toEqual([2])
+    // nor one past the stream, or too close to its end for a record header
+    const length = stale.length
+    // progress: one offset per iteration
+    for (const at of [length - 1, length - 3, length + 100]) {
+      const past = layout([sheet("A", [X.number(0, 0, 0, 1)]), { name: "Module1", dt: 6, records: [], at: () => at }, sheet("B", [X.number(0, 0, 0, 2)])])
+      const wb = await Effect.runPromise(Xls.read(fromStream(past)))
+      const last = await rowsOf(wb, 1)
+      expect(Exit.isSuccess(last) && Array.from(last.value).flatMap((r) => r.cells.map(Cell.value)), String(at)).toEqual([2])
+    }
   })
 
   it("many sheets cost at most the stream: total steps over all sheets' rows and details grow with its records", async () => {
@@ -1142,6 +1151,9 @@ describe("xls sheet: a sheet offset that is no substream start fails when that s
     const near = layout([a(), b(() => length - 3)])
     expect(near.length).toBe(length)
     expect(await readEach(near)).toEqual([fine, broken(`sheet offset ${length - 3} is outside the workbook stream`)])
+    // a header's room left: B's EOF, no BOF
+    const last = layout([a(), b(() => length - 4)])
+    expect(await readEach(last)).toEqual([fine, broken("the sheet doesn't start with a BOF", length - 4)])
   })
 
   it("at an embedded substream's BOF: only a peek at the offset, so it counts as a start and ends the sheet around it", async () => {
