@@ -20,7 +20,7 @@ import { yieldNow } from "./yield.ts"
 export class Turn {
   /** The budget per turn. */
   readonly size: number
-  /** What is left of the current turn's budget: at most `size`, and above 0 while the walk runs. */
+  /** What is left of the current turn's budget: at most `size`; 0 or less once it is spent. */
   left: number
 
   constructor(size: number) {

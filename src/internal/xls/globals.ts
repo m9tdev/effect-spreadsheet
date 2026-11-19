@@ -314,7 +314,6 @@ class GlobalsWalk {
           return undefined
         case FILEPASS:
           return new Encrypted({ format: "xls" })
-        // BIFF5 has no SST; its EXTERNSHEETs and NAMEs aren't read, so neither are its SUPBOOKs
         case SST:
           continued = "Sst"
           break
@@ -334,6 +333,7 @@ class GlobalsWalk {
         }
       }
       if (turn.spend(cost)) yield
+      // BIFF5 has no SST; its EXTERNSHEETs and NAMEs aren't read, so neither are its SUPBOOKs
       if (continued === undefined || !biff8) continue
       // most of these records have no CONTINUE: their cursor is made at once
       const segments = reader.peekType() === CONTINUE ? yield* this.continues(record) : new RecordCursor(this.stream, record, reader.offset)
