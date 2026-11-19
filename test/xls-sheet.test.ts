@@ -587,6 +587,125 @@ describe("xls sheet: emitting rows", () => {
   })
 })
 
+describe("xls sheet: the index pass checks every record as the rows read it", () => {
+  /** A NUMBER in row 0 cut short (4 bytes): the failure if nothing before it fails. */
+  const cutNumber = X.record(0x0203, [...X.u16(0), ...X.u16(1)])
+  /** The record `record` with its data cut to `length` bytes. */
+  const cutTo = (record: Uint8Array, length: number) => X.record(record[0]! | (record[1]! << 8), Array.from(record.subarray(4, 4 + length)))
+
+  it("each cell record is checked against its own minimum length: one byte short fails where it is, before a later failure in an earlier row", async () => {
+    const cases: ReadonlyArray<readonly [Uint8Array, number]> = [
+      [X.number(5, 0, 0, 1), 14],
+      [X.rk(5, 0, 0, X.rkInt(1)), 10],
+      [X.boolErr(5, 0, 0, 1, false), 8],
+      [X.labelSst(5, 0, 0, 0), 10],
+      [X.formula(5, 0, 0, 1), 14],
+      [X.blank(5, 0, 0), 6],
+      [X.label(5, 0, 0, "x"), 6],
+      [X.mulBlank(5, 0, [0, 0]), 6]
+    ]
+    for (const [record, min] of cases) {
+      const type = record[0]! | (record[1]! << 8)
+      // the later failure: row 0's missing shared string
+      expect(await rowsUntilFailure(one([X.number(0, 0, 0, 1), cutTo(record, min - 1), X.labelSst(0, 1, 0, 99)]), {}), type.toString(16))
+        .toEqual({ rows: [], failure: expect.objectContaining({ reason: `truncated record 0x${type.toString(16)}`, offset: expect.any(Number) }) })
+    }
+  })
+
+  it("a MULRK or MULBLANK counts every one of its cells; a formula's STRING result counts its cell", async () => {
+    expect(await rowsUntilFailure(one([X.mulBlank(0, 0, [0, 0, 0]), X.number(1, 0, 0, 1)]), { maxCellsPerSheet: 3 }))
+      .toEqual({ rows: [0], failure: expect.objectContaining({ limit: "maxCellsPerSheet", actual: 4 }) })
+    expect(await rowsUntilFailure(one([X.mulrk(0, 0, [[0, 1], [0, 2]]), X.number(1, 0, 0, 1)]), { maxCellsPerSheet: 2 }))
+      .toEqual({ rows: [0], failure: expect.objectContaining({ limit: "maxCellsPerSheet", actual: 3 }) })
+    expect(await rowsUntilFailure(one([X.formula(0, 0, 0, { kind: 0 }), X.string("a"), X.number(1, 0, 0, 1)]), { maxCellsPerSheet: 1 }))
+      .toEqual({ rows: [0], failure: expect.objectContaining({ limit: "maxCellsPerSheet", actual: 2 }) })
+  })
+
+  it("only a FORMULA with a string result waits for a STRING: other special results leave it unread", async () => {
+    for (const kind of [1, 2, 3] as const) {
+      const exit = await rowsUntilFailure(one([X.formula(0, 0, 0, { kind, value: 1 }), X.string("much too long"), X.number(1, 0, 0, 1)]), { maxStringLength: 4 })
+      expect(exit, String(kind)).toEqual({ rows: [0, 1], failure: undefined })
+    }
+    // a wait ended by another record after a SHRFMLA: "" (in a row other than the first)
+    expect(await cellsOf([X.number(0, 0, 0, 1), X.formula(3, 0, 0, { kind: 0 }), companion(SHRFMLA), X.number(5, 0, 0, 1), X.string("late")])).toEqual([
+      [0, 0, "Number", 1],
+      [3, 0, "Text", ""],
+      [5, 0, "Number", 1]
+    ])
+  })
+
+  it("a formula's STRING is checked without decoding it, in stream order: BIFF8 rich runs and phonetic block, BIFF5 length", async () => {
+    // cch 1, fRichSt with 4 runs, one character, no run data
+    const rich = X.record(STRING, [...X.u16(1), 0x08, ...X.u16(4), 0x41])
+    // cch 1, fExtSt with a 6-byte phonetic block, one character, 2 of its bytes
+    const ext = X.record(STRING, [...X.u16(1), 0x04, ...X.u32(6), 0x41, 0, 0])
+    for (const cut of [rich, ext]) {
+      expect(await rowsUntilFailure(one([X.number(0, 0, 0, 1), X.formula(5, 0, 0, { kind: 0 }), cut, cutNumber])))
+        .toEqual({ rows: [], failure: expect.objectContaining({ reason: "truncated record 0x207" }) })
+    }
+    const long5 = X.record(STRING, X.string5(chars("abcdefghi"), 2))
+    expect(await rowsUntilFailure(one([X.number(0, 0, 0, 1), X.formula(5, 0, 0, { kind: 0 }), long5, cutNumber], [], 5), { maxStringLength: 4 }))
+      .toEqual({ rows: [], failure: expect.objectContaining({ limit: "maxStringLength", actual: 9 }) })
+    // a BIFF5 LABEL or STRING of exactly maxStringLength reads
+    const book = one([X.label5(0, 0, 0, chars("abcd")), X.formula(1, 0, 0, { kind: 0 }), X.record(STRING, X.string5(chars("wxyz"), 2))], [], 5)
+    expect(values((await readOk(book, { maxStringLength: 4 })).sheets[0]!)).toEqual([[0, false, [[0, "Text", "abcd"]]], [1, false, [[0, "Text", "wxyz"]]]])
+  })
+
+  it("a ROW cut at 13 bytes (before its flags' high byte) still hides its row, which goes out before the failure", async () => {
+    expect(await rowsUntilFailure(one([X.number(0, 0, 0, 1), cutTo(X.row(0, true), 13)])))
+      .toEqual({ rows: [0], failure: expect.objectContaining({ reason: "truncated record 0x208" }) })
+    const wb = await Effect.runPromise(Xls.read(X.xls(one([X.number(0, 0, 0, 1), cutTo(X.row(0, true), 13)]))))
+    const seen: Array<boolean> = []
+    await Effect.runPromise(Effect.exit(Stream.runForEach(Workbook.rows(wb, 0), (row) => Effect.sync(() => void seen.push(row.hidden)))))
+    expect(seen).toEqual([true])
+  })
+
+  it("a ROW record between a row's cells doesn't put them out of place", async () => {
+    expect((await rowsDisplaced(one([X.number(0, 0, 0, 1), X.row(5), X.number(0, 1, 0, 2)]), 0)).map((r) => [r.index, r.cells.length])).toEqual([[0, 2], [5, 0]])
+  })
+})
+
+describe("xls sheet: the rows' work", () => {
+  /** Drains sheet 0's rows: the most steps between two event-loop turns, and the total. */
+  const drain = async (book: X.TestBook, limits?: LimitOverrides) => {
+    const wb = await Effect.runPromise(Xls.read(X.xls(book), { limits }))
+    const steps = counter("steps")
+    const run = await countYields(() => Effect.runPromise(metered(steps, Stream.runDrain(Workbook.rows(wb, 0)))), steps.total)
+    return { maxPerTurn: run.maxPerTurn, total: steps.total() }
+  }
+
+  it("a row of single-cell records repeating its columns is compacted as it is read: no long sort at its end", async () => {
+    // 200 000 NUMBERs over columns 7..0 in one row: compacted past 16 cells each time
+    const size = X.number(0, 0, 0, 0).length
+    const blob = new Uint8Array(200_000 * size)
+    // progress: k up to 200 000
+    for (let k = 0; k < 200_000; k++) blob.set(X.number(0, 7 - (k % 8), 0, k), k * size)
+    const { maxPerTurn } = await drain(one([blob]), { maxColumns: 8 })
+    // a turn: a budget of BATCH_CELLS (a record costs 16), a row's slack, and a few compactions; never the 200 000 cells at once
+    expect(maxPerTurn).toBeLessThan(20_000)
+  }, 60_000)
+
+  it("records inside a row's range that aren't its cells cost their share of a turn", async () => {
+    // row 0's two cells around 100 000 records of another kind: one range, read again by the rows
+    const filler = X.record(0x0225, X.u16(0))
+    const blob = new Uint8Array(100_000 * filler.length)
+    // progress: k up to 100 000
+    for (let k = 0; k < 100_000; k++) blob.set(filler, k * filler.length)
+    const { maxPerTurn } = await drain(one([X.number(0, 0, 0, 1), blob, X.number(0, 1, 0, 2)]))
+    expect(maxPerTurn).toBeLessThan(20_000)
+  }, 60_000)
+
+  it("sorting a row out of column order counts its cells", async () => {
+    // 1 000 NUMBERs in columns 999..0, one row: the index pass reads 1 001 records (the EOF too);
+    // the rows read 1 000 records and add 1 000 cells, then sort them and emit the row
+    const records = Array.from({ length: 1000 }, (_, k) => X.number(0, 999 - k, 0, k))
+    expect((await drain(one(records))).total).toBe(1001 + 2000 + 1000 + 1)
+    // in column order: no sort
+    const sorted = Array.from({ length: 1000 }, (_, k) => X.number(0, k, 0, k))
+    expect((await drain(one(sorted))).total).toBe(1001 + 2000 + 1)
+  })
+})
+
 describe("xls sheet: repeated columns", () => {
   it("a row's repeated columns are compacted, the last cell of a column kept", async () => {
     // read end to end: the same rule over many MULBLANK and NUMBER records on the same columns

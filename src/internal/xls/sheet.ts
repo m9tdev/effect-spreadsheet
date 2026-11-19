@@ -68,6 +68,13 @@ export const BATCH_RECORDS = 4096
 export const BATCH_CELLS = 65_536
 /** What a record costs in a turn, against a cell's 1: a turn holds `BATCH_RECORDS` records or `BATCH_CELLS` cells. */
 const RECORD_COST = BATCH_CELLS / BATCH_RECORDS
+/**
+ * How far past its budget a turn may go to finish the row it is in, so a
+ * row's cells rarely wait across a yield: cells kept across event-loop
+ * turns survive young-generation collections and get promoted, which made
+ * wide rows (16 384 cells) split over turns read much slower.
+ */
+const ROW_SLACK = BATCH_CELLS / 4
 
 /**
  * Records of a sheet out of place: cell records of a row that come after
@@ -248,14 +255,6 @@ class SheetIndex {
   /** Out-of-place records: their slots and offsets, in stream order. */
   readonly displacedSlot = new U32List()
   readonly displacedAt = new U32List()
-  /**
-   * FORMULAs whose string result doesn't come in the record right after
-   * them (a SHRFMLA, ARRAY, TABLE or CONTINUE comes first): their offsets,
-   * in stream order, and the offset of their STRING (0 for none: the
-   * result is ""). See `stringOf`.
-   */
-  readonly formulaAt = new U32List()
-  readonly formulaString = new U32List()
 
   /** The slot of row `row`, made if new (its `complete` -1 until a cell record of it comes). */
   slotOf(row: number): number {
@@ -292,20 +291,6 @@ class SheetIndex {
     this.flags = flags
   }
 
-  /** The STRING of the FORMULA at `formula`, from `formulaAt` (0 for none). */
-  stringOf(formula: number): number {
-    const at = this.formulaAt.items
-    let low = 0
-    let high = this.formulaAt.length
-    // progress: high - low halves
-    while (low < high) {
-      const mid = (low + high) >>> 1
-      if (at[mid]! < formula) low = mid + 1
-      else high = mid
-    }
-    return low < this.formulaAt.length && at[low] === formula ? this.formulaString.items[low]! : 0
-  }
-
   /** The slots in row order. */
   ordered(): Uint32Array {
     // a row is a u16 and a slot below 65 536: row x 65 536 + slot sorts by row
@@ -338,13 +323,18 @@ class SheetIndex {
   }
 }
 
-/** Work done since the work meter was last told: steps of every loop (records, cells, sorting, rows). */
+/**
+ * What the rows walk hands to its driver: the work done since the work
+ * meter was last told (steps of every loop: records, cells, sorting, rows),
+ * and the rows ready to go out. The rows are handed over here rather than
+ * yielded: a suspended generator may keep the value it yielded last, and a
+ * chunk of rows kept one turn longer than needed cost a wide sheet its
+ * cells' young-generation collections.
+ */
 interface Tally {
   steps: number
+  rows: Array<Row>
 }
-
-/** What the rows walk yields at the end of a turn: rows ready to go out, or none yet. */
-type Pulled = Arr.NonEmptyReadonlyArray<Row> | undefined
 
 /** The index pass's outcome: the index, and the first failure in stream order with where it stands. */
 interface Indexed {
@@ -359,7 +349,7 @@ interface Indexed {
  * from `reader` in stream order up to its EOF, checking each as `emitRows`
  * will read it, and builds the index. Yields when the turn is spent.
  */
-function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Turn, tally: Tally): Generator<undefined, Indexed, void> {
+function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Turn, tally: Tally): Generator<void, Indexed, void> {
   const { globals, part, limits } = context
   const { maxColumns, maxCellsPerSheet } = limits
   const displacedCap = context.displacedRecords ?? DISPLACED_RECORDS
@@ -369,11 +359,9 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
   let failAt = Infinity
   /** Cells read so far in stream order, repeats included (for maxCellsPerSheet). */
   let cells = 0
-  /** The slot of the FORMULA waiting for its string result (-1 for none), its column, its offset and the offset after it. */
+  /** The slot of the FORMULA waiting for its string result (-1 for none), and its column. */
   let waitSlot = -1
   let waitColumn = 0
-  let waitFormula = 0
-  let waitNext = 0
   /** The slot whose cell records came last, and whether they are out of place (see `place`). */
   let runSlot = -1
   let runDisplaced = false
@@ -399,23 +387,14 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
     cells += count
     return undefined
   }
-  /**
-   * The wait for a formula's string result ends at the record at `at`,
-   * with its STRING (`string` true) or without one (the result is ""): the
-   * row is complete there, and the index notes the STRING when it doesn't
-   * come right after the FORMULA.
-   */
-  const waited = (at: number, string: boolean): void => {
+  /** The wait for a formula's string result ends at the record at `at`: the row is complete there. */
+  const waited = (at: number): void => {
     index.complete[waitSlot] = at
     waitSlot = -1
-    if (at !== waitNext) {
-      index.formulaAt.push(waitFormula)
-      index.formulaString.push(string ? at : 0)
-    }
   }
   /** Ends the wait for a formula's string result at the record at `at` without a STRING: its result is "" (one cell). */
   const endWait = (at: number): void => {
-    waited(at, false)
+    waited(at)
     const error = countCells(waitColumn, 1)
     if (error !== undefined) fail(error, at)
   }
@@ -506,8 +485,6 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
           // a string result, in the STRING record that comes next
           waitSlot = slot
           waitColumn = f.u16(2)
-          waitFormula = record.offset
-          waitNext = record.offset + 4 + data.length
           index.complete[slot] = Infinity
         } else error = countCells(f.u16(2), 1)
       }
@@ -560,7 +537,7 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
         // continued (the reader moved past its CONTINUEs), its character
         // count checked before any character; BIFF5, a u16-count code-page
         // string, never continued
-        waited(record.offset, true)
+        waited(record.offset)
         const read = globals.biff8
           ? readRichString(new RecordCursor(context.stream, record, context.end), limits.maxStringLength, false)
           : undefined
@@ -569,7 +546,7 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
         if (error !== undefined) fail(error, record.offset)
       }
     }
-    if (turn.spend(RECORD_COST)) yield undefined
+    if (turn.spend(RECORD_COST)) yield
   }
   return { index, failure, failAt }
 }
@@ -577,10 +554,12 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
 /**
  * The rows (see the module's comment): each row of the index in row order,
  * its records decoded into its cells, until a row wasn't complete before
- * the index pass's failure (then the failure). Rows go out in chunks of at
- * most `BATCH_RECORDS` rows, one at the end of each turn.
+ * the index pass's failure (then the failure). Rows go out through
+ * `tally.rows`, in chunks of at most `BATCH_RECORDS` rows, one at the end of
+ * each turn. A turn ends at a row's end once its budget is spent, or
+ * within a row once it is `ROW_SLACK` past it.
  */
-function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: Tally): Generator<Pulled, SpreadsheetError | undefined, void> {
+function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: Tally): Generator<void, SpreadsheetError | undefined, void> {
   const { stream, globals, part, limits } = context
   const { index, failure, failAt } = indexed
   const { maxColumns, maxRows } = limits
@@ -588,19 +567,11 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
   const displaced = index.grouped()
   const fields = new FixedReader()
   const row = new RowCells([])
-  let chunk: Array<Row> = []
   /** The rows taken so far are complete after this offset: the most of theirs. */
   let completeAt = -1
   /** Cells added to the current row, and cells sorted compacting it: the work since the last count. */
   let work = 0
 
-  /** The chunk of rows so far, to go out at the end of the turn (undefined if none), and a new one started. */
-  const flush = (): Pulled => {
-    if (chunk.length === 0) return undefined
-    const out = chunk as unknown as Arr.NonEmptyReadonlyArray<Row>
-    chunk = []
-    return out
-  }
   const add = (cell: Cell.Cell): void => {
     work += 1 + row.add(cell, maxColumns)
   }
@@ -612,15 +583,22 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
       : readString(record.data, 0, globals.text, 2)
     return read._tag === "Ok" ? read.value : stringFailed(read, part, record, limits)
   }
-  /** The string result of the FORMULA `record`: the STRING right after it, or the one the index noted, or "". */
+  /**
+   * The string result of the FORMULA `record`: the STRING after it, past
+   * any SHRFMLA, ARRAY, TABLE or CONTINUE records; "" if another record
+   * comes first. Each record passed over counts as work.
+   */
   const formulaString = (record: BiffRecord): string | SpreadsheetError => {
-    const next = record.offset + 4 + record.data.length
-    if (next + 4 > context.end) return ""
-    const type = stream[next]! | (stream[next + 1]! << 8)
-    if (type === STRING) return stringAt(next)
-    if (!keepsWait(type)) return ""
-    const at = index.stringOf(record.offset)
-    return at === 0 ? "" : stringAt(at)
+    let at = record.offset + 4 + record.data.length
+    // progress: at grows by 4 + length >= 4 per record passed over, up to the substream's end
+    while (at + 4 <= context.end) {
+      const type = stream[at]! | (stream[at + 1]! << 8)
+      if (type === STRING) return stringAt(at)
+      if (!keepsWait(type)) return ""
+      work += RECORD_COST
+      at += 4 + (stream[at + 2]! | (stream[at + 3]! << 8))
+    }
+    return ""
   }
   /**
    * Decodes the cell record `record` of the current row into its cells.
@@ -741,7 +719,7 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
           cost += work
           work = 0
         }
-        if (turn.spend(cost)) yield flush()
+        if (turn.spend(cost) && turn.left <= -ROW_SLACK) yield
       }
     }
     // progress: j up to the slot's group end
@@ -754,29 +732,23 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
       tally.steps += work
       const cost = RECORD_COST + work
       work = 0
-      if (turn.spend(cost)) yield flush()
+      if (turn.spend(cost) && turn.left <= -ROW_SLACK) yield
     }
     const sorting = row.sorted ? 0 : row.cells.length
     const cells = row.done()
     if (cells.length > 0 || (flags & DECLARED) !== 0) {
       const index_ = index.row[slot]!
-      if (index_ >= maxRows) {
-        const out = flush()
-        if (out !== undefined) yield out
-        return new LimitExceeded({ limit: "maxRows", max: maxRows, actual: index_ + 1 })
-      }
-      chunk.push({ index: index_, hidden: (flags & HIDDEN) !== 0, cells })
+      if (index_ >= maxRows) return new LimitExceeded({ limit: "maxRows", max: maxRows, actual: index_ + 1 })
+      tally.rows.push({ index: index_, hidden: (flags & HIDDEN) !== 0, cells })
     }
     tally.steps += 1 + sorting
-    if (turn.spend(1 + sorting) || chunk.length >= BATCH_RECORDS) yield flush()
+    if (turn.spend(1 + sorting) || tally.rows.length >= BATCH_RECORDS) yield
   }
-  const out = flush()
-  if (out !== undefined) yield out
   return failure
 }
 
 /** The rows walk: open the substream, the index pass, then the rows. */
-function* rowsWalk(context: SheetContext, turn: Turn, tally: Tally): Generator<Pulled, SpreadsheetError | undefined, void> {
+function* rowsWalk(context: SheetContext, turn: Turn, tally: Tally): Generator<void, SpreadsheetError | undefined, void> {
   // a BIFF8 STRING comes with its CONTINUEs (a BIFF5 one has none)
   const opened = openSubstream(context, context.globals.biff8 ? STRING : undefined)
   if (!(opened instanceof SubstreamReader)) return opened
@@ -792,29 +764,34 @@ function* rowsWalk(context: SheetContext, turn: Turn, tally: Tally): Generator<P
 export const sheetRows = (context: SheetContext): Stream.Stream<Row, SpreadsheetError> =>
   Stream.fromPull(Effect.map(WorkMeter, (meter) => {
     const turn = new Turn(BATCH_CELLS)
-    const tally: Tally = { steps: 0 }
+    const tally: Tally = { steps: 0, rows: [] }
     const walk = rowsWalk(context, turn, tally)
     /** Hands the steps of the last turn to the meter. */
     const report = Effect.sync(() => {
       meter.add("steps", tally.steps)
       tally.steps = 0
     })
-    let ended = false
+    /** The walk's end: running (null), done (undefined) or its failure. */
+    let ended: SpreadsheetError | undefined | null = null
     const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
       // progress: each iteration runs the walk for one turn (each turn
-      // advances it), or ends the stream
+      // advances it), or hands out rows, or ends the stream
       while (true) {
         yield* report
         yield* yieldNow
-        if (ended) return yield* Cause.done()
-        turn.left = turn.size
-        const step = walk.next()
-        if (step.done === true) {
-          ended = true
-          if (step.value !== undefined) return yield* Effect.fail(step.value)
-          return yield* Cause.done()
+        if (ended === null) {
+          turn.left = turn.size
+          const step = walk.next()
+          if (step.done === true) ended = step.value
         }
-        if (step.value !== undefined) return step.value
+        // the rows of the turn go out first, also those before a failure
+        if (tally.rows.length > 0) {
+          const rows = tally.rows as unknown as Arr.NonEmptyReadonlyArray<Row>
+          tally.rows = []
+          return rows
+        }
+        if (ended === undefined) return yield* Cause.done()
+        if (ended !== null) return yield* Effect.fail(ended)
       }
     })
     // the steps of the last turn count also when the pull fails
