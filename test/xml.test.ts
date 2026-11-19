@@ -679,8 +679,16 @@ describe("xml decoder: encoding sniff", () => {
   it("held bytes are not decoded until the encoding is known", () => {
     const decoder = xmlText(undefined)
     expect(decoder.push(new Uint8Array([0x3C]))).toEqual(Result.succeed(""))
-    expect(decoder.push(new Uint8Array([0x61]))).toEqual(Result.succeed("<a"))
-    expect(decoder.push(new Uint8Array([0x3E]))).toEqual(Result.succeed(">"))
+    expect(decoder.push(new Uint8Array([0x61]))).toEqual(Result.succeed(""))
+    expect(decoder.push(new Uint8Array([0x3E]))).toEqual(Result.succeed("<a>"))
+    expect(decoder.push(new Uint8Array([0x3C]))).toEqual(Result.succeed("<"))
     expect(decoder.end()).toEqual(Result.succeed(""))
+  })
+
+  it("a UTF-8 byte-order mark split across pieces is dropped once: a second one is text, however the input is split", () => {
+    const input = [0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF, 0x3C, 0x61, 0x2F, 0x3E]
+    for (let cut = 0; cut <= input.length; cut++) {
+      expect(decodeAll([input.slice(0, cut), input.slice(cut)])).toBe("\uFEFF<a/>")
+    }
   })
 })

@@ -144,9 +144,10 @@ const NOTHING: Result.Result<string, never> = Result.succeed("")
 /**
  * Feeds bytes in, gets text out, incrementally. The first bytes are held
  * back until the encoding is decided: {@link DETECT_BYTES} of them (or the
- * whole input, if shorter) when detecting, else as many as it takes to see
- * a byte-order mark that names another encoding (2 for UTF-8, whose own
- * mark the decoder drops; 3 for the others).
+ * whole input, if shorter) when detecting, else 3, the longest byte-order
+ * mark. So the decoder's first call always sees a whole mark: `TextDecoder`
+ * implementations differ on a mark split across calls (some drop a second
+ * mark after it too).
  */
 export class TextInput<E = never> {
   private phase: Phase<E> = { _tag: "Detecting", head: [], bytes: 0 }
@@ -163,11 +164,7 @@ export class TextInput<E = never> {
       ? { detect: "bom-only", encoding: options.encoding }
       : { detect: "bom-utf16-utf8-1252" }
     this.onInvalid = options.fatal ? { fatal: true, invalid: options.invalid } : { fatal: false }
-    this.hold = this.detect.detect === "bom-utf16-utf8-1252"
-      ? DETECT_BYTES
-      : this.detect.encoding === "utf-8"
-      ? 2
-      : 3
+    this.hold = this.detect.detect === "bom-utf16-utf8-1252" ? DETECT_BYTES : 3
   }
 
   /** Decodes a chunk: the text available so far, or the error for invalid bytes. */

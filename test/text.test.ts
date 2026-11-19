@@ -185,10 +185,10 @@ describe("text: TextInput", () => {
     expect(Result.merge(input.end())).toBe("\uFFFD")
   })
 
-  it("bom-only holds back 2 bytes for UTF-8 and 3 for other encodings, until a byte-order mark can be seen", () => {
+  it("bom-only holds back 3 bytes, the longest byte-order mark", () => {
     const utf8 = fatal()
-    expect(utf8.push(bytes(0x41))).toEqual(Result.succeed(""))
-    expect(utf8.push(bytes(0x42))).toEqual(Result.succeed("AB"))
+    expect(utf8.push(bytes(0x41, 0x42))).toEqual(Result.succeed(""))
+    expect(utf8.push(bytes(0x43))).toEqual(Result.succeed("ABC"))
     const latin1 = fatal("windows-1252")
     expect(latin1.push(bytes(0x41, 0x42))).toEqual(Result.succeed(""))
     expect(latin1.push(bytes(0xE9))).toEqual(Result.succeed("ABé"))
