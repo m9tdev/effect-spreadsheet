@@ -78,7 +78,9 @@ Spreadsheet.toRecords(rows, { header: "first-row" | number | string[] }) // like
   byte-counting guard against zip bombs. If that's too slow or too awkward,
   fall back to a small TS inflate.
 - `internal/xml`: our own small streaming tokenizer (no DTD/entities beyond
-  the predefined five and numeric ones, so no XXE or billion-laughs).
+  the predefined five and numeric ones, so no XXE or billion-laughs), and
+  path rules over its events (`//sheets//sheet`), so a part reader names
+  the elements it reads by their place instead of tracking it in flags.
 - `internal/cfb`: compound file reader. FAT/miniFAT chains are cycle-checked
   and bounded.
 - `internal/biff`: record reader, where every record advances `offset` by
