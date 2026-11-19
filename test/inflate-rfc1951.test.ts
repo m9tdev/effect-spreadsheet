@@ -307,6 +307,32 @@ describe("rfc1951 inflate: hand-built streams", () => {
     expect(reference(far).ok).toBe(false)
   })
 
+  it("a long match that overlaps itself repeats its source, in one output or across outputs", () => {
+    const w = new Bits().put(1, 1).put(1, 2)
+    const head = Array.from({ length: 30 }, (_, i) => 97 + (i % 26))
+    for (const c of head) fixedLit(w, c)
+    fixedLit(w, 272).put(3, 2) // length 31 + 3
+    w.code(9, 5).put(5, 3) // distance 25 + 5
+    fixedLit(w, 256)
+    const expected = Buffer.from([...head, ...head, ...head.slice(0, 4)])
+    for (const outSize of [65536, 40, 1]) {
+      const result = run(w.done(), outSize)
+      expect(result.end._tag).toBe("Done")
+      expect(result.bytes.equals(expected)).toBe(true)
+    }
+    expect(agreesWithZlib(w.done(), run(w.done()))).toBe(true)
+  })
+
+  it("a stream cut right after a final end-of-block code read from padding fails", () => {
+    // a fixed block whose end-of-block code (7 zero bits) is entirely past the end
+    const w = new Bits().put(1, 1).put(1, 2)
+    fixedLit(w, 65)
+    const stream = w.done() // 3 + 8 bits: the code would be read from padding
+    const result = run(stream)
+    expect(result.end).toEqual({ _tag: "Failed", reason: "unexpected end of data", offset: stream.length })
+    expect(result.bytes.toString("latin1")).toBe("A")
+  })
+
   it("a distance past the start of the output fails, after the bytes before it", () => {
     const w = new Bits().put(1, 1).put(1, 2)
     fixedLit(w, 65)

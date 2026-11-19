@@ -316,7 +316,7 @@ class Inflater implements Inflate {
       this.take(this.count & 7)
       const length = this.take(16)
       const complement = this.take(16)
-      if (this.consumed() > this.input.length * 8) return this.fail("unexpected end of data")
+      // (read past the end, `fail` reports the truncation)
       if ((length ^ 0xFFFF) !== complement) return this.fail("stored block length does not match its complement", start)
       // hand the whole bytes still loaded back to the input
       this.pos -= this.count >>> 3
@@ -380,7 +380,8 @@ class Inflater implements Inflate {
       lengths.fill(value, i, i + repeat)
       i += repeat
     }
-    if (this.consumed() > this.input.length * 8) return this.fail("unexpected end of data")
+    // A header read past the end fails here as truncated (see `fail`), or
+    // builds tables whose first code is then found past the end.
     if (lengths[256] === 0) return this.fail("no end-of-block code", start)
     const litBuilt = build(lengths.subarray(0, litCount), LIT_ROOT, this.litHolder)
     if (litBuilt === "over" || litBuilt === "incomplete") return this.fail("invalid literal/length code lengths", start)
@@ -468,12 +469,9 @@ class Inflater implements Inflate {
         continue
       }
       if (symbol === 256) {
+        // an end-of-block read past the end is caught at the next header or at `end`
         this.save(bits, count, pos)
-        if (this.consumed() > inLength * 8) {
-          this.fail("unexpected end of data")
-        } else {
-          this.mode = Mode.Header
-        }
+        this.mode = Mode.Header
         return o
       }
       const index = symbol - 257
