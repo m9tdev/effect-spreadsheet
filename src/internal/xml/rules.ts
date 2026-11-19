@@ -19,13 +19,24 @@
  * anything inside it, nor for its end tag (the tokenizer still reads and
  * checks it). Else the `open` of each `on` path it matches runs, in the
  * order the paths are given, and at its end tag each `close`, in the same
- * order.
+ * order. An `open` may also skip its element's subtree (it returns
+ * "skip"), when that depends on what was read before: then the element's
+ * later opens don't run, nor any close.
+ *
+ * An element on an `opaque` path is read only by the paths that go through
+ * it: the `//` steps from above it don't reach inside it, and the elements
+ * inside it that match no path, and inside which none can, are skipped
+ * whole, as is everything below a matched element under which no path
+ * goes on. So with `//c` opaque and a path `//c/v`: a `<c>` inside the
+ * `<c>` isn't matched, its `<v>` children are, and an `<x>` inside it or
+ * inside a `<v>` is skipped with its subtree, its text included.
  *
  * Matching keeps one small state per open element: the set of path steps
  * its children may match, as a bit mask (at most 30 distinct steps, and
- * 30 paths, in all). Paths that start alike share their first steps. The
- * last transition at each depth is kept, so a run of siblings with the
- * same name (the items of a list) costs one comparison each.
+ * 30 paths, in all), and whether they are inside an opaque element. Paths
+ * that start alike share their first steps. The last transition at each
+ * depth is kept, so a run of siblings with the same name (the items of a
+ * list) costs one comparison each.
  *
  * @internal
  */
@@ -35,13 +46,16 @@ import type { XmlAttributes, XmlElement, XmlHandler } from "./tokenizer.ts"
 /** What a rule returns: nothing to go on, or the error that stops tokenizing. */
 export type Handled = SpreadsheetError | undefined | void
 
-/** What a rule may ask of the tokenizer for an element's text (skipping is a `skip` path). */
+/** What a rule's `open` returns: as `Handled`, or "skip" to skip the element's subtree. */
+export type Opened = Handled | "skip"
+
+/** What a rule may ask of the tokenizer for an element's text (skipping is a `skip` path, or `open` returning "skip"). */
 export type TextRequest = Pick<XmlElement, "collect" | "omitText">
 
 /** What to do with the elements one path matches. */
 export interface XmlRule {
-  /** At the start tag. */
-  readonly open?: (attributes: XmlAttributes, element: TextRequest) => Handled
+  /** At the start tag; "skip" skips the element's subtree: its later opens don't run, nor any close. */
+  readonly open?: (attributes: XmlAttributes, element: TextRequest) => Opened
   /** At the end tag: the element's text if `open` asked to collect it (`XmlElement.collect`), else `undefined`. */
   readonly close?: (text: string | undefined) => Handled
 }
@@ -53,6 +67,8 @@ export interface XmlRules {
   readonly forbid?: Readonly<Record<string, string>>
   /** Elements whose subtrees are skipped, by path. */
   readonly skip?: ReadonlyArray<string>
+  /** Elements read only by the paths through them, by path: what else is inside them is skipped. */
+  readonly opaque?: ReadonlyArray<string>
   /** The error for a forbidden element. */
   readonly malformed: (reason: string) => SpreadsheetError
 }
@@ -68,12 +84,15 @@ interface Step {
   readonly anyDepth: boolean
   /** The steps right after this one (their bits), entered when it matches. */
   next: number
-  /** The paths that end with this step (bit r: path r; forbid paths first, then skip paths, then `on` paths). */
+  /** The paths that end with this step (bit r: path r; forbid paths first, then skip, opaque and `on` paths). */
   ends: number
 }
 
 /** The most distinct steps, and the most paths, the rules may have: one bit each in a 32-bit mask, with room to spare. */
 export const MAX_STEPS = 30
+
+/** The bit, past the steps' bits, of a state inside an opaque element. */
+const OPAQUE = 1 << MAX_STEPS
 
 /**
  * Splits a path into steps (`//a/b` is `[["a", true], ["b", false]]`).
@@ -102,9 +121,10 @@ export const parsePath = (path: string): ReadonlyArray<readonly [name: string, a
 export const rulesHandler = (rules: XmlRules): XmlHandler => {
   const forbid = Object.entries(rules.forbid ?? {})
   const skip = rules.skip ?? []
+  const opaque = rules.opaque ?? []
   const opens = Object.values(rules.on).map((rule) => rule.open)
   const closes = Object.values(rules.on).map((rule) => rule.close)
-  const paths = [...forbid.map(([path]) => path), ...skip, ...Object.keys(rules.on)]
+  const paths = [...forbid.map(([path]) => path), ...skip, ...opaque, ...Object.keys(rules.on)]
   if (paths.length > MAX_STEPS) throw new Error(`XML rules: more than ${MAX_STEPS} paths`)
   const steps: Array<Step> = []
   /** The steps by their place: the step before (-1: the document), then `//` or `/`, then the name. */
@@ -139,11 +159,13 @@ export const rulesHandler = (rules: XmlRules): XmlHandler => {
   for (let k = 0; k < steps.length; k++) if (steps[k]!.anyDepth) anyDepth |= 1 << k
   const forbidden = (1 << forbid.length) - 1
   const skipped = ((1 << skip.length) - 1) << forbid.length
+  const opaqued = ((1 << opaque.length) - 1) << (forbid.length + skip.length)
   /** The bit of the first `on` path: `on` path k is bit `first + k`. */
-  const first = forbid.length + skip.length
+  const first = forbid.length + skip.length + opaque.length
   // per depth d (0: the document, whose child is the root element), one
   // entry each, added when the document first goes that deep:
-  // - states[d]: the steps the children of the open element at depth d can match;
+  // - states[d]: the steps the children of the open element at depth d can
+  //   match, with the OPAQUE bit if they are inside an opaque element;
   // - matched[d]: the `on` paths that element matched (bit k: the k-th);
   // - lastFrom[d], lastKey[d], lastName[d] -> lastState[d], lastMatched[d]:
   //   the last transition into depth d (from that state, with that name)
@@ -175,17 +197,19 @@ export const rulesHandler = (rules: XmlRules): XmlHandler => {
         state = lastState[at]!
         hit = lastMatched[at]!
       } else {
-        // the `//` steps stay for the element's children
-        state = from & anyDepth
+        // the steps the element enters, and the paths it matches
+        let entered = 0
         hit = 0
         // progress: each iteration clears the lowest bit left
-        for (let rest = from; rest !== 0; rest &= rest - 1) {
+        for (let rest = from & ~OPAQUE; rest !== 0; rest &= rest - 1) {
           const k = 31 - Math.clz32(rest & -rest)
           if (keys[k] === key && names[k] === name) {
-            state |= nexts[k]!
+            entered |= nexts[k]!
             hit |= ends[k]!
           }
         }
+        // the `//` steps from above stay for the element's children, unless it is opaque
+        state = (hit & opaqued) !== 0 ? entered | OPAQUE : (from & (anyDepth | OPAQUE)) | entered
         lastFrom[at] = from
         lastKey[at] = key
         lastName[at] = name
@@ -202,9 +226,18 @@ export const rulesHandler = (rules: XmlRules): XmlHandler => {
         // progress: each iteration clears the lowest bit left (paths in their order)
         for (let rest = hit >>> first; rest !== 0; rest &= rest - 1) {
           const open = opens[31 - Math.clz32(rest & -rest)]
-          const error = open === undefined ? undefined : open(attributes, element)
-          if (error !== undefined) return error
+          const opened = open === undefined ? undefined : open(attributes, element)
+          if (opened === "skip") {
+            // as for a skip path: no more opens, and its end tag doesn't come
+            element.skip()
+            return undefined
+          }
+          if (opened !== undefined) return opened
         }
+      } else if (state === OPAQUE) {
+        // inside an opaque element, and nothing can match inside it either
+        element.skip()
+        return undefined
       }
       depth = at
       states[at] = state

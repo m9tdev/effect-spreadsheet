@@ -742,6 +742,71 @@ describe("xlsx: sheet details", () => {
     expect(failureOf(await details(await withLayout("", `<row r="1"><sheetData/></row>`)))).toMatchObject(malformed)
   })
 
+  it("a <row> inside a row is MalformedFile, as for rows, not a row whose end tag ends the open one", async () => {
+    const malformed = { _tag: "MalformedFile", format: "xlsx", reason: "<row> inside a <row>", part: "xl/worksheets/sheet1.xml" }
+    for (const data of [`<row r="1"><row r="2"/></row>`, `<row><c><v>1</v></c><x><row/></x></row>`]) {
+      const bytes = await withLayout(`<col min="2" max="2" hidden="1"/>`, data)
+      expect(failureOf(await details(bytes)), data).toMatchObject(malformed)
+      const wb = await Effect.runPromise(Xlsx.read(bytes))
+      expect(failureOf(await Effect.runPromiseExit(Stream.runCollect(Workbook.rows(wb, 0)))), data).toMatchObject(malformed)
+    }
+    // inside a cell it is neither, for both
+    const inCell = await withLayout("", `<row r="1"><c r="A1"><v>1</v><extLst><row r="2"/></extLst></c></row>`)
+    expect(Exit.isSuccess(await details(inCell))).toBe(true)
+    const read = await readExit(inCell)
+    expect(Exit.isSuccess(read) && values(read.value.sheets[0]!)).toEqual([[0, false, [[0, "Number", 1]]]])
+  })
+
+  it("rows and details accept and reject the same nestings", async () => {
+    const cases = [
+      `<row r="1"><row r="2"/></row>`,
+      `<row r="1"><x><y><row/></y></x></row>`,
+      `<row r="1"><sheetData/></row>`,
+      `<x><sheetData/></x>`,
+      `<c><row r="1"><c r="A1"><v>1</v></c></row></c>`,
+      `<c><row r="1"><row r="2"/></row></c>`,
+      `<row r="1"><c r="A1"><row r="2"/><sheetData/><v>1<row/></v><f><sheetData/></f><is><row/><t>x</t></is></c></row>`,
+      `<row r="1"><c r="A1"><extLst><c><row/></c></extLst></c></row><row r="2"/>`,
+      `<x><row r="1"/></x><y><row r="2"><z><c r="B2"><v>2</v></c></z></row></y>`
+    ]
+    for (const data of cases) {
+      const bytes = await withLayout("", data)
+      const layout = await details(bytes)
+      const read = await readExit(bytes)
+      const outcome = (exit: Exit.Exit<unknown, unknown>) => (Exit.isSuccess(exit) ? "ok" : (failureOf(exit) as { reason?: string }).reason)
+      expect(outcome(layout), data).toEqual(outcome(read))
+    }
+  })
+
+  it("layout is read outside the sheet data, below any wrapper, and not inside it", async () => {
+    const bytes = await xlsx({
+      sheets: [{
+        name: "S",
+        raw: `<worksheet xmlns="x" xmlns:mc="m"><mc:AlternateContent><mc:Choice><cols><col min="3" max="3" hidden="1"/></cols></mc:Choice></mc:AlternateContent>` +
+          `<sheetData><row r="1"><c r="A1"><v>1</v></c></row><cols><col min="5" max="5" hidden="1"/></cols><mergeCells><mergeCell ref="E5:F6"/></mergeCells><x><dimension ref="A1:Z9"/></x></sheetData>` +
+          `<x><mergeCells><mergeCell ref="A1:B1"/></mergeCells></x><x><dimension ref="B2:C3"/><col min="7" max="7" hidden="1"/><mergeCell ref="D4:D5"/></x></worksheet>`
+      }]
+    })
+    const exit = await details(bytes)
+    expect(Exit.isSuccess(exit) && exit.value).toEqual({
+      hiddenColumns: [{ first: 2, last: 2 }, { first: 6, last: 6 }],
+      merges: [{ firstRow: 0, firstColumn: 0, lastRow: 0, lastColumn: 1 }, { firstRow: 3, firstColumn: 3, lastRow: 4, lastColumn: 3 }],
+      dimension: { firstRow: 1, firstColumn: 1, lastRow: 2, lastColumn: 2 }
+    })
+  })
+
+  it("rows and cells are read below any wrapper: the sheet data in the part, a row in the sheet data, a cell in a row", async () => {
+    const bytes = await xlsx({
+      sheets: [{
+        name: "S",
+        raw: `<worksheet xmlns="x" xmlns:mc="m"><mc:AlternateContent><mc:Choice><sheetData><row r="1"><c r="A1"><v>1</v></c></row>` +
+          `<x><row r="2"><y><c r="B2"><v>2</v></c></y><c r="C2"><v>3</v></c></row></x></sheetData></mc:Choice></mc:AlternateContent></worksheet>`
+      }]
+    })
+    const read = await readExit(bytes)
+    expect(Exit.isSuccess(read) && values(read.value.sheets[0]!)).toEqual([[0, false, [[0, "Number", 1]]], [1, false, [[1, "Number", 2], [2, "Number", 3]]]])
+  })
+
   it("a cell's content is skipped, as for rows, whatever its element names", async () => {
     // a <sheetData> (in any namespace) and a <mergeCell> in a cell's extension are neither nesting nor layout
     const bytes = await withLayout(

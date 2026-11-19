@@ -16,7 +16,6 @@ import { uniqueSheetNames } from "../sheetNames.ts"
 import type { DefinedNameEntry } from "../workbook.ts"
 import * as Attr from "../xml/attributes.ts"
 import { rulesHandler, type XmlRule } from "../xml/rules.ts"
-import type { XmlElement } from "../xml/tokenizer.ts"
 import type { Archive, LocatedEntry } from "../zip/archive.ts"
 
 export const malformed = malformedIn("xlsx")
@@ -106,44 +105,6 @@ export const readWorkbookPart = (
 }
 
 /**
- * Collects rich text from the tokenizer events inside its container, for
- * the worksheet reader's inline strings (`<is>`); it reads the text as
- * `RichString` below does. Feed it the events inside the container.
- */
-export class RichText {
-  private parts: Array<string> = []
-  private length = 0
-  /** Elements open inside the container: back to 0 when the container's own end tag comes. */
-  private depth = 0
-
-  open(name: string, element: XmlElement): void {
-    this.depth++
-    if (name === "rPh") element.omitText()
-    else if (name === "t") element.collect(this.length)
-  }
-
-  /** An end tag inside the container; true for the container's own. */
-  close(name: string, text: string | undefined): boolean {
-    if (this.depth === 0) return true
-    this.depth--
-    // undefined for a <t> inside a <t> (its text is the outer one's) or inside a phonetic run
-    if (name === "t" && text !== undefined) {
-      this.parts.push(text)
-      this.length += text.length
-    }
-    return false
-  }
-
-  /** The container's text (unescaped), at its end tag; resets for the next container. */
-  take(): string {
-    const value = Attr.unescapeXstring(this.parts.length === 1 ? this.parts[0]! : this.parts.join(""))
-    this.parts = []
-    this.length = 0
-    return value
-  }
-}
-
-/**
  * The text of a rich string, as `<si>` and `<is>` hold it: the text of
  * its `<t>` elements (directly, or inside `<r>` runs), joined. The text of
  * phonetic runs (`<rPh>`) is left out wherever they are, with the `<t>`
@@ -152,24 +113,27 @@ export class RichText {
  * inside them fails. The tokenizer collects each `<t>`'s text, counting
  * the text before it against `maxStringLength`.
  */
-class RichString {
+export class RichString {
   private parts: Array<string> = []
   private length = 0
 
+  /** The rule for a phonetic run (`<rPh>`) in the string: its text is left out. */
+  readonly phonetic: XmlRule = { open: (_, element) => element.omitText() }
+
+  /** The rule for a `<t>` in the string: its text is collected, counting the text before it. */
+  readonly text: XmlRule = {
+    open: (_, element) => element.collect(this.length),
+    // undefined for a <t> inside a <t> (its text is the outer one's) or inside a phonetic run
+    close: (text) => {
+      if (text === undefined) return
+      this.parts.push(text)
+      this.length += text.length
+    }
+  }
+
   /** The rules for the string's descendants, under the container's path (`//si`). */
   rules(container: string): Record<string, XmlRule> {
-    return {
-      [`${container}//rPh`]: { open: (_, element) => element.omitText() },
-      [`${container}//t`]: {
-        open: (_, element) => element.collect(this.length),
-        // undefined for a <t> inside a <t> (its text is the outer one's) or inside a phonetic run
-        close: (text) => {
-          if (text === undefined) return
-          this.parts.push(text)
-          this.length += text.length
-        }
-      }
-    }
+    return { [`${container}//rPh`]: this.phonetic, [`${container}//t`]: this.text }
   }
 
   /** The string's text (unescaped), at the container's end tag; resets for the next one. */
