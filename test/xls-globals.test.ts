@@ -1,6 +1,6 @@
 /** XLS workbook globals: defined-name text (SUPBOOK/EXTERNSHEET), BOF versions, sheet visibility, SST, text decoding, containers. */
 import { readFileSync } from "node:fs"
-import { Effect, Exit, Stream } from "effect"
+import { Effect, Exit, Fiber, Stream } from "effect"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { readString, type Text, textDecoder } from "../src/internal/xls/fields.ts"
@@ -582,6 +582,24 @@ describe("xls globals: long work yields", () => {
     expect(run.batches).toBeGreaterThanOrEqual(4)
     expect(await texts(run.value)).toEqual(["first", "second"])
     expect(formulas(run.value)).toEqual({ Far: "[1]There!$A$1", Near: "S!$A$1" })
+  })
+
+  it("a long walk can be interrupted between batches, and reads nothing after it", async () => {
+    const records = 32 * BATCH_RECORDS
+    const bytes = X.workbookStream({ globals: Array.from({ length: records }, () => X.xf(14)), sheets: [{ name: "S", records: [] }] })
+    const batches = counter("batches")
+    const exit = await Effect.runPromise(Effect.gen(function*() {
+      const fiber = yield* Effect.forkChild(metered(batches, Xls.read(bytes)))
+      // progress: i up to 4; the walk runs about one batch per turn meanwhile
+      for (let i = 0; i < 4; i++) yield* Effect.promise(() => new Promise((resolve) => setImmediate(resolve)))
+      return yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
+    }))
+    expect(Exit.hasInterrupts(exit)).toBe(true)
+    const at = batches.total()
+    expect(at).toBeGreaterThanOrEqual(2)
+    expect(at).toBeLessThan(records / BATCH_RECORDS)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(batches.total()).toBe(at)
   })
 
   it("many defined names are read and resolved with yields", async () => {

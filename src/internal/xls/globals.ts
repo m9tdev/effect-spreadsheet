@@ -20,7 +20,7 @@ import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, Unsuppo
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { DefinedName } from "../../Workbook.ts"
 import { readRichString, RecordCursor } from "../biff/cursor.ts"
-import { type BiffRecord, BOF_BIFF5_8, EOF, RecordReader, readBof } from "../biff/records.ts"
+import { type BiffRecord, BOF_BIFF5_8, CONTINUE, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { FixedReader } from "../binary/layout.ts"
 import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
@@ -334,10 +334,29 @@ class GlobalsWalk {
         }
       }
       if (turn.spend(cost)) yield
-      if (continued !== undefined && biff8) {
-        const failed = yield* this.continued(record, continued)
-        if (failed !== undefined) return failed
+      if (continued === undefined || !biff8) continue
+      // most of these records have no CONTINUE: their cursor is made at once
+      const segments = reader.peekType() === CONTINUE ? yield* this.continues(record) : new RecordCursor(this.stream, record, reader.offset)
+      if (!(segments instanceof RecordCursor)) return segments
+      // then an EXTERNSHEET or NAME is read whole, an SST's or SUPBOOK's strings in steps
+      let failed: SpreadsheetError | undefined
+      switch (continued) {
+        case "ExternSheet":
+          this.externSheet(segments)
+          break
+        case "Name":
+          failed = this.name(segments)
+          break
+        case "Sst":
+          failed = yield* this.sst(record, segments)
+          break
+        case "Supbook":
+          failed = yield* this.supbook(record, segments)
+          break
+        default:
+          return absurd(continued)
       }
+      if (failed !== undefined) return failed
     }
   }
 
@@ -416,29 +435,6 @@ class GlobalsWalk {
       kind: dt === 0 ? "worksheet" : dt === 1 ? "macrosheet" : dt === 2 ? "chartsheet" : "other"
     })
     return undefined
-  }
-
-  /**
-   * An SST, SUPBOOK, EXTERNSHEET or NAME, just read: goes on past its
-   * CONTINUEs, then reads an EXTERNSHEET or NAME whole, or an SST's or
-   * SUPBOOK's strings.
-   */
-  private *continued(record: BiffRecord, of: ContinuedKind): Steps<SpreadsheetError | undefined> {
-    const segments = yield* this.continues(record)
-    if (!(segments instanceof RecordCursor)) return segments
-    switch (of) {
-      case "ExternSheet":
-        this.externSheet(segments)
-        return undefined
-      case "Name":
-        return this.name(segments)
-      case "Sst":
-        return yield* this.sst(record, segments)
-      case "Supbook":
-        return yield* this.supbook(record, segments)
-      default:
-        return absurd(of)
-    }
   }
 
   /**
