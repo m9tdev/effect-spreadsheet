@@ -9,16 +9,28 @@ import type { SpreadsheetError } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
 import { parse } from "./xml/parse.ts"
 import { attr, type XmlHandler } from "./xml/tokenizer.ts"
-import type { Archive, LocatedEntry } from "./zip/archive.ts"
+import type { Archive, LocatedEntry, ReaderKey } from "./zip/archive.ts"
 import { normalizeName } from "./zip/directory.ts"
 
-/** Tokenizes one part with `handler`. */
+/**
+ * Who reads a package's parts, for the archive's inflate budget (see
+ * `ReaderKey`): the reads made while the workbook opens (its part,
+ * relationships, shared strings, styles), each sheet by its index, and each
+ * external book by its number. A part two of them read is charged to each.
+ */
+export const readers = {
+  open: "open",
+  sheet: (index: number): ReaderKey => `sheet:${index}`,
+  book: (book: number): ReaderKey => `book:${book}`
+} as const
+
+/** Tokenizes one part with `handler`, as one of the reads made while the workbook opens. */
 export const parsePart = (
   archive: Archive,
   entry: LocatedEntry,
   handler: XmlHandler,
   limits: Limits
-): Effect.Effect<void, SpreadsheetError> => parse(archive.read(entry), handler, limits, entry.name)
+): Effect.Effect<void, SpreadsheetError> => parse(archive.read(entry, readers.open), handler, limits, entry.name)
 
 /**
  * What a relationship points at.

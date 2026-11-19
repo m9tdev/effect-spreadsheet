@@ -49,8 +49,8 @@ export const effectOf = (task: FuzzTask): Effect.Effect<unknown, unknown> => {
         const archive = opened.success
         return Effect.forEach(archive.entries, (entry) =>
           /\.(xml|rels)$/i.test(entry.name)
-            ? parse(archive.read(entry), ignore, limits, entry.name)
-            : Stream.runDrain(archive.read(entry)), { discard: true })
+            ? parse(archive.read(entry, "fuzz"), ignore, limits, entry.name)
+            : Stream.runDrain(archive.read(entry, "fuzz")), { discard: true })
       })
     case "cfb":
       // open the container, read every stream, walk the workbook stream's

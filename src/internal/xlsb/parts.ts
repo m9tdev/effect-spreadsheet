@@ -11,6 +11,7 @@ import { readRichStr, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, readRecords } from "../biff12/records.ts"
 import { FixedReader } from "../binary/layout.ts"
 import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
+import { readers } from "../opc.ts"
 import type { Archive, LocatedEntry } from "../zip/archive.ts"
 import { malformed, stringError } from "./workbook.ts"
 
@@ -43,7 +44,7 @@ export const readSharedStrings = (
       strings.push(text.value)
       return undefined
     }
-    return Effect.as(readRecords(archive.read(entry), handle, limits, entry.name), strings)
+    return Effect.as(readRecords(archive.read(entry, readers.open), handle, limits, entry.name), strings)
   })
 
 /** Cell styles kept at most: a cell's style index is 24 bits. */
@@ -119,5 +120,5 @@ export const readStyles = (
           return undefined
       }
     }
-    return Effect.map(readRecords(archive.read(entry), handle, limits, entry.name), () => cellStyles(ids, count, custom))
+    return Effect.map(readRecords(archive.read(entry, readers.open), handle, limits, entry.name), () => cellStyles(ids, count, custom))
   })

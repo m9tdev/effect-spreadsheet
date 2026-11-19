@@ -72,7 +72,7 @@ describe("xlsx: 200 000 rows", () => {
     const archive = Result.getOrThrow(open(bytes, SpreadsheetLimits.defaults))
     const entry = archive.find("xl/worksheets/sheet1.xml")!
     const ignore = { open: () => undefined, close: () => undefined, text: () => undefined }
-    const reference = () => Effect.runPromise(parse(archive.read(entry), ignore, SpreadsheetLimits.defaults))
+    const reference = () => Effect.runPromise(parse(archive.read(entry, "test"), ignore, SpreadsheetLimits.defaults))
     const reading = () => Effect.runPromise(Stream.runDrain(Workbook.rows(wb, 0)))
     let readMs = Infinity
     let referenceMs = Infinity
@@ -118,7 +118,7 @@ describe("xlsx: a sheet part in one piece", () => {
     let rows = 0
     let maxPerPull = 0
     const run = await countYields(() =>
-      Effect.runPromise(Stream.runForEachArray(sheetRows(archive.read(archive.find("sheet1.xml")!), context), (pulled) =>
+      Effect.runPromise(Stream.runForEachArray(sheetRows(archive.read(archive.find("sheet1.xml")!, "test"), context), (pulled) =>
         Effect.sync(() => {
           rows += pulled.length
           maxPerPull = Math.max(maxPerPull, pulled.length)

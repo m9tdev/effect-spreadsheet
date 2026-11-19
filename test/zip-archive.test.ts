@@ -29,7 +29,7 @@ const openOk = (bytes: Uint8Array, l = limits, inflate?: InflateRaw): Opened => 
   if (Result.isFailure(opened)) throw new Error(`open failed: ${opened.failure._tag} ${(opened.failure as { reason?: string }).reason}`)
   const archive = opened.success
   const inflated = counter("bytes")
-  return { ...archive, read: (entry, l) => Stream.provideService(archive.read(entry, l), WorkMeter, inflated), inflated }
+  return { ...archive, read: (entry, reader, l) => Stream.provideService(archive.read(entry, reader, l), WorkMeter, inflated), inflated }
 }
 
 const readAllExit = (archive: Archive, name: string) =>
@@ -85,7 +85,7 @@ describe("zip archive: reading entries", () => {
       expect(Exit.isSuccess(exit) && Array.from(exit.value)).toEqual(Array.from(data))
     }
     // streams are re-runnable and come in bounded chunks
-    const chunks = await Effect.runPromise(Stream.runCollect(archive.read(archive.find("xl/media/random.bin")!)))
+    const chunks = await Effect.runPromise(Stream.runCollect(archive.read(archive.find("xl/media/random.bin")!, "test")))
     expect(Array.from(chunks).every((c) => c.length <= CHUNK)).toBe(true)
     expect(concat(Array.from(chunks))).toEqual(random)
   })
@@ -148,7 +148,7 @@ describe("zip archive: reading entries", () => {
     }
     const zip = await buildZip([{ name: "big.bin", data: new Uint8Array(1000 * 1024) }])
     const archive = openOk(zip, limits, fake)
-    const first = await Effect.runPromise(Stream.runCollect(Stream.take(archive.read(archive.find("big.bin")!), 2)))
+    const first = await Effect.runPromise(Stream.runCollect(Stream.take(archive.read(archive.find("big.bin")!, "test"), 2)))
     expect(Array.from(first).length).toBe(2)
     expect(pulls).toBe(2)
     expect(cancelled).toBeGreaterThanOrEqual(1)
@@ -172,7 +172,7 @@ describe("zip archive: bounded slices", () => {
   }
 
   const slicesOf = async (archive: Archive, name: string) => {
-    const pulls = await Effect.runPromise(Stream.runCollect(Stream.chunks(archive.read(archive.find(name)!))))
+    const pulls = await Effect.runPromise(Stream.runCollect(Stream.chunks(archive.read(archive.find(name)!, "test"))))
     return Array.from(pulls)
   }
 
@@ -317,11 +317,39 @@ describe("zip archive: hostile input", () => {
     expect(archive.inflated.total()).toBe(5 * MiB)
   })
 
+  it("re-reads are free per reader: each reader of one entry pays for what it reads of it", async () => {
+    const zip = await zeroEntries(1)
+    const archive = openOk(zip, { ...limits, inflateFloorBytes: 2.5 * MiB })
+    const [entry] = archive.entries
+    const readExit = (reader: string) => Effect.runPromise(Effect.exit(Stream.runCollect(archive.read(entry!, reader))))
+    const over = { _tag: "LimitExceeded", limit: "maxInflateRatio" }
+    // one reader reading twice pays once; a second reader pays again
+    expect(Exit.isSuccess(await readExit("a"))).toBe(true)
+    expect(Exit.isSuccess(await readExit("a"))).toBe(true)
+    expect(Exit.isSuccess(await readExit("b"))).toBe(true)
+    // a third reader's read crosses 2.5 MiB, and does again; a and b still read for free
+    expect(failureOf(await readExit("c"))).toMatchObject(over)
+    expect(failureOf(await readExit("c"))).toMatchObject(over)
+    expect(Exit.isSuccess(await readExit("a"))).toBe(true)
+    expect(Exit.isSuccess(await readExit("b"))).toBe(true)
+    // many readers of one entry add up to the budget, not past it: no free amplification
+    const many = openOk(zip, { ...limits, inflateFloorBytes: 2.5 * MiB })
+    let read = 0
+    // progress: k up to 50
+    for (let k = 0; k < 50; k++) {
+      const exit = await Effect.runPromise(Effect.exit(Stream.runDrain(many.read(many.entries[0]!, `r${k}`))))
+      if (Exit.isSuccess(exit)) read++
+    }
+    expect(read).toBe(2)
+    // the budget, plus at most the one chunk each later reader is refused
+    expect(many.inflated.total()).toBeLessThanOrEqual(2.5 * MiB + 48 * CHUNK)
+  })
+
   it("after one entry goes over the budget, entries already read still read; new bytes still fail", async () => {
     const zip = await zeroEntries(3)
     const archive = openOk(zip, { ...limits, inflateFloorBytes: 2 * MiB })
     const [a, b, c] = archive.entries
-    const readExit = (entry: LocatedEntry | undefined, l?: SpreadsheetLimits.Limits) => Effect.runPromise(Effect.exit(Stream.runCollect(archive.read(entry!, l))))
+    const readExit = (entry: LocatedEntry | undefined, l?: SpreadsheetLimits.Limits) => Effect.runPromise(Effect.exit(Stream.runCollect(archive.read(entry!, "test", l))))
     expect(Exit.isSuccess(await readExit(a))).toBe(true)
     expect(Exit.isSuccess(await readExit(b))).toBe(true)
     const over = { _tag: "LimitExceeded", limit: "maxInflateRatio", max: 200 }
@@ -468,7 +496,7 @@ describe("zip archive: hostile input", () => {
     // only entries an archive has opened can be read: a bare directory entry has no checked data range
     const bare = (entry: ZipEntry) =>
       // @ts-expect-error a directory entry isn't a located entry
-      archive.read(entry)
+      archive.read(entry, "test")
     expect(typeof bare).toBe("function")
   })
 

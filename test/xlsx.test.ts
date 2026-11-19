@@ -721,27 +721,44 @@ describe("xlsx: hostile and broken files", () => {
     }
   })
 
-  it("sheets sharing one worksheet part are MalformedFile (each would re-inflate it for free)", async () => {
-    const enc8 = (s: string) => new TextEncoder().encode(s)
-    const pkg = (sheets: string, rels: string) =>
+  describe("sheets sharing one worksheet part", () => {
+    const pkg = (sheets: string, rels: string, sheetData = `<row><c><v>1</v></c></row>`) =>
       buildZip([
-        { name: "_rels/.rels", data: enc8(`<Relationships xmlns="x"><Relationship Id="r" Type="http://x/officeDocument" Target="xl/workbook.xml"/></Relationships>`) },
-        { name: "xl/workbook.xml", data: enc8(`<workbook xmlns="x" xmlns:r="y"><sheets>${sheets}</sheets></workbook>`) },
-        { name: "xl/_rels/workbook.xml.rels", data: enc8(`<Relationships xmlns="x">${rels}</Relationships>`) },
-        { name: "xl/worksheets/sheet1.xml", data: enc8(sheetXml(`<row><c><v>1</v></c></row>`)) }
+        { name: "_rels/.rels", data: enc(`<Relationships xmlns="x"><Relationship Id="r" Type="http://x/officeDocument" Target="xl/workbook.xml"/></Relationships>`) },
+        { name: "xl/workbook.xml", data: enc(`<workbook xmlns="x" xmlns:r="y"><sheets>${sheets}</sheets></workbook>`) },
+        { name: "xl/_rels/workbook.xml.rels", data: enc(`<Relationships xmlns="x">${rels}</Relationships>`) },
+        { name: "xl/worksheets/sheet1.xml", data: enc(sheetXml(sheetData)) }
       ])
     const rel = (id: string, target = "worksheets/sheet1.xml") => `<Relationship Id="${id}" Type="http://x/worksheet" Target="${target}"/>`
-    // N sheets on one r:id
-    const sameId = await pkg(Array.from({ length: 50 }, (_, i) => `<sheet name="S${i}" r:id="rId1"/>`).join(""), rel("rId1"))
-    expect(failureOf(await readExit(sameId))).toMatchObject({
-      _tag: "MalformedFile",
-      reason: `sheets "S0" and "S1" share part xl/worksheets/sheet1.xml`
+    const onOneId = (count: number) => Array.from({ length: count }, (_, i) => `<sheet name="S${i}" r:id="rId1"/>`).join("")
+    const rowsExit = (wb: Workbook.Workbook, sheet: string | number, limits?: LimitOverrides) =>
+      Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, sheet, limits === undefined ? undefined : { limits }))))
+
+    it("open, and each sheet reads the part", async () => {
+      // N sheets on one r:id
+      const sameId = await readExit(await pkg(onOneId(50), rel("rId1")))
+      expect(Exit.isSuccess(sameId) && sameId.value.sheets.map((rows) => values(rows))).toEqual(Array(50).fill([[0, false, [[0, "Number", 1]]]]))
+      // two relationships with the same target (written differently)
+      const sameTarget = await readExit(await pkg(`<sheet name="A" r:id="rId1"/><sheet name="B" r:id="rId2"/>`, rel("rId1") + rel("rId2", "/XL/worksheets/sheet1.xml")))
+      expect(Exit.isSuccess(sameTarget) && sameTarget.value.sheets.map((rows) => rows.length)).toEqual([1, 1])
     })
-    // two relationships with the same target (written differently)
-    const sameTarget = await pkg(`<sheet name="A" r:id="rId1"/><sheet name="B" r:id="rId2"/>`, rel("rId1") + rel("rId2", "/XL/worksheets/sheet1.xml"))
-    expect(failureOf(await readExit(sameTarget))).toMatchObject({ _tag: "MalformedFile", reason: `sheets "A" and "B" share part xl/worksheets/sheet1.xml` })
-    // one sheet on it is fine
-    expect(Exit.isSuccess(await readExit(await pkg(`<sheet name="A" r:id="rId1"/>`, rel("rId1"))))).toBe(true)
+
+    it("each pay for what they read in the inflate budget, so aliasing a part amplifies nothing", async () => {
+      // a sheet part of about 50 KB; a budget for the open-time reads and three and a half of it
+      const sheetData = `<row><c><v>1</v></c></row>${" ".repeat(50_000)}`
+      const wb = await Effect.runPromise(Xlsx.read(await pkg(onOneId(50), rel("rId1"), sheetData), { limits: { maxDecompressedBytes: 175_000 } }))
+      const outcomes: Array<string> = []
+      for (let i = 0; i < 50; i++) {
+        const exit = await rowsExit(wb, i)
+        outcomes.push(Exit.isSuccess(exit) ? "read" : (failureOf(exit) as { limit: string }).limit)
+      }
+      expect(outcomes).toEqual([...Array(3).fill("read"), ...Array(47).fill("maxDecompressedBytes")])
+      // a sheet reading its part again pays nothing new, whatever other sheets spent
+      expect(Exit.isSuccess(await rowsExit(wb, 0))).toBe(true)
+      expect(Exit.isSuccess(await Effect.runPromise(Effect.exit(Workbook.sheetDetails(wb, 2))))).toBe(true)
+      // the 4th sheet still can't, even with the same part already inflated three times
+      expect(failureOf(await rowsExit(wb, 3))).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 175_000 })
+    })
   })
 
   it("a sheet that inflates past the archive budget stops there", async () => {

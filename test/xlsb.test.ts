@@ -790,12 +790,10 @@ describe("xlsb limits and malformed input", () => {
     for (let k = 0; k < 4; k++) expect(await serial1(wbProp.subarray(0, k)), `cut to ${k} bytes`).toBe("1900-01-01T00:00:00.000Z")
   })
 
-  it("a broken package: no workbook part, a part that isn't a workbook, a missing sheet part, two sheets on one part", async () => {
+  it("a broken package: no workbook part, a part that isn't a workbook, a missing sheet part", async () => {
     expect(await errorOf({ sheets: [], workbookPart: new Uint8Array(0) })).toMatchObject({ _tag: "MalformedFile", reason: "empty workbook part" })
     expect(await errorOf({ sheets: [], workbookPart: B.concat([B.record(0x81)]) })).toMatchObject({ _tag: "MalformedFile", reason: "not a workbook part: it starts with record 0x81" })
     expect(await errorOf({ sheets: [{ name: "S" }], workbookPart: B.concat([B.beginBook(), B.bundleSh("S", "rId9")]) })).toMatchObject({ _tag: "MalformedFile", reason: "sheet \"S\" has no part" })
-    const shared = B.concat([B.beginBook(), B.bundleSh("A", "rId1"), B.bundleSh("B", "rId1")])
-    expect(await errorOf({ sheets: [{ name: "A" }], workbookPart: shared })).toMatchObject({ _tag: "MalformedFile", reason: "sheets \"A\" and \"B\" share part xl/worksheets/sheet1.bin" })
     const truncatedSheet = B.concat([B.beginBook(), B.record(0x9C, [0, 0, 0, 0, 1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 5, 0, 0, 0, 65, 0])])
     expect(await errorOf({ sheets: [], workbookPart: truncatedSheet })).toMatchObject({ _tag: "MalformedFile", reason: "truncated sheet record" })
   })
@@ -809,6 +807,36 @@ describe("xlsb inflate budget across reads of one workbook", () => {
     Effect.runPromise(Effect.exit(Stream.runCollect(Workbook.rows(wb, sheet, limits === undefined ? undefined : { limits }))))
   const detailsExit = (wb: Workbook.Workbook, sheet: string, limits?: LimitOverrides) =>
     Effect.runPromise(Effect.exit(Workbook.sheetDetails(wb, sheet, limits === undefined ? undefined : { limits })))
+
+  it("two sheets on one part open, and each reads it", async () => {
+    const shared = B.concat([B.beginBook(), B.bundleSh("A", "rId1"), B.bundleSh("B", "rId1")])
+    const { wb, sheets } = await readOk({ sheets: [{ name: "A", part: B.sheetBin([B.rowHdr(0), B.rk(0, B.rkInt(7))]) }], workbookPart: shared })
+    expect(wb.sheets.map((s) => s.name)).toEqual(["A", "B"])
+    expect(sheets.map(values)).toEqual([[[0, false, [[0, "Number", 7]]]], [[0, false, [[0, "Number", 7]]]]])
+  })
+
+  it("sheets on one part each pay for what they read; a sheet's rows and details are one reader", async () => {
+    // 20 sheets on Big's part; a budget for the open-time reads and two and a half reads of it
+    const sheets = Array.from({ length: 20 }, (_, i) => B.bundleSh(`S${i}`, "rId1"))
+    const workbookPart = B.concat([B.beginBook(), B.record(0x8F), ...sheets, B.record(0x90), B.endBook()])
+    const bytes = await B.xlsb({ sheets: [{ name: "S0", part: big }], workbookPart })
+    const size = Result.getOrThrow(open(bytes, SpreadsheetLimits.defaults)).find("xl/worksheets/sheet1.bin")!.uncompressedSize
+    const max = Math.floor(2.5 * size)
+    const wb = await Effect.runPromise(Xlsb.read(bytes, { limits: { maxDecompressedBytes: max } }))
+    const outcomes: Array<string> = []
+    for (let i = 0; i < 20; i++) {
+      const exit = await rowsExit(wb, `S${i}`)
+      outcomes.push(Exit.isSuccess(exit) ? "read" : (failureOf(exit) as { limit: string }).limit)
+    }
+    expect(outcomes).toEqual([...Array(2).fill("read"), ...Array(18).fill("maxDecompressedBytes")])
+    // the sheets already read read again, rows and details, for nothing new
+    for (const sheet of ["S0", "S1"]) {
+      expect(Exit.isSuccess(await rowsExit(wb, sheet)), sheet).toBe(true)
+      expect(Exit.isSuccess(await detailsExit(wb, sheet)), sheet).toBe(true)
+    }
+    // the others still can't, for details too
+    expect(failureOf(await detailsExit(wb, "S2"))).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max })
+  })
 
   it("a sheet already read can be read again after another sheet went over the budget", async () => {
     const wb = await Effect.runPromise(Xlsb.read(await book(), { limits: { maxDecompressedBytes: 4000 } }))
