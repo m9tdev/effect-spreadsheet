@@ -10,7 +10,7 @@ const malformed = (reason: string) => new MalformedFile({ format: "xml", reason 
 const run = (
   xml: string,
   paths: ReadonlyArray<string>,
-  options: { forbid?: Record<string, string>; rule?: (path: string, log: Array<string>) => XmlRule } = {}
+  options: { forbid?: Record<string, string>; skip?: ReadonlyArray<string>; rule?: (path: string, log: Array<string>) => XmlRule } = {}
 ): { log: Array<string>; error: SpreadsheetError | undefined } => {
   const log: Array<string> = []
   const on: Record<string, XmlRule> = {}
@@ -24,7 +24,12 @@ const run = (
       }
     }
   }
-  const rules: XmlRules = { on, malformed, ...(options.forbid === undefined ? {} : { forbid: options.forbid }) }
+  const rules: XmlRules = {
+    on,
+    malformed,
+    ...(options.forbid === undefined ? {} : { forbid: options.forbid }),
+    ...(options.skip === undefined ? {} : { skip: options.skip })
+  }
   const tokenizer = new XmlTokenizer(rulesHandler(rules), SpreadsheetLimits.defaults)
   const error = tokenizer.feed(xml) ?? tokenizer.end()
   return { log, error }
@@ -37,15 +42,26 @@ describe("xml path rules: paths", () => {
   })
 
   it("a path that doesn't start with a slash, has an empty step or a prefixed name, or is empty, is a programming error", () => {
-    for (const bad of ["a", "//a/", "//a///b", "/", "//", "", "//x:a", "a//b"]) expect(() => parsePath(bad), bad).toThrow(/XML path/)
+    for (const bad of ["a", "ab", "//a/", "//a///b", "/", "//", "", "//x:a", "a//b"]) expect(() => parsePath(bad), bad).toThrow(/XML path/)
   })
 
   it(`the rules may have at most ${MAX_STEPS} steps in all`, () => {
     const on = (steps: number): Record<string, XmlRule> => ({ [Array.from({ length: steps }, (_, k) => `/e${k}`).join("")]: {} })
     expect(() => rulesHandler({ on: on(MAX_STEPS), malformed })).not.toThrow()
     expect(() => rulesHandler({ on: on(MAX_STEPS + 1), malformed })).toThrow(/more than 30/)
-    // forbid paths count too
-    expect(() => rulesHandler({ on: on(MAX_STEPS), forbid: { "//x": "x" }, malformed })).toThrow(/more than 30/)
+    // forbid and skip paths count too
+    expect(() => rulesHandler({ on: on(MAX_STEPS), forbid: { "//x": "x" }, malformed })).toThrow(/more than 30 path steps/)
+    expect(() => rulesHandler({ on: on(MAX_STEPS), skip: ["//x"], malformed })).toThrow(/more than 30 path steps/)
+    // paths that start alike share their steps
+    expect(() => rulesHandler({ on: { ...on(MAX_STEPS), "/e0": {}, "/e0/e1": {} }, malformed })).not.toThrow()
+  })
+
+  it(`the rules may have at most ${MAX_STEPS} paths in all, even on fewer steps`, () => {
+    const paths = Array.from({ length: 10 }, (_, k) => `//p${k}`)
+    const on = Object.fromEntries(paths.map((p) => [p, {}]))
+    const forbid = Object.fromEntries(paths.map((p) => [p, "x"]))
+    expect(() => rulesHandler({ on, forbid, skip: paths, malformed })).not.toThrow()
+    expect(() => rulesHandler({ on: { ...on, "//p10": {} }, forbid, skip: paths, malformed })).toThrow(/more than 30 paths/)
   })
 })
 
@@ -95,6 +111,11 @@ describe("xml path rules: matching", () => {
     expect(log).toEqual(["open //b", "open /a/b", "open //a//b", "close //b", "close /a/b", "close //a//b"])
   })
 
+  it("siblings with the same name at the same depth match by their own parent", () => {
+    const xml = `<a><m><i n="1"/><i n="2"/></m><l><i n="3"/><i n="4"/></l><m><i n="5"/></m></a>`
+    expect(run(xml, ["/a/l/i"]).log.filter((l) => l.startsWith("open"))).toEqual(["open /a/l/i n=3", "open /a/l/i n=4"])
+  })
+
   it("a rule without open or close is fine", () => {
     expect(run(`<a><b/></a>`, ["//b"], { rule: () => ({}) })).toEqual({ log: [], error: undefined })
   })
@@ -130,29 +151,29 @@ describe("xml path rules: what the rules ask of the tokenizer", () => {
     expect(error).toMatchObject({ _tag: "LimitExceeded" })
   })
 
-  it("a skipped element: no rules inside it, and no close for it; the rules go on after it", () => {
-    const rule = (path: string, log: Array<string>): XmlRule => ({
-      open: (_, element) => {
-        log.push(`open ${path}`)
-        if (path === "//skip") element.skip()
-      },
-      close: () => void log.push(`close ${path}`)
+  it("an open's error: the element's later rules don't open; a close's error stops tokenizing too", () => {
+    const stop = new LimitExceeded({ limit: "maxSheets", max: 0, actual: 1 })
+    const opens = run(`<a><b/></a>`, ["//b", "/a/b"], {
+      rule: (path, log) => ({ open: () => (log.push(`open ${path}`), path === "//b" ? stop : undefined) })
     })
-    const { log, error } = run(`<a><skip><b/><b><c/></b></skip><b/></a>`, ["//skip", "//b", "//b/c"], { forbid: { "//skip//c": "c in skip" }, rule })
-    expect(error).toBeUndefined()
-    expect(log).toEqual(["open //skip", "open //b", "close //b"])
+    expect(opens).toEqual({ log: ["open //b"], error: stop })
+    const closes = run(`<a><b/><b/></a>`, ["//b", "/a/b"], {
+      rule: (path, log) => ({ close: () => (log.push(`close ${path}`), path === "//b" ? stop : undefined) })
+    })
+    expect(closes).toEqual({ log: ["close //b"], error: stop })
   })
 
-  it("an element skipped by one rule still gets the other rules' opens, and the matching below it isn't thrown off", () => {
-    const rule = (path: string, log: Array<string>): XmlRule => ({
-      open: (_, element) => {
-        log.push(`open ${path}`)
-        if (path === "//s") element.skip()
-      },
-      close: () => void log.push(`close ${path}`)
-    })
-    const { log } = run(`<a><s><x/></s><x/><b><x/></b></a>`, ["//s", "//a//s", "/a/x", "//b/x"], { rule })
-    expect(log).toEqual(["open //s", "open //a//s", "open /a/x", "close /a/x", "open //b/x", "close //b/x"])
+  it("a skipped element: no rules for it, inside it, nor at its end tag; the rules go on after it", () => {
+    const { log, error } = run(`<a><s><b/><b><c/></b></s><b/></a>`, ["//s", "//b", "//b/c"], { skip: ["//s"], forbid: { "//s//c": "c in s" } })
+    expect(error).toBeUndefined()
+    expect(log).toEqual(["open //b", "close //b"])
+    // the matching below and after it isn't thrown off
+    expect(run(`<a><s><x/></s><x/><b><s/><x/></b></a>`, ["/a/x", "//b/x"], { skip: ["/a/s", "//b/s"] }).log)
+      .toEqual(["open /a/x", "close /a/x", "open //b/x", "close //b/x"])
+  })
+
+  it("a forbidden path wins over a skip path", () => {
+    expect(run(`<a><s/></a>`, [], { skip: ["//s"], forbid: { "//a/s": "no s" } }).error).toMatchObject({ reason: "no s" })
   })
 
   it("left-out text: the events still come, and a <t> inside asks for its text in vain", () => {
