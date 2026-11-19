@@ -17,8 +17,9 @@ import type { SheetDetails } from "../../Workbook.ts"
 import { parseRange } from "../refs.ts"
 import { LayoutBuilder } from "../sheet/layout.ts"
 import { parse } from "../xml/parse.ts"
-import { attr, type XmlHandler } from "../xml/tokenizer.ts"
-import { isTrue, malformed } from "./parts.ts"
+import * as Attr from "../xml/attributes.ts"
+import type { XmlHandler } from "../xml/tokenizer.ts"
+import { malformed, NINE_DIGITS } from "./parts.ts"
 
 export const sheetDetails = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,
@@ -53,24 +54,21 @@ export const sheetDetails = (
           return undefined
         }
         if (name === "dimension") {
-          const ref = attr(attributes, "ref")
+          const ref = Attr.string(attributes, "ref")
           const range = ref === undefined ? undefined : parseRange(ref)
           if (range !== undefined) layout.dimension(range)
         } else if (name === "col") {
           const counted = layout.columnRecord()
           if (counted !== undefined) return counted
-          if (!isTrue(attr(attributes, "hidden"))) return undefined
-          const min = attr(attributes, "min")
-          const max = attr(attributes, "max")
-          if (min === undefined || max === undefined || !/^\d{1,9}$/.test(min) || !/^\d{1,9}$/.test(max)) {
-            return malformed("bad <col> range", part)
-          }
-          const first = Number(min) - 1
-          if (first < 0) return malformed("bad <col> range", part)
+          if (!Attr.bool(attributes, "hidden")) return undefined
+          // a hidden span needs both ends: a missing or bad one is MalformedFile
+          const min = Attr.uint(attributes, "min", NINE_DIGITS)
+          const max = Attr.uint(attributes, "max", NINE_DIGITS)
+          if (typeof min !== "number" || typeof max !== "number" || min === 0) return malformed("bad <col> range", part)
           // a reversed span hides nothing; the part at or past maxColumns is dropped
-          layout.hideColumns(first, Number(max) - 1)
+          layout.hideColumns(min - 1, max - 1)
         } else if (name === "mergeCell") {
-          const ref = attr(attributes, "ref")
+          const ref = Attr.string(attributes, "ref")
           const range = ref === undefined ? undefined : parseRange(ref)
           if (range === undefined) return malformed(`bad merge range ${JSON.stringify((ref ?? "").slice(0, 40))}`, part)
           return layout.merge(range)

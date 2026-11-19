@@ -48,8 +48,9 @@ import { type CellStyles, numberCell, type NumberFormat, withNumFmt } from "../n
 import { parseCellRef } from "../refs.ts"
 import { RowBuilder } from "../sheet/rows.ts"
 import { xmlDecoder } from "../xml/parse.ts"
-import { attr, type XmlAttributes, type XmlHandler } from "../xml/tokenizer.ts"
-import { isTrue, malformed, RichText, unescapeXstring } from "./parts.ts"
+import * as Attr from "../xml/attributes.ts"
+import type { XmlAttributes, XmlHandler } from "../xml/tokenizer.ts"
+import { malformed, NINE_DIGITS, RichText } from "./parts.ts"
 
 export interface SheetContext {
   readonly part: string
@@ -58,6 +59,9 @@ export interface SheetContext {
   readonly date1904: boolean
   readonly limits: Limits
 }
+
+/** The largest number with at most ten digits: a longer row number is past any row limit. */
+const TEN_DIGITS = 9_999_999_999
 
 /** xsd:double as Excel writes it (no hex, no INF/NaN). */
 const DOUBLE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/
@@ -240,14 +244,16 @@ export class SheetRows implements XmlHandler {
 
   /** A `<row>`: its `r` gives the index; without one, its first cell or the previous row decides. */
   private openRow(attributes: XmlAttributes): SpreadsheetError | undefined {
-    const hidden = isTrue(attr(attributes, "hidden"))
-    const r = attr(attributes, "r")
+    const hidden = Attr.bool(attributes, "hidden")
+    const r = Attr.string(attributes, "r")
     if (r === undefined) return this.rows.openRow(undefined, hidden, undefined)
-    if (!/^\d+$/.test(r) || r.length > 10) {
+    const number = Attr.parseUint(r, TEN_DIGITS)
+    if (number === "bad") {
+      // only digits, but too many of them: past any row limit
       if (/^\d+$/.test(r)) return new LimitExceeded({ limit: "maxRows", max: this.context.limits.maxRows, actual: Infinity })
       return malformed(`bad row number ${JSON.stringify(r.slice(0, 20))}`, this.context.part)
     }
-    const index = Number(r) - 1
+    const index = number - 1
     if (index < 0) return malformed("row number 0", this.context.part)
     return this.rows.openRow(index, hidden, undefined)
   }
@@ -257,7 +263,7 @@ export class SheetRows implements XmlHandler {
     const rows = this.rows
     let column = rows.nextColumn
     let row: number | undefined
-    const r = attr(attributes, "r")
+    const r = Attr.string(attributes, "r")
     if (r !== undefined) {
       const ref = parseCellRef(r)
       if (ref === undefined || ref.column === undefined) {
@@ -268,11 +274,12 @@ export class SheetRows implements XmlHandler {
     }
     const placed = rows.placeCell(column, r, row)
     if (placed !== undefined) return placed
-    const s = attr(attributes, "s")
+    // a missing or bad style index is no style (General)
+    const style = Attr.uint(attributes, "s", NINE_DIGITS)
     this.cell = {
       column,
-      type: attr(attributes, "t"),
-      style: s !== undefined && /^\d{1,9}$/.test(s) ? Number(s) : undefined,
+      type: Attr.string(attributes, "t"),
+      style: style === "bad" ? undefined : style,
       value: undefined,
       valueLength: 0,
       formula: undefined,
@@ -296,7 +303,7 @@ export class SheetRows implements XmlHandler {
     const { column } = pending
     const part = this.context.part
     const formulaText = pending.formula === undefined ? "" : pending.formula.join("")
-    const meta: Cell.Meta | undefined = formulaText === "" ? undefined : { formula: unescapeXstring(formulaText) }
+    const meta: Cell.Meta | undefined = formulaText === "" ? undefined : { formula: Attr.unescapeXstring(formulaText) }
     // the type decides where the value is: <is> for an inline string (else
     // its <v>), <v> for every other type; a cell without `t` or `<v>` takes <is>
     if (pending.inlineValue !== undefined && (pending.type === "inlineStr" || (pending.type === undefined && pending.value === undefined))) {
@@ -318,7 +325,7 @@ export class SheetRows implements XmlHandler {
       case "inlineStr":
       case "str":
         // text in <v> (str, or inlineStr written that way)
-        return Cell.text(column, unescapeXstring(raw), meta)
+        return Cell.text(column, Attr.unescapeXstring(raw), meta)
       case "b": {
         const v = raw.trim()
         if (v === "1" || v === "true") return Cell.boolean(column, true, meta)
