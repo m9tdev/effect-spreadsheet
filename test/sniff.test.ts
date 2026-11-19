@@ -187,6 +187,32 @@ describe("Spreadsheet.read dispatch", () => {
       }
     }))
 
+  // one small input per detected format without a reader, with the reason reading it fails with
+  const unreadable = [
+    ["ods", makeZip([{ name: "mimetype", data: enc("application/vnd.oasis.opendocument.spreadsheet") }]), "ODS reading is not implemented"],
+    [
+      "spreadsheetml",
+      enc(`<?xml version="1.0"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"></Workbook>`),
+      "SpreadsheetML 2003 reading is not implemented yet"
+    ],
+    ["sylk", enc("ID;PWXL\r\nC;Y1;X1;K1\r\nE\r\n"), "SYLK reading is not implemented"],
+    ["zip", makeZip([{ name: "hello.txt", data: enc("hi") }]), "zip archive without a known workbook"],
+    ["html", enc("<html><body><table><tr><td>1</td></tr></table></body></html>"), "HTML is not a supported spreadsheet format"],
+    ["xml", enc(`<?xml version="1.0"?><root/>`), "XML document that is not SpreadsheetML"],
+    ["pdf", enc("%PDF-1.4"), "PDF is not a spreadsheet"],
+    ["image", new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), "image file is not a spreadsheet"],
+    ["rtf", enc("{\\rtf1 x}"), "RTF is not a spreadsheet"],
+    ["unknown", new Uint8Array([0x01, 0x02, 0x00, 0x00, 0x05, 0x00, 0x07]), "binary data of unknown format"]
+  ] as const
+  for (const [format, bytes, reason] of unreadable) {
+    it.effect(`${format} is detected as ${format}, and reading it fails with UnsupportedFormat naming it`, () =>
+      Effect.gen(function*() {
+        assert.strictEqual(yield* Spreadsheet.detectFormat(bytes), format)
+        const error = yield* Effect.flip(Spreadsheet.read(bytes))
+        assert.deepStrictEqual(error._tag === "UnsupportedFormat" ? [error.format, error.reason] : error, [format, reason])
+      }))
+  }
+
   it.effect("a compound file without a workbook stream goes to the XLS reader, other formats get the dispatch's reason", () =>
     Effect.gen(function*() {
       const cases = [
