@@ -310,6 +310,145 @@ describe("xml tokenizer: one root element", () => {
   })
 })
 
+describe("xml tokenizer: element text and skipped subtrees", () => {
+  type Directed = readonly ["open", string] | readonly ["close", string, string | undefined] | readonly ["text", string]
+
+  /**
+   * Tokenizes `pieces`, asking for each element what `choose` says: skip
+   * it, collect its text (with a prior length, if a number), or nothing.
+   */
+  const directed = (
+    pieces: ReadonlyArray<string>,
+    choose: (name: string) => "skip" | "collect" | number | undefined,
+    l: SpreadsheetLimits.Limits = limits
+  ) => {
+    const events: Array<Directed> = []
+    const handler: XmlHandler = {
+      open: (name, _, element) => {
+        events.push(["open", name])
+        const choice = choose(name)
+        if (choice === "skip") element.skip()
+        else if (choice === "collect") element.collect()
+        else if (typeof choice === "number") element.collect(choice)
+      },
+      close: (name, text) => {
+        events.push(["close", name, text])
+      },
+      text: (value) => {
+        const last = events[events.length - 1]
+        if (last !== undefined && last[0] === "text") events[events.length - 1] = ["text", last[1] + value]
+        else events.push(["text", value])
+      }
+    }
+    const tokenizer = new XmlTokenizer(handler, l)
+    let error: SpreadsheetError | undefined
+    for (const piece of pieces) {
+      error = tokenizer.feed(piece)
+      if (error !== undefined) break
+    }
+    error ??= tokenizer.end()
+    return { events, error }
+  }
+
+  const byName = (choices: Record<string, "skip" | "collect" | number>) => (name: string) => choices[name]
+
+  it("a collected element's end tag brings its text: nested elements' and CDATA included, decoded and normalized, however split", () => {
+    const doc = `<a><t>x &amp;<b>y</b><![CDATA[<z>]]>\r\nw</t><t/><u>q</u></a>`
+    const choose = byName({ t: "collect" })
+    const whole = directed([doc], choose)
+    expect(whole.error).toBeUndefined()
+    expect(whole.events).toEqual([
+      ["open", "a"],
+      ["open", "t"],
+      ["text", "x &"],
+      ["open", "b"],
+      ["text", "y"],
+      ["close", "b", undefined],
+      ["text", "<z>\nw"],
+      ["close", "t", "x &y<z>\nw"],
+      ["open", "t"],
+      ["close", "t", ""],
+      // only the element it was asked for: the next one's text isn't collected
+      ["open", "u"],
+      ["text", "q"],
+      ["close", "u", undefined],
+      ["close", "a", undefined]
+    ])
+    for (let cut = 0; cut <= doc.length; cut++) {
+      expect(directed([doc.slice(0, cut), doc.slice(cut)], choose).events, `cut at ${cut}`).toEqual(whole.events)
+    }
+    expect(directed([...doc], choose).events).toEqual(whole.events)
+  })
+
+  it("a collection asked for inside a collected element joins it", () => {
+    const { events, error } = directed([`<t>a<t>b</t>c</t>`], byName({ t: "collect" }))
+    expect(error).toBeUndefined()
+    expect(events.filter((e) => e[0] === "close")).toEqual([["close", "t", undefined], ["close", "t", "abc"]])
+  })
+
+  it("a skipped subtree gives no events, not even its end tag, and its text isn't collected; what follows it comes", () => {
+    const doc = `<a><t>x<s>y<t>z</t><s>v</s></s>w</t><s/><b>q</b></a>`
+    const choose = byName({ t: "collect", s: "skip" })
+    const whole = directed([doc], choose)
+    expect(whole.error).toBeUndefined()
+    expect(whole.events).toEqual([
+      ["open", "a"],
+      ["open", "t"],
+      ["text", "x"],
+      ["open", "s"],
+      ["text", "w"],
+      ["close", "t", "xw"],
+      ["open", "s"],
+      ["open", "b"],
+      ["text", "q"],
+      ["close", "b", undefined],
+      ["close", "a", undefined]
+    ])
+    for (let cut = 0; cut <= doc.length; cut++) {
+      expect(directed([doc.slice(0, cut), doc.slice(cut)], choose).events, `cut at ${cut}`).toEqual(whole.events)
+    }
+  })
+
+  it("skipped content is checked as usual: the same input fails the same way", () => {
+    const docs = [
+      `<a><s><b></c></s></a>`,
+      `<a><s>&bogus;</s></a>`,
+      `<a><s><b x="1" x="2"/></s></a>`,
+      `<a><s><b><c><d/></c></b></s></a>`,
+      `<a><s>${"x".repeat(50)}</s></a>`,
+      `<a><s><![CDATA[${"x".repeat(50)}]]></s></a>`,
+      `<a><s><b>`
+    ]
+    const small = { ...limits, maxXmlDepth: 3, maxStringLength: 20 }
+    for (const doc of docs) {
+      const plain = directed([doc], () => undefined, small)
+      const skipped = directed([doc], byName({ s: "skip" }), small)
+      expect(plain.error, doc).toBeDefined()
+      expect(skipped.error, doc).toEqual(plain.error)
+    }
+  })
+
+  it("collected text over maxStringLength, the prior length counted, stops with the total", () => {
+    const small = { ...limits, maxStringLength: 10 }
+    // eight characters in three runs: text, CDATA, text after a nested element
+    const doc = `<a><t>123<![CDATA[45]]><b/>678</t></a>`
+    expect(directed([doc], byName({ t: "collect" }), small).error).toBeUndefined()
+    expect(directed([doc], byName({ t: 2 }), small).error).toBeUndefined()
+    expect(directed([doc], byName({ t: 3 }), small).error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 10, actual: 11 })
+    // the check is on the runs as they come, so text after it doesn't count
+    const cdata = `<a><t>123<![CDATA[4567890]]>xyz</t></a>`
+    expect(directed([cdata], byName({ t: 1 }), small).error).toMatchObject({ _tag: "LimitExceeded", actual: 11 })
+    // each collection starts from its own prior
+    expect(directed([`<a><t>1234567890</t><t>1234567890</t></a>`], byName({ t: "collect" }), small).error).toBeUndefined()
+    // a handler without a text callback gets the text at the end tag
+    const texts: Array<string | undefined> = []
+    const quiet = new XmlTokenizer({ open: (_, __, element) => element.collect(), close: (_, text) => void texts.push(text) }, limits)
+    expect(quiet.feed(`<a>x<b>y</b>z</a>`) ?? quiet.end()).toBeUndefined()
+    // (the inner element joined the outer one)
+    expect(texts).toEqual([undefined, "xyz"])
+  })
+})
+
 describe("xml tokenizer: after an error", () => {
   const stop = new MalformedFile({ format: "xml", reason: "handler stop" })
 

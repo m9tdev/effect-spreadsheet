@@ -747,7 +747,7 @@ describe("xlsx: hostile and broken files", () => {
     expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxInputBytes", max: 10, actual: bytes.length })
     // text runs split by comments: each is short, together they're too long
     const longName = await errorOf({ sheets: [{ name: "S" }], definedNames: `<definedName name="N">${"A1,<!-- -->".repeat(100)}</definedName>` }, { maxStringLength: 100 })
-    expect(longName).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 100 })
+    expect(longName).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 100, actual: 102 })
   })
 
   it("sheets, shared strings and string lengths have limits", async () => {
@@ -755,6 +755,25 @@ describe("xlsx: hostile and broken files", () => {
     expect(await errorOf({ sharedStrings: ["a", "b", "c"], sheets: [{ name: "S" }] }, { maxSharedStrings: 2 })).toMatchObject({ limit: "maxSharedStrings" })
     expect(await errorOf({ sharedStringsXml: `<sst xmlns="x"><si>${"<r><t>abcd</t></r>".repeat(50)}</si></sst>`, sheets: [{ name: "S" }] }, { maxStringLength: 100 })).toMatchObject({ limit: "maxStringLength" })
     expect(await errorOf(sheet(`<row><c><f>${"x".repeat(500)}</f></c></row>`), { maxStringLength: 100 })).toMatchObject({ limit: "maxStringLength" })
+  })
+
+  it("a string's length counts all its text runs, and only the runs that are part of it", async () => {
+    const max = { maxStringLength: 100 }
+    // the error comes at the run that goes past the limit, with the total so far
+    const atRun = { _tag: "LimitExceeded", limit: "maxStringLength", max: 100 }
+    expect(await errorOf({ sharedStringsXml: `<sst xmlns="x"><si>${"<r><t>abcd</t></r>".repeat(50)}</si></sst>`, sheets: [{ name: "S" }] }, max))
+      .toMatchObject({ ...atRun, actual: 104 })
+    expect(await errorOf(sheet(`<row><c t="inlineStr"><is>${"<t>abcd</t>".repeat(30)}</is></c></row>`), max)).toMatchObject({ ...atRun, actual: 104 })
+    expect(await errorOf(sheet(`<row><c><v>${"1234567<!-- -->".repeat(20)}</v></c></row>`), max)).toMatchObject({ ...atRun, actual: 105 })
+    expect(await errorOf(sheet(`<row><c><f>${"1+2+3<x/>".repeat(30)}</f></c></row>`), max)).toMatchObject({ ...atRun, actual: 105 })
+    // phonetic runs, text outside <t> and elements nested in a <v> or <f> don't count
+    const long = (c: string) => c.repeat(60)
+    const { sheets } = await readOk({
+      sharedStringsXml: `<sst xmlns="x"><si>${long("z")}<t>${long("a")}<rPh><t>${long("b")}</t></rPh>${"c".repeat(30)}</t></si></sst>`,
+      sheets: [{ name: "S", data: `<row><c t="s"><v>0</v></c><c t="str"><f>${long("1")}<x>${long("9")}</x></f><v>${long("2")}<x>${long("8")}</x></v></c></row>` }]
+    }, max)
+    expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Text", long("a") + "c".repeat(30)], [1, "Text", long("2")]]]])
+    expect(sheets[0]![0]!.cells[1]!.formula).toBe(long("1"))
   })
 
   it("deep XML, DTDs and broken XML in a sheet are typed errors", async () => {
