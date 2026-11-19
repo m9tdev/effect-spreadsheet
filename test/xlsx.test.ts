@@ -769,7 +769,8 @@ describe("xlsx: hostile and broken files", () => {
     // phonetic runs, text outside <t> and elements nested in a <v> or <f> don't count
     const long = (c: string) => c.repeat(60)
     const { sheets } = await readOk({
-      sharedStringsXml: `<sst xmlns="x"><si>${long("z")}<t>${long("a")}<rPh><t>${long("b")}</t></rPh>${"c".repeat(30)}</t></si></sst>`,
+      // each item counts its own text
+      sharedStringsXml: `<sst xmlns="x"><si>${long("z")}<t>${long("a")}<rPh><t>${long("b")}</t></rPh>${"c".repeat(30)}</t></si><si><t>${long("d")}</t></si></sst>`,
       sheets: [{ name: "S", data: `<row><c t="s"><v>0</v></c><c t="str"><f>${long("1")}<x>${long("9")}</x></f><v>${long("2")}<x>${long("8")}</x></v></c></row>` }]
     }, max)
     expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Text", long("a") + "c".repeat(30)], [1, "Text", long("2")]]]])

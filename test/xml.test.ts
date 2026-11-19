@@ -411,7 +411,7 @@ describe("xml tokenizer: element text and skipped subtrees", () => {
   })
 
   it("an element's text can be left out of collected text, its events still coming", () => {
-    const doc = `<a><t>x<o>y<t>z</t><o>v</o></o>w</t><o><t>q</t></o><t>p</t></a>`
+    const doc = `<a><t>x<o>y<t>z</t><o>v</o>u</o>w</t><o><t>q</t></o><t>p</t></a>`
     const choose = byName({ t: "collect", o: "omit" })
     const whole = directed([doc], choose)
     expect(whole.error).toBeUndefined()
@@ -424,9 +424,11 @@ describe("xml tokenizer: element text and skipped subtrees", () => {
       ["open", "t"],
       ["text", "z"],
       ["close", "t", undefined],
+      // one inside it doesn't end it early
       ["open", "o"],
       ["text", "v"],
       ["close", "o", undefined],
+      ["text", "u"],
       ["close", "o", undefined],
       ["text", "w"],
       // the text after it is collected again
