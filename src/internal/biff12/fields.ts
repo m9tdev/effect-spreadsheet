@@ -5,7 +5,7 @@
  *
  * @internal
  */
-import { utf16 } from "../biff/segments.ts"
+import { utf16 } from "../biff/cursor.ts"
 import { ok, type StringRead, tooLongString, TRUNCATED } from "../binary/layout.ts"
 
 /** A count of 0xFFFFFFFF: the null string of an XLNullableWideString. */

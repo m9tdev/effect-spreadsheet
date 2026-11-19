@@ -18,8 +18,8 @@ import { absurd, Effect } from "effect"
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { DefinedName } from "../../Workbook.ts"
-import { type BiffRecord, BOF_BIFF5_8, EOF, type Gathering, RecordReader, readBof } from "../biff/records.ts"
-import { readRichString, SegmentReader } from "../biff/segments.ts"
+import { readRichString, RecordCursor } from "../biff/cursor.ts"
+import { type BiffRecord, BOF_BIFF5_8, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { FixedReader } from "../binary/layout.ts"
 import { WorkMeter } from "../meter.ts"
 import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
@@ -236,15 +236,17 @@ type ContinuedKind = "Sst" | "Supbook" | "ExternSheet" | "Name"
 
 /**
  * What the walk works on: plain records; or the CONTINUEs of an SST,
- * SUPBOOK, EXTERNSHEET or NAME; then the strings of an SST or SUPBOOK.
+ * SUPBOOK, EXTERNSHEET or NAME (`record`, the last one read), checked and
+ * passed over; then the strings of an SST or SUPBOOK, read through a
+ * cursor over its data and its CONTINUEs'.
  */
 type Pending =
   | { readonly _tag: "Records" }
-  | { readonly _tag: "Continues"; readonly of: ContinuedKind; readonly gathering: Gathering }
-  | { readonly _tag: "SstStrings"; readonly segments: SegmentReader; readonly unique: number }
+  | { readonly _tag: "Continues"; readonly of: ContinuedKind; readonly record: BiffRecord }
+  | { readonly _tag: "SstStrings"; readonly segments: RecordCursor; readonly unique: number }
   | {
     readonly _tag: "SupbookSheets"
-    readonly segments: SegmentReader
+    readonly segments: RecordCursor
     readonly ctab: number
     readonly sheets: Array<string>
   }
@@ -260,6 +262,7 @@ type StringsPending = Extract<Pending, { readonly _tag: "SstStrings" | "SupbookS
  * string) advances the record reader or a string reader.
  */
 class GlobalsWalk {
+  readonly stream: Uint8Array
   readonly reader: RecordReader
   readonly limits: Limits
   biff8 = true
@@ -284,6 +287,7 @@ class GlobalsWalk {
   private bytes = 0
 
   constructor(stream: Uint8Array, limits: Limits) {
+    this.stream = stream
     this.reader = new RecordReader(stream, "workbook globals")
     this.limits = limits
     this.text = { biff8: true, decoder: textDecoder("windows-1252"), maxLength: limits.maxStringLength }
@@ -435,7 +439,7 @@ class GlobalsWalk {
    * present. A few hundred kilobytes at most (65 535 entries of 6 bytes),
    * all counted in the batch's bytes while its CONTINUEs were read.
    */
-  private externSheet(segments: SegmentReader): undefined {
+  private externSheet(segments: RecordCursor): undefined {
     const count = segments.has(EXTERNSHEET_COUNT) ? segments.u16() : 0
     this.xtis = []
     // progress: k up to count; each entry reads 6 of the bytes left
@@ -450,7 +454,7 @@ class GlobalsWalk {
    * name or formula is cut short is skipped. Name characters continued in a
    * CONTINUE start with their own option byte there, as other strings do.
    */
-  private name(segments: SegmentReader): LimitExceeded | undefined {
+  private name(segments: RecordCursor): LimitExceeded | undefined {
     const { limits } = this
     if (!segments.has(NAME_HEADER)) return undefined
     const grbit = segments.u16()
@@ -479,27 +483,28 @@ class GlobalsWalk {
 
   /** Starts reading `record`'s CONTINUEs (the next steps go on with them). */
   private startContinues(record: BiffRecord, of: ContinuedKind): undefined {
-    const gathering = this.reader.startContinues(record, this.limits.maxDecompressedBytes, "maxDecompressedBytes")
-    this.pending = { _tag: "Continues", of, gathering }
+    this.pending = { _tag: "Continues", of, record }
     return undefined
   }
 
   /**
-   * Goes on with a record that may be continued: reads its CONTINUEs within
-   * the batch's budget, then reads an EXTERNSHEET or NAME whole, or starts
-   * on an SST's or SUPBOOK's strings.
+   * Goes on with a record that may be continued: checks its CONTINUEs and
+   * moves past them within the batch's budget (all of them together within
+   * maxDecompressedBytes), then reads an EXTERNSHEET or NAME whole, or
+   * starts on an SST's or SUPBOOK's strings.
    */
   private continues(pending: ContinuesPending): SpreadsheetError | undefined {
     const { reader, limits } = this
+    const { record } = pending
     const before = reader.records
     const at = reader.offset
-    const step = reader.continues(pending.gathering, BATCH_RECORDS - this.units)
+    const step = reader.continues(record, BATCH_RECORDS - this.units, limits.maxDecompressedBytes, "maxDecompressedBytes")
     this.units += reader.records - before
     this.bytes += reader.offset - at
-    if (step._tag === "More") return undefined
-    if (step._tag !== "Done") return step
-    const { record } = step
-    const segments = new SegmentReader(record.segments)
+    if (step === "more") return undefined
+    if (step !== "done") return step
+    // the CONTINUEs end where the reader is: the cursor reads up to there
+    const segments = new RecordCursor(this.stream, record, reader.offset)
     switch (pending.of) {
       case "ExternSheet":
         this.pending = RECORDS
@@ -559,10 +564,10 @@ class GlobalsWalk {
       default:
         return absurd(pending)
     }
-    const left = segments.remaining()
+    const started = segments.consumed()
     let ended = false
     // progress: each string consumes at least 3 bytes, or the list ends; at most the batch's units
-    while (this.units < BATCH_RECORDS && left - segments.remaining() < BATCH_BYTES - this.bytes) {
+    while (this.units < BATCH_RECORDS && segments.consumed() - started < BATCH_BYTES - this.bytes) {
       if (list.length >= count) {
         ended = true
         break
@@ -576,7 +581,7 @@ class GlobalsWalk {
       }
       list.push(read.value)
     }
-    this.bytes += left - segments.remaining()
+    this.bytes += segments.consumed() - started
     if (!ended && list.length < count) return undefined
     this.pending = RECORDS
     switch (pending._tag) {

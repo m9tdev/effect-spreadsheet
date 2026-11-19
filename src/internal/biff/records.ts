@@ -11,8 +11,9 @@
  * ends where the next one starts): it reads nothing at or past it.
  *
  * `CONTINUE` records (0x003C) carry the rest of a record that didn't fit
- * in 8 224 bytes; `nextWithContinues` gathers them with their record, as
- * separate segments (string data restarts at each segment boundary).
+ * in 8 224 bytes. A reader checks them (`continues`, or `SubstreamReader`'s
+ * continued type) and moves past them; their data is read with the
+ * record's through a `RecordCursor` (see `cursor.ts`).
  *
  * `SubstreamReader` reads one substream with the substreams embedded in
  * it (BOF ... EOF, such as a chart object in a sheet) skipped.
@@ -20,7 +21,6 @@
  * @internal
  */
 import { LimitExceeded, MalformedFile } from "../../SpreadsheetError.ts"
-import type { Segments } from "./segments.ts"
 
 export const CONTINUE = 0x003C
 export const BOF_BIFF5_8 = 0x0809
@@ -31,16 +31,6 @@ export interface BiffRecord {
   /** Offset of the record header in the stream. */
   readonly offset: number
   readonly data: Uint8Array
-}
-
-/** A record and the data of the `CONTINUE` records right after it. */
-export interface ContinuedRecord extends BiffRecord {
-  /**
-   * `data` first, then each non-empty `CONTINUE`'s data, as ranges of the
-   * stream (8 bytes of storage per segment; empty CONTINUEs are dropped,
-   * they continue nothing).
-   */
-  readonly segments: Segments
 }
 
 export class RecordReader {
@@ -72,80 +62,52 @@ export class RecordReader {
     return this.offset + 4 <= this.end ? this.view.getUint16(this.offset, true) : undefined
   }
 
-  /** The next record; undefined at the end of the stream. */
-  next(): BiffRecord | undefined | MalformedFile {
+  /**
+   * Moves past the record at the offset, its header checked against the
+   * end: the offset after it; undefined at the end of the stream.
+   */
+  protected advance(): number | undefined | MalformedFile {
     const at = this.offset
     if (at + 4 > this.end) return undefined
-    const type = this.view.getUint16(at, true)
-    const length = this.view.getUint16(at + 2, true)
-    const end = at + 4 + length
-    if (end > this.end) return this.pastEnd(at, type)
+    const end = at + 4 + this.view.getUint16(at + 2, true)
+    if (end > this.end) return this.pastEnd(at, this.view.getUint16(at, true))
     // progress: offset grows by 4 + length >= 4
     this.offset = end
     this.records++
-    return { type, offset: at, data: this.bytes.subarray(at + 4, end) }
+    return end
+  }
+
+  /** The next record; undefined at the end of the stream. */
+  next(): BiffRecord | undefined | MalformedFile {
+    const at = this.offset
+    const end = this.advance()
+    if (typeof end !== "number") return end
+    return { type: this.view.getUint16(at, true), offset: at, data: this.bytes.subarray(at + 4, end) }
   }
 
   /**
-   * The next record with the `CONTINUE` records that follow it. Together,
+   * Reads at most `max` of the `CONTINUE` records after `first`, the record
+   * this reader read last (with any of its `CONTINUE`s read by earlier
+   * calls), so that a long run of them can be read in bounded steps:
+   * "done" once the next record isn't a `CONTINUE` (again on every later
+   * call, which reads nothing), "more" while some may be left. The record's
+   * data and theirs are then read through a `RecordCursor`. Together,
    * counting each record's 4-byte header (so empty `CONTINUE`s count too),
    * they may not exceed `maxBytes`; past it, a `LimitExceeded` named `limit`
-   * (the caller's limit: the SST is capped by a different one than a
-   * single string).
+   * (the caller's limit: the SST is capped by a different one than a single
+   * string) with their size so far.
    */
-  nextWithContinues(maxBytes: number, limit: string): ContinuedRecord | undefined | MalformedFile | LimitExceeded {
-    const first = this.next()
-    if (first === undefined || first instanceof MalformedFile) return first
-    const gathering = this.startContinues(first, maxBytes, limit)
-    // with no bound, gather reads up to the last CONTINUE: the record is whole
-    return this.gather(gathering, Infinity) ?? record(gathering)
-  }
-
-  /** Starts gathering the `CONTINUE`s after `first` (a record this reader just read), within `maxBytes` (named `limit`). */
-  startContinues(first: BiffRecord, maxBytes: number, limit: string): Gathering {
-    const bounds = new Uint32Array(16)
-    bounds[0] = first.offset + 4
-    bounds[1] = first.offset + 4 + first.data.length
-    return { first, bytes: this.bytes, maxBytes, limit, bounds, count: 1, total: 4 + first.data.length }
-  }
-
-  /**
-   * Reads at most `max` more of the `CONTINUE` records after `gathering`'s
-   * record (see `nextWithContinues`), so that a long run of them can be
-   * read in bounded steps: `Done` with the whole record once the next
-   * record isn't a `CONTINUE` (again on every later call, which reads
-   * nothing), `More` while some may be left.
-   */
-  continues(gathering: Gathering, max: number): Gathered | MalformedFile | LimitExceeded {
-    const failed = this.gather(gathering, max)
-    if (failed !== undefined) return failed
-    return this.peekType() === CONTINUE ? MORE : { _tag: "Done", record: record(gathering) }
-  }
-
-  /** Reads `CONTINUE`s into `g` until the next record isn't one, or `max` of them. */
-  private gather(g: Gathering, max: number): MalformedFile | LimitExceeded | undefined {
-    // progress: each iteration consumes one CONTINUE record (offset grows by 4 + length), at most max
+  continues(first: BiffRecord, max: number, maxBytes: number, limit: string): "done" | "more" | MalformedFile | LimitExceeded {
+    // progress: each iteration reads one CONTINUE (advance moves the offset), at most max
     for (let k = 0; k < max; k++) {
-      if (this.offset + 4 > this.end || this.view.getUint16(this.offset, true) !== CONTINUE) return undefined
-      const at = this.offset
-      const length = this.view.getUint16(at + 2, true)
-      const end = at + 4 + length
-      if (end > this.end) return this.pastEnd(at, CONTINUE)
-      this.offset = end
-      this.records++
-      g.total += 4 + length
-      if (g.total > g.maxBytes) return new LimitExceeded({ limit: g.limit, max: g.maxBytes, actual: g.total })
-      if (length === 0) continue // nothing to continue: the offset advanced above
-      if (2 * g.count + 2 > g.bounds.length) {
-        const grown = new Uint32Array(g.bounds.length * 2)
-        grown.set(g.bounds)
-        g.bounds = grown
-      }
-      g.bounds[2 * g.count] = at + 4
-      g.bounds[2 * g.count + 1] = end
-      g.count++
+      if (this.peekType() !== CONTINUE) return "done"
+      const end = this.advance()
+      if (end instanceof MalformedFile) return end
+      // the record and its CONTINUEs lie end to end: their size is the distance
+      const total = this.offset - first.offset
+      if (total > maxBytes) return new LimitExceeded({ limit, max: maxBytes, actual: total })
     }
-    return undefined
+    return this.peekType() === CONTINUE ? "more" : "done"
   }
 }
 
@@ -176,10 +138,22 @@ export class Embedded {
  * the substream's own EOF comes as a record like any other. One record per
  * call, as `next`; errors and the end are the same as `next`'s. (`next`
  * itself reads records as they are, for the substream's own BOF.)
+ *
+ * A record of the substream of type `continued` (a BIFF8 STRING, for the
+ * rows) comes with its `CONTINUE` records: the call moves past them too,
+ * checking each, and the record's data and theirs are read through a
+ * `RecordCursor`. Other records' `CONTINUE`s come as records.
  */
 export class SubstreamReader extends RecordReader {
   /** Embedded substreams open at the reader's offset (each one opened by a BOF read: bounded by the records read). */
   private depth = 0
+  /** The type whose `CONTINUE`s are read with it; -1 for none. */
+  private readonly continued: number
+
+  constructor(bytes: Uint8Array, part: string, offset = 0, end = bytes.length, continued = -1) {
+    super(bytes, part, offset, end)
+    this.continued = continued
+  }
 
   /** The next record of this substream, or an embedded substream's; undefined at the end of the stream. */
   read(): BiffRecord | Embedded | undefined | MalformedFile {
@@ -203,46 +177,16 @@ export class SubstreamReader extends RecordReader {
       this.depth++
       return new Embedded(at, true)
     }
-    return { type, offset: at, data: this.bytes.subarray(at + 4, end) }
+    const record = { type, offset: at, data: this.bytes.subarray(at + 4, end) }
+    if (type === this.continued) {
+      // progress: each iteration moves past one CONTINUE (advance moves the offset), or returns
+      while (this.peekType() === CONTINUE) {
+        const next = this.advance()
+        if (next instanceof MalformedFile) return next
+      }
+    }
+    return record
   }
-
-  /**
-   * As `read`, but a record of this substream of type `type` comes with
-   * its `CONTINUE` records (see `nextWithContinues`); in an embedded
-   * substream, it is skipped as any other.
-   */
-  readContinued(type: number, maxBytes: number, limit: string): ContinuedRecord | BiffRecord | Embedded | undefined | MalformedFile | LimitExceeded {
-    return this.depth === 0 && this.peekType() === type ? this.nextWithContinues(maxBytes, limit) : this.read()
-  }
-}
-
-/** A record whose `CONTINUE`s are being read (see `RecordReader.continues`). */
-export interface Gathering {
-  readonly first: BiffRecord
-  /** The reader's stream, which `bounds` index. */
-  readonly bytes: Uint8Array
-  readonly maxBytes: number
-  readonly limit: string
-  /** Ranges of the stream, in a growable array: no object per segment. */
-  bounds: Uint32Array
-  count: number
-  total: number
-}
-
-/**
- * Where a gathering stands after a step (`RecordReader.continues`): `More`
- * while `CONTINUE`s may be left, or `Done` with the record and all of them.
- */
-export type Gathered =
-  | { readonly _tag: "More" }
-  | { readonly _tag: "Done"; readonly record: ContinuedRecord }
-
-const MORE: Gathered = { _tag: "More" }
-
-/** The record and its `CONTINUE`s, once all are read. */
-const record = (g: Gathering): ContinuedRecord => {
-  // a view of the used part, no copy (at most 2x the used size is kept)
-  return { ...g.first, segments: { bytes: g.bytes, bounds: g.bounds.subarray(0, 2 * g.count), count: g.count } }
 }
 
 /** A BOF record: the BIFF version and what the substream holds. */

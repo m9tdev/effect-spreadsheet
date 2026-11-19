@@ -171,14 +171,17 @@ describe("xls sheet: formula string results", () => {
       .toMatchObject({ _tag: "MalformedFile", reason: "truncated record 0x207" })
   })
 
-  it("a continued STRING over maxStringLength, by its count or by its bytes, is LimitExceeded", async () => {
+  it("a continued STRING over maxStringLength is LimitExceeded with its character count, however many bytes follow", async () => {
     const long = [X.record(STRING, [...X.u16(20), 0, ...chars("0123456789")]), X.record(CONTINUE, [0, ...chars("0123456789")])]
     expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), ...long]), { maxStringLength: 10 })).toMatchObject({ limit: "maxStringLength", max: 10, actual: 20 })
     expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), ...long])).toEqual([[0, 0, "Text", "01234567890123456789"]])
-    // a short count but CONTINUEs far over any string of maxStringLength characters
+    // CONTINUEs far over any string of maxStringLength characters: the count is what is checked
     const filler = Array.from({ length: 40 }, () => X.record(CONTINUE, new Array(8000).fill(0)))
-    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(1), 0, 0x41]), ...filler]), { maxStringLength: 10 }))
-      .toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(15), 0, 0x41]), ...filler]), { maxStringLength: 10 }))
+      .toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 10, actual: 15 })
+    // a count within the limit reads the string: the CONTINUEs after its characters are passed over
+    const short = [X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(1), 0, 0x41]), ...filler, X.number(1, 0, 0, 2)]
+    expect(values((await readOk(one(short), { maxStringLength: 10 })).sheets[0]!)).toEqual([[0, false, [[0, "Text", "A"]]], [1, false, [[0, "Number", 2]]]])
   })
 
   it("BIFF5: STRING and LABEL are u16-count code-page strings; RSTRING (BIFF8) skips its runs", async () => {
