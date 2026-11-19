@@ -115,10 +115,10 @@ export type OnInvalid<E> =
   | { readonly fatal: true; readonly invalid: (offset: number | undefined) => E }
 
 /**
- * How decoded bytes are checked: not at all (`fatal: false`); for UTF-8,
- * by looking for U+FFFD in the text and, only then, by the validator (the
- * input may hold U+FFFD itself); for other encodings, by the platform's
- * fatal decoder, which only says so by throwing.
+ * How decoded bytes are checked: not at all (`fatal: false`), or by the
+ * platform's fatal decoder, which only says so by throwing. For UTF-8 the
+ * validator then finds where the first invalid sequence starts; valid
+ * input never runs it.
  */
 type Check<E> =
   | { readonly _tag: "None" }
@@ -220,7 +220,7 @@ export class TextInput<E = never> {
       ? { _tag: "None" }
       : { _tag: encoding === "utf-8" ? "Utf8" : "Platform", invalid: onInvalid.invalid }
     // ignoreBOM: false drops a byte-order mark of the decoder's own encoding
-    const decoder = new TextDecoder(encoding, { fatal: check._tag === "Platform", ignoreBOM: false })
+    const decoder = new TextDecoder(encoding, { fatal: check._tag !== "None", ignoreBOM: false })
     const phase: Decoding<E> = { _tag: "Decoding", decoder, check }
     this.phase = phase
     return phase
@@ -243,11 +243,13 @@ export class TextInput<E = never> {
           return Result.fail(check.invalid(undefined))
         }
       case "Utf8": {
-        const text = decodeAll(decoder, bytes, last)
-        // U+FFFD stands for invalid bytes, unless the input holds it itself
-        if (text.indexOf("\uFFFD") >= 0) {
+        let text: string
+        try {
+          text = decodeAll(decoder, bytes, last)
+        } catch {
+          // the decoder threw, so the validator finds an invalid sequence
           const at = this.invalidAt(bytes, last)
-          if (at >= 0) return Result.fail(check.invalid(at))
+          return Result.fail(check.invalid(at < 0 ? undefined : at))
         }
         this.advance(bytes)
         return Result.succeed(text)
