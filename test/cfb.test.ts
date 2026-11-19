@@ -92,6 +92,8 @@ describe("cfb: reading", () => {
     const fragmented = readOk(openOk(bytes), "Workbook")
     expect(fragmented).toEqual(pseudoRandom(10_000, 1))
     expect(fragmented.buffer).not.toBe(bytes.buffer)
+    // a mini stream is a copy, even in consecutive mini sectors
+    expect(readOk(contiguous, "Edge").buffer).not.toBe(layout.bytes.buffer)
   })
 
   /**
@@ -279,6 +281,66 @@ describe("cfb: reading", () => {
     }
   })
 
+  it("FAT sector slots past the declared count are ignored, junk or not, in the header and in the DIFAT", () => {
+    // junk sectors appended, so the file has more sectors than its FAT
+    // sectors describe: a junk slot taken as a FAT sector would be loaded
+    // (and fail as outside the file)
+    const JUNK = 0xDEADBEEF
+    const pad = (bytes: Uint8Array, sectors: number) => {
+      const padded = new Uint8Array(bytes.length + sectors * 512)
+      padded.set(bytes)
+      padded.set(pseudoRandom(sectors * 512, 12), bytes.length)
+      return padded
+    }
+    // header slots: one FAT sector declared, the other 108 slots and the DIFAT start junk
+    const small = writeCfb(SAMPLE)
+    expect(small.fatSectors.length).toBe(1)
+    const header = pad(small.bytes, 300)
+    for (let k = 1; k < 109; k++) patch32(header, 76 + 4 * k, JUNK)
+    patch32(header, 68, JUNK)
+    patch32(header, 72, 1)
+    const a = openOk(header)
+    expect(readOk(a, "Workbook")).toEqual(pseudoRandom(10_000, 1))
+    expect(readOk(a, "Edge")).toEqual(pseudoRandom(4095, 3))
+    // DIFAT slots: the declared count ends inside the DIFAT sector; the
+    // slots after it and the next-DIFAT pointer are junk
+    const data = pseudoRandom(110 * 128 * 512, 7)
+    const big = writeCfb([{ name: "Workbook", data }])
+    expect(big.difatSectors.length).toBe(1)
+    const declared = big.fatSectors.length
+    expect(declared).toBeGreaterThan(109)
+    expect(declared).toBeLessThan(109 + 127)
+    const difat = sectorOffset(big.difatSectors[0]!)
+    const slots = pad(big.bytes, 3 * 128)
+    for (let k = declared - 109; k < 127; k++) patch32(slots, difat + 4 * k, JUNK)
+    patch32(slots, difat + 508, JUNK)
+    expect(Buffer.compare(readOk(openOk(slots), "Workbook"), data)).toBe(0)
+  })
+
+  it("a free FAT sector slot, or a free next-DIFAT pointer, ends the list of FAT sectors", () => {
+    const JUNK = 0xDEADBEEF
+    // a huge declared count; a free header slot, then junk (that would be
+    // loaded as FAT sectors: the file has junk sectors appended)
+    const small = writeCfb(SAMPLE)
+    const header = new Uint8Array(small.bytes.length + 300 * 512)
+    header.set(small.bytes)
+    patch32(header, 44, 1_000_000)
+    for (let k = 2; k < 109; k++) patch32(header, 76 + 4 * k, JUNK)
+    const a = openOk(header)
+    expect(readOk(a, "Workbook")).toEqual(pseudoRandom(10_000, 1))
+    // a huge declared count; the DIFAT sector's slots all filled in, and its
+    // next pointer free
+    const data = pseudoRandom(110 * 128 * 512, 7)
+    const big = writeCfb([{ name: "Workbook", data }])
+    expect(big.difatSectors.length).toBe(1)
+    const difat = sectorOffset(big.difatSectors[0]!)
+    const full = big.bytes.slice()
+    patch32(full, 44, 1_000_000)
+    for (let k = big.fatSectors.length - 109; k < 127; k++) patch32(full, difat + 4 * k, big.fatSectors[0]!)
+    patch32(full, difat + 508, 0xFFFFFFFF)
+    expect(Buffer.compare(readOk(openOk(full), "Workbook"), data)).toBe(0)
+  })
+
   it("a partial last sector is read as far as it goes (pinned: the file opens and reads)", () => {
     const layout = writeCfb(SAMPLE)
     // the last sector is the FAT; its last 25 entries (unused) are cut off
@@ -293,7 +355,10 @@ describe("cfb: reading", () => {
     const big = pseudoRandom(110 * 128 * 512, 7)
     const layout = writeCfb([{ name: "Workbook", data: big }])
     expect(layout.difatSectors.length).toBeGreaterThan(0)
-    const cfb = openOk(layout.bytes)
+    // opening walks the DIFAT, the FAT and the directory, each sector once
+    const sectors = counter("sectors")
+    const cfb = openOk(layout.bytes, limits, sectors)
+    expect(sectors.total()).toBe(layout.difatSectors.length + layout.fatSectors.length + layout.directorySectors.length)
     expect(Buffer.compare(readOk(cfb, "Workbook"), big)).toBe(0)
     // the DIFAT walk is bounded by maxSectorChain too: a 2-sector DIFAT
     // under a limit of 1 (the directory chain is 1 sector, so only the
@@ -302,6 +367,13 @@ describe("cfb: reading", () => {
     expect(twoDifat.difatSectors.length).toBe(2)
     expect(twoDifat.directorySectors.length).toBe(1)
     expect(Result.merge(open(twoDifat.bytes, { ...limits, maxSectorChain: 1 }))).toMatchObject({ _tag: "LimitExceeded", limit: "maxSectorChain", max: 1, actual: 2 })
+    // the header's DIFAT count is checked before maxSectorChain: with both
+    // at 1, the second DIFAT sector is past the declared count first
+    const declaredOne = twoDifat.bytes.slice()
+    patch32(declaredOne, 72, 1)
+    const result = open(declaredOne, { ...limits, maxSectorChain: 1 })
+    expect(Result.merge(result)).toBeInstanceOf(MalformedFile)
+    expect(reasonOf(result)).toBe("DIFAT chain is longer than the header says")
   })
 
   it("opens every committed .xls in a CFB, and its workbook stream is a BIFF record stream from BOF to EOF", () => {
@@ -386,6 +458,15 @@ describe("cfb: hostile and broken files", () => {
     patch32(huge, sectorOffset(layout.directorySectors[0]!) + layout.streams.get("Workbook")!.id * 128 + 120, 0x7FFFFFFF)
     const a = openOk(huge)
     expect(reasonOf(a.read(a.find("Workbook")!))).toMatch(/larger than the file/)
+    // a size of exactly the file's sectors fits (the chain then runs out);
+    // one byte more is larger than the file
+    const fileBytes = layout.bytes.length - 512
+    for (const [size, reason] of [[fileBytes, "stream chain is shorter than its size"], [fileBytes + 1, "stream Workbook is larger than the file"]] as const) {
+      const sized = layout.bytes.slice()
+      patch32(sized, sectorOffset(layout.directorySectors[0]!) + layout.streams.get("Workbook")!.id * 128 + 120, size)
+      const c = openOk(sized)
+      expect(reasonOf(c.read(c.find("Workbook")!)), String(size)).toBe(reason)
+    }
     const b = openOk(layout.bytes, { ...limits, maxSectorChain: 5 })
     expect(Result.merge(b.read(b.find("Workbook")!))).toMatchObject({ _tag: "LimitExceeded", limit: "maxSectorChain", max: 5 })
   })
@@ -495,6 +576,70 @@ describe("cfb: hostile and broken files", () => {
       const c = openOk(intoOwn)
       expect(reasonOf(c.read(c.find("Second")!)), String(sector)).toMatch(/belongs to two streams/)
     }
+  })
+
+  it("a stream's walk stops at the sectors its size needs: a chain going on past them is not followed", () => {
+    const layout = fresh()
+    const dir = sectorOffset(layout.directorySectors[0]!)
+    // Workbook (20 sectors) cut to 5000 bytes (10 sectors); its chain goes on
+    // outside the file after sector 12
+    const big = layout.bytes.slice()
+    const w = layout.streams.get("Workbook")!
+    patch32(big, dir + w.id * 128 + 120, 5000)
+    patch32(big, fatEntry(layout, w.start + 12), 100_000)
+    expect(readOk(openOk(big), "Workbook")).toEqual(pseudoRandom(10_000, 1).subarray(0, 5000))
+    // Edge (64 mini sectors) cut to 100 bytes (2 mini sectors); its mini
+    // chain goes on outside the mini stream after mini sector 4
+    const small = layout.bytes.slice()
+    const e = layout.streams.get("Edge")!
+    patch32(small, dir + e.id * 128 + 120, 100)
+    patch32(small, sectorOffset(layout.miniFatSectors[0]!) + 4 * (e.start + 4), 100_000)
+    expect(readOk(openOk(small), "Edge")).toEqual(pseudoRandom(4095, 3).subarray(0, 100))
+  })
+
+  it("the container's own structures can't share sectors either: directory, FAT and miniFAT", () => {
+    const layout = fresh()
+    // the directory starting at the FAT sector
+    const dirOnFat = layout.bytes.slice()
+    patch32(dirOnFat, 48, layout.fatSectors[0]!)
+    expect(reasonOf(open(dirOnFat, limits))).toBe(`sector ${layout.fatSectors[0]!} of the FAT belongs to two streams`)
+    // the miniFAT starting at the directory's sector
+    const miniFatOnDir = layout.bytes.slice()
+    patch32(miniFatOnDir, 60, layout.directorySectors[0]!)
+    const a = openOk(miniFatOnDir)
+    expect(reasonOf(a.read(a.find("Edge")!))).toBe(`sector ${layout.directorySectors[0]!} of the FAT belongs to two streams`)
+  })
+
+  it("a stream's mini chain pointing past the mini stream (inside the miniFAT) is MalformedFile", () => {
+    const layout = fresh()
+    const s = layout.streams.get("\u0005SummaryInformation")!.start
+    const bytes = layout.bytes.slice()
+    // the mini stream holds 80 mini sectors; the miniFAT sector numbers 128
+    patch32(bytes, sectorOffset(layout.miniFatSectors[0]!) + 4 * (s + 1), 100)
+    const cfb = openOk(bytes)
+    expect(reasonOf(cfb.read(cfb.find("\u0005SummaryInformation")!))).toBe("miniFAT chain points at sector 100")
+  })
+
+  it("a stream whose size is larger than the file fails as that, before the mini stream is loaded", () => {
+    const layout = fresh()
+    const bytes = layout.bytes.slice()
+    patch32(bytes, 64, 5) // a broken miniFAT
+    patch32(bytes, sectorOffset(layout.directorySectors[0]!) + layout.streams.get("Edge")!.id * 128 + 120, 0x7FFFFFF0)
+    const cfb = openOk(bytes)
+    expect(reasonOf(cfb.read(cfb.find("Edge")!))).toBe("stream Edge is larger than the file")
+    expect(reasonOf(cfb.read(cfb.find("\u0005SummaryInformation")!))).toBe("miniFAT chain is shorter than the header says")
+  })
+
+  it("a stream running into the mini stream's sectors is MalformedFile", () => {
+    const layout = fresh()
+    const workbook = layout.streams.get("Workbook")!
+    expect(workbook.id).toBe(1) // the id after the root's, whose stream is the mini stream
+    const dir = sectorOffset(layout.directorySectors[0]!)
+    const bytes = layout.bytes.slice()
+    patch32(bytes, dir + workbook.id * 128 + 116, new DataView(bytes.buffer).getUint32(dir + 116, true))
+    const cfb = openOk(bytes)
+    readOk(cfb, "Edge")
+    expect(reasonOf(cfb.read(cfb.find("Workbook")!))).toMatch(/^sector \d+ of the FAT belongs to two streams$/)
   })
 
   it("duplicate paths: the lower directory id wins; mini streams ending mid sector read", () => {
