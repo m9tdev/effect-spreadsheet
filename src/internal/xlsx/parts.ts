@@ -14,23 +14,14 @@ import { parsePart } from "../opc.ts"
 import { malformedIn, type SheetEntry, sheetVisibility } from "../package.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import type { DefinedNameEntry } from "../workbook.ts"
-import { attr, type XmlAttributes, type XmlHandler } from "../xml/tokenizer.ts"
+import * as Attr from "../xml/attributes.ts"
+import type { XmlHandler } from "../xml/tokenizer.ts"
 import type { Archive, LocatedEntry } from "../zip/archive.ts"
 
 export const malformed = malformedIn("xlsx")
 
-/** A relationship id attribute: `id` with any namespace prefix (`r:id`, `x:id`). */
-export const relationshipId = (attributes: XmlAttributes): string | undefined => {
-  // progress: one attribute per iteration
-  for (const [key, value] of attributes) {
-    const colon = key.indexOf(":")
-    if (colon > 0 && key.slice(colon + 1) === "id") return value
-  }
-  return undefined
-}
-
-/** `true`/`1` (xsd:boolean). */
-export const isTrue = (value: string | undefined): boolean => value === "1" || value === "true"
+/** The largest number with at most nine digits: the bound on the integer attributes read here. */
+export const NINE_DIGITS = 999_999_999
 
 export type SheetKind = "worksheet" | "chartsheet" | "dialogsheet" | "macrosheet" | "other"
 
@@ -62,7 +53,7 @@ export const readWorkbookPart = (
     open: (element, attributes) => {
       switch (element) {
         case "workbookPr":
-          date1904 = isTrue(attr(attributes, "date1904"))
+          date1904 = Attr.bool(attributes, "date1904")
           return
         case "sheets":
           if (inSheets) return malformed("<sheets> inside <sheets>", entry.name)
@@ -73,11 +64,10 @@ export const readWorkbookPart = (
           if (sheets.length >= limits.maxSheets) {
             return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: sheets.length + 1 })
           }
-          const sheetName = attr(attributes, "name")
           sheets.push({
-            name: sheetName === undefined ? undefined : unescapeXstring(sheetName),
-            visibility: sheetVisibility(attr(attributes, "state")),
-            relationshipId: relationshipId(attributes)
+            name: Attr.xstring(attributes, "name"),
+            visibility: sheetVisibility(Attr.string(attributes, "state")),
+            relationshipId: Attr.rel(attributes, "id")
           })
           return
         }
@@ -86,9 +76,10 @@ export const readWorkbookPart = (
           if (definedNames.length >= limits.maxDefinedNames) {
             return new LimitExceeded({ limit: "maxDefinedNames", max: limits.maxDefinedNames, actual: definedNames.length + 1 })
           }
-          const local = attr(attributes, "localSheetId")
-          const scope = local !== undefined && /^\d{1,9}$/.test(local) ? Number(local) : undefined
-          name = { name: unescapeXstring(attr(attributes, "name") ?? ""), scope, hidden: isTrue(attr(attributes, "hidden")), text: [], length: 0 }
+          // a bad scope is the workbook's, like a missing one
+          const local = Attr.uint(attributes, "localSheetId", NINE_DIGITS)
+          const scope = local === "bad" ? undefined : local
+          name = { name: Attr.xstring(attributes, "name") ?? "", scope, hidden: Attr.bool(attributes, "hidden"), text: [], length: 0 }
           return
         }
       }
@@ -97,7 +88,7 @@ export const readWorkbookPart = (
     close: (element) => {
       if (element === "sheets") inSheets = false
       else if (element === "definedName" && name !== undefined) {
-        definedNames.push({ name: name.name, formula: unescapeXstring(name.text.join("")), hidden: name.hidden, scope: name.scope })
+        definedNames.push({ name: name.name, formula: Attr.unescapeXstring(name.text.join("")), hidden: name.hidden, scope: name.scope })
         name = undefined
       }
     },
@@ -116,10 +107,6 @@ export const readWorkbookPart = (
     return { sheets: sheets.map((s, k) => ({ ...s, name: names[k]! })), definedNames, date1904 }
   })
 }
-
-/** `_xHHHH_` escapes in OOXML strings (ST_Xstring): one UTF-16 code unit each; `_x005F_` is `_`. */
-export const unescapeXstring = (s: string): string =>
-  s.indexOf("_x") < 0 ? s : s.replace(/_x([0-9A-Fa-f]{4})_/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
 
 /**
  * Collects rich text the way `<si>` and `<is>` hold it: the `<t>` elements
@@ -161,7 +148,7 @@ export class RichText {
 
   /** The text so far (unescaped); resets for the next container. */
   take(): string {
-    const value = unescapeXstring(this.parts.length === 1 ? this.parts[0]! : this.parts.join(""))
+    const value = Attr.unescapeXstring(this.parts.length === 1 ? this.parts[0]! : this.parts.join(""))
     this.parts = []
     this.length = 0
     this.inT = 0
@@ -224,16 +211,18 @@ export const readStyles = (
     open: (name, attributes) => {
       if (name === "numFmts") inNumFmts = true
       else if (name === "numFmt" && inNumFmts) {
-        const id = attr(attributes, "numFmtId")
-        const code = attr(attributes, "formatCode")
-        if (id !== undefined && code !== undefined && /^\d{1,9}$/.test(id)) {
+        // one without a valid id or a code is skipped
+        const id = Attr.uint(attributes, "numFmtId", NINE_DIGITS)
+        const code = Attr.string(attributes, "formatCode")
+        if (typeof id === "number" && code !== undefined) {
           // a later <numFmt> with the same id wins
-          addFormat(custom, Number(id), code)
+          addFormat(custom, id, code)
         }
       } else if (name === "cellXfs") inCellXfs = true
       else if (name === "xf" && inCellXfs) {
-        const id = attr(attributes, "numFmtId")
-        xfIds.push(id !== undefined && /^\d{1,9}$/.test(id) ? Number(id) : 0)
+        // a missing or bad id is General (0)
+        const id = Attr.uint(attributes, "numFmtId", NINE_DIGITS)
+        xfIds.push(typeof id === "number" ? id : 0)
       }
     },
     close: (name) => {
