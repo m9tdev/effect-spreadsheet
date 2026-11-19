@@ -76,6 +76,9 @@ describe("csv: structure", () => {
     if (error?._tag === "MalformedFile") assert.match(error.reason, /unterminated/)
     // a properly closed quote at EOF is fine in strict mode
     assert.deepStrictEqual(await csvAoa('a,"b"', { strict: true }), [["a", "b"]])
+    // so is a delimiter or a line break right after the closing quote
+    assert.deepStrictEqual(await csvAoa('"a",b\n', { strict: true }), [["a", "b"]])
+    assert.deepStrictEqual(await csvAoa('"a"\r\n"b";"c"\n', { strict: true, delimiter: ";" }), [["a"], ["b", "c"]])
   })
 
   it("whitespace is kept", async () => {
@@ -179,6 +182,29 @@ describe("csv: delimiters", () => {
 
   it("no candidate: comma", async () => {
     assert.deepStrictEqual(await csvAoa("abc\ndef\n"), [["abc"], ["def"]])
+  })
+
+  it("sniffing: a line without a candidate counts as a line, a blank line doesn't", async () => {
+    // `x` has no `;`, so `;` is not consistent; then `,` and `;` tie (2 each) and `,` comes first
+    assert.deepStrictEqual(await csvAoa("a;b,c,d\nx\ne;f\n"), [["a;b", "c", "d"], ["x"], ["e;f"]])
+    // an empty quoted field is a character too
+    assert.deepStrictEqual(await csvAoa('""\na;b,c,d\ne;f\n'), [[], ["a;b", "c", "d"], ["e;f"]])
+    // a blank line is skipped: `;` is consistent (1 per line)
+    assert.deepStrictEqual(await csvAoa("a;b,c,d\n\ne;f\n"), [["a", "b,c,d"], [], ["e", "f"]])
+  })
+
+  it("sniffing looks at the first 64 lines only", async () => {
+    // 64 lines with one `;`, then a line of 100 `,`: past the 64 lines, so `;` is consistent
+    const commas = ",".repeat(100) + "\n"
+    assert.deepStrictEqual((await csvAoa("a;b\n".repeat(64) + commas))[0], ["a", "b"])
+    // with 63 lines the comma line is the 64th: `;` is not consistent and `,` is more frequent
+    assert.deepStrictEqual((await csvAoa("a;b\n".repeat(63) + commas))[0], ["a;b"])
+  })
+
+  it("sniffing: the most frequent candidate counts a line cut off at the end of the sample", async () => {
+    // no consistent candidate (2 `;`, then 1 `,`); the cut-off line's commas make `,` the most frequent
+    const rows = await csvAoa("a;b;c\nd,e\n" + ",".repeat(16_380) + "\n")
+    assert.deepStrictEqual(rows.slice(0, 2), [["a;b;c"], ["d", "e"]])
   })
 
   it("Excel sep= line sets the delimiter and is not a row", async () => {

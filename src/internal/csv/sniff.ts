@@ -3,28 +3,74 @@
  *
  * @internal
  */
-import { absurd } from "effect/Function"
+import { fieldEnds, type FieldSink, lexFields, lexState } from "./lex.ts"
 
 /** Characters of text looked at to guess the delimiter. */
 export const SNIFF_CHARS = 16 * 1024
 
 /** Candidates, in tie-break order: comma, tab, semicolon, pipe. */
 const CANDIDATES = [0x2C, 0x09, 0x3B, 0x7C] as const
-type Candidate = typeof CANDIDATES[number]
+const K = CANDIDATES.length
 
-const QUOTE = 0x22
-const LF = 0x0A
-const CR = 0x0D
+const CANDIDATE_ENDS = fieldEnds(CANDIDATES)
+
+/** A field end's index in CANDIDATES, by character code (all below 128), or -1. */
+const CANDIDATE_INDEX = new Int8Array(128).fill(-1)
+// progress: t increases up to K
+for (let t = 0; t < K; t++) CANDIDATE_INDEX[CANDIDATES[t]!] = t
 
 const MAX_LINES = 64
 
 /**
- * Where the scan is within a field. Quotes follow the parser's rules: a `"`
- * opens a quoted field only at the start of a field, and is literal anywhere
- * else. With the delimiter still unknown, a field starts at the start of a
- * line and after any candidate.
+ * The per-line counts, shared by the guesses: allocating and zeroing them
+ * would dominate the guess on a small sample. A guess runs to the end
+ * without yielding, so one array serves every guess; each clears the slots
+ * the previous one used (`countsUsed`).
  */
-type Mode = "FieldStart" | "Unquoted" | "Quoted" | "QuoteInQuoted"
+const COUNTS: Array<number> = new Array<number>((MAX_LINES + 1) * K).fill(0)
+let countsUsed = 0
+
+/**
+ * Counts the candidates that end fields, per line, with every candidate
+ * taken as a delimiter (a field starts at the start of a line and after any
+ * candidate, so quotes follow the parser's rules). Lines without a
+ * character are skipped; it stops after MAX_LINES lines.
+ */
+class CandidateCounts implements FieldSink {
+  /**
+   * The counts of line `l` at `l * K` (by candidate), for the `lines` lines
+   * read and then the line being read. A line without a character has no
+   * candidate, so its slot is still zero for the next line.
+   */
+  readonly counts: Array<number>
+  lines = 0
+
+  /** `counts`: all zero, at least (MAX_LINES + 1) * K slots. */
+  constructor(counts: Array<number>) {
+    this.counts = counts
+  }
+
+  text(): boolean {
+    return true
+  }
+
+  endField(s: string, _from: number, to: number): boolean {
+    // a candidate, or a line break
+    const t = CANDIDATE_INDEX[s.charCodeAt(to)]!
+    if (t >= 0) this.counts[this.lines * K + t]!++
+    return true
+  }
+
+  endRecord(started: boolean): boolean {
+    if (started) this.lines++
+    return this.lines < MAX_LINES
+  }
+
+  afterQuote(): boolean {
+    // the parser's lenient reading: the rest of the field is literal
+    return true
+  }
+}
 
 /**
  * Guesses the delimiter of `sample`. Candidates inside quoted fields are
@@ -39,61 +85,29 @@ type Mode = "FieldStart" | "Unquoted" | "Quoted" | "QuoteInQuoted"
  *    tie-break order; with none at all, `,`.
  */
 export const guessDelimiter = (sample: string, complete: boolean): number => {
-  const k = CANDIDATES.length
-  const totals = [0, 0, 0, 0]
-  const lineCounts: Array<Array<number>> = []
-  let current = [0, 0, 0, 0]
-  let lineHasText = false
-  let mode: Mode = "FieldStart"
-  const n = sample.length
-  // progress: i increases up to n; lines are capped at MAX_LINES
-  for (let i = 0; i < n && lineCounts.length < MAX_LINES; i++) {
-    const c = sample.charCodeAt(i)
-    if (mode === "Quoted") {
-      // line breaks and candidates are part of the field
-      if (c === QUOTE) mode = "QuoteInQuoted"
-      lineHasText = true
-      continue
-    }
-    if (c === LF || c === CR) {
-      if (lineHasText) lineCounts.push(current)
-      current = [0, 0, 0, 0]
-      lineHasText = false
-      mode = "FieldStart"
-      continue
-    }
-    lineHasText = true
-    const t = CANDIDATES.indexOf(c as Candidate)
-    if (t >= 0) {
-      current[t]!++
-      totals[t]!++
-      mode = "FieldStart"
-      continue
-    }
-    switch (mode) {
-      case "FieldStart":
-        mode = c === QUOTE ? "Quoted" : "Unquoted"
-        break
-      case "Unquoted":
-        break
-      case "QuoteInQuoted":
-        // `""` is a literal quote; anything else follows the closing quote
-        // and is literal (the parser's lenient reading)
-        mode = c === QUOTE ? "Quoted" : "Unquoted"
-        break
-      default:
-        absurd(mode)
-    }
-  }
-  if (lineHasText && complete && lineCounts.length < MAX_LINES) lineCounts.push(current)
+  // clear what the last guess counted (all of it, even if that guess threw)
+  COUNTS.fill(0, 0, countsUsed)
+  countsUsed = COUNTS.length
+  const state = lexState()
+  const sink = new CandidateCounts(COUNTS)
+  lexFields(sample, 0, state, CANDIDATE_ENDS, sink)
+  const counts = sink.counts
+  // slots counted into: every line read, and the line being read
+  countsUsed = Math.min((sink.lines + 1) * K, COUNTS.length)
+  // the line being read counts as a line only if the sample is whole (after
+  // MAX_LINES lines lexing stopped at a line break, so no line is being read)
+  const lines = state.recordStarted && complete ? sink.lines + 1 : sink.lines
 
   let best = -1
   let bestPerLine = 0
-  if (lineCounts.length >= 2) {
-    for (let t = 0; t < k; t++) {
-      const first = lineCounts[0]![t]!
+  if (lines >= 2) {
+    for (let t = 0; t < K; t++) {
+      const first = counts[t]!
       if (first === 0) continue
-      if (!lineCounts.every((line) => line[t] === first)) continue
+      let l = 1
+      // progress: l increases up to lines
+      while (l < lines && counts[l * K + t] === first) l++
+      if (l < lines) continue
       if (first > bestPerLine) {
         best = t
         bestPerLine = first
@@ -102,10 +116,14 @@ export const guessDelimiter = (sample: string, complete: boolean): number => {
   }
   if (best >= 0) return CANDIDATES[best]!
   let bestTotal = 0
-  for (let t = 0; t < k; t++) {
-    if (totals[t]! > bestTotal) {
+  for (let t = 0; t < K; t++) {
+    // every line read, and the line being read (zero if lexing stopped after MAX_LINES)
+    let total = 0
+    // progress: l increases up to sink.lines
+    for (let l = 0; l <= sink.lines; l++) total += counts[l * K + t]!
+    if (total > bestTotal) {
       best = t
-      bestTotal = totals[t]!
+      bestTotal = total
     }
   }
   return best >= 0 ? CANDIDATES[best]! : 0x2C

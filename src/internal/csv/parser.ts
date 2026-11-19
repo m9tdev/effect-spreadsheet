@@ -1,7 +1,8 @@
 /**
- * Incremental delimited-text parser: a state machine over UTF-16 text that
- * can be fed in pieces of any size (a piece may end anywhere: inside a quoted
- * field, between `""`, or between CR and LF).
+ * Incremental delimited-text parser over UTF-16 text that can be fed in
+ * pieces of any size (a piece may end anywhere: inside a quoted field,
+ * between `""`, or between CR and LF). Fields come from the lexer the
+ * delimiter sniffer shares (`lex.ts`); this builds cells and rows.
  *
  * Behaviour (see README / test/csv for the full list):
  * - Records end at LF, CR or CRLF outside quotes. A trailing line break
@@ -22,24 +23,9 @@ import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
+import { type FieldEnds, fieldEndsOf, type FieldSink, lexFields, type LexState, Mode } from "./lex.ts"
 import { isDelimiter } from "./options.ts"
 import { guessDelimiter, SNIFF_CHARS } from "./sniff.ts"
-
-const QUOTE = 0x22
-const LF = 0x0A
-const CR = 0x0D
-
-const State = {
-  /** At the start of a field. */
-  FieldStart: 0,
-  /** Inside an unquoted field. */
-  Unquoted: 1,
-  /** Inside a quoted field. */
-  Quoted: 2,
-  /** Just saw a `"` inside a quoted field: `""`, the closing quote, or junk follows. */
-  QuoteInQuoted: 3
-} as const
-type State = typeof State[keyof typeof State]
 
 export interface ParserOptions {
   /** The delimiter's character code, or undefined to sniff it. */
@@ -100,10 +86,10 @@ export class CsvParser {
         }
         const tokenizer = this.sniff(pending, final && pending.length <= SNIFF_CHARS)
         this.phase = { _tag: "Parsing", tokenizer }
-        return this.step(tokenizer, tokenizer.parse(pending.slice(tokenizer.start)), final)
+        return this.step(tokenizer, tokenizer.parse(pending, tokenizer.start), final)
       }
       case "Parsing":
-        return this.step(phase.tokenizer, phase.tokenizer.parse(text), final)
+        return this.step(phase.tokenizer, phase.tokenizer.parse(text, 0), final)
       default:
         return absurd(phase)
     }
@@ -145,37 +131,39 @@ export class CsvParser {
 }
 
 /**
- * Splits text into rows once the delimiter is known. Each step returns the
- * error that stops tokenizing, or undefined to go on; after an error the
+ * Splits text into rows once the delimiter is known: a `FieldSink` that
+ * builds cells and rows from the shared lexer. Each step returns the error
+ * that stops tokenizing, or undefined to go on; after an error the
  * tokenizer is not used again (the parser keeps the error).
  */
-class Tokenizer {
-  private readonly delimiter: number
+class Tokenizer implements FieldSink, LexState {
+  private readonly ends: FieldEnds
   /** Characters skipped before the first piece (a `sep=` line). */
   readonly start: number
 
-  private state: State = State.FieldStart
+  // where the lexer stands (LexState): kept on the tokenizer itself, which
+  // saves an object per read
+  mode: Mode = Mode.FieldStart
+  skipLF = false
+  recordStarted = false
   private field = ""
-  /** The current record has consumed at least one character. */
-  private recordStarted = false
-  /** The previous piece ended with a CR record terminator. */
-  private skipLF = false
   private column = 0
   private cells: Array<Cell.Cell> = []
   private rowIndex = 0
   private cellCount = 0
-  /** Characters consumed before the current piece (for error offsets). */
+  /** Characters of the pieces before the current one (for error offsets). */
   private consumed = 0
   private out: Array<Row> = []
+  /** The error that stopped the current piece. */
+  private error: SpreadsheetError | undefined = undefined
 
   private readonly options: ParserOptions
 
-  /** `start`: characters skipped before the first piece (a `sep=` line); error offsets count them. */
+  /** `start`: characters of the first piece to skip (a `sep=` line); error offsets count them. */
   constructor(options: ParserOptions, delimiter: number, start: number) {
     this.options = options
-    this.delimiter = delimiter
+    this.ends = fieldEndsOf(delimiter)
     this.start = start
-    this.consumed = start
   }
 
   /** The rows completed since the last call. */
@@ -185,150 +173,85 @@ class Tokenizer {
     return rows
   }
 
-  private appendField(s: string, from: number, to: number): LimitExceeded | undefined {
-    if (to > from) {
-      this.field += s.slice(from, to)
-      const max = this.options.limits.maxStringLength
-      if (this.field.length > max) {
-        return new LimitExceeded({ limit: "maxStringLength", max, actual: this.field.length })
-      }
-    }
-    return undefined
+  /** Stops lexing with `error`. */
+  private fail(error: SpreadsheetError): false {
+    this.error = error
+    return false
   }
 
-  private endField(): LimitExceeded | undefined {
+  text(s: string, from: number, to: number): boolean {
+    this.field += s.slice(from, to)
+    const max = this.options.limits.maxStringLength
+    return this.field.length > max
+      ? this.fail(new LimitExceeded({ limit: "maxStringLength", max, actual: this.field.length }))
+      : true
+  }
+
+  endField(s: string, from: number, to: number): boolean {
+    // the field's text so far, then its last part (most fields are only that)
+    let value = this.field
+    if (to > from) {
+      value = value.length === 0 ? s.slice(from, to) : value + s.slice(from, to)
+      const max = this.options.limits.maxStringLength
+      if (value.length > max) {
+        return this.fail(new LimitExceeded({ limit: "maxStringLength", max, actual: value.length }))
+      }
+    }
     const column = this.column
     const maxColumns = this.options.limits.maxColumns
     if (column >= maxColumns) {
-      return new LimitExceeded({ limit: "maxColumns", max: maxColumns, actual: column + 1 })
+      return this.fail(new LimitExceeded({ limit: "maxColumns", max: maxColumns, actual: column + 1 }))
     }
     this.column = column + 1
-    const value = this.field
     this.field = ""
-    this.state = State.FieldStart
     // An empty field emits no cell; every emitted cell counts.
-    if (value.length === 0) return undefined
+    if (value.length === 0) return true
     const maxCells = this.options.limits.maxCellsPerSheet
     if (++this.cellCount > maxCells) {
-      return new LimitExceeded({ limit: "maxCellsPerSheet", max: maxCells, actual: this.cellCount })
+      return this.fail(new LimitExceeded({ limit: "maxCellsPerSheet", max: maxCells, actual: this.cellCount }))
     }
     this.cells.push(this.options.inferTypes ? infer(column, value) : Cell.text(column, value))
-    return undefined
+    return true
   }
 
-  private endRecord(): LimitExceeded | undefined {
+  endRecord(): boolean {
     const index = this.rowIndex
     const maxRows = this.options.limits.maxRows
     if (index >= maxRows) {
-      return new LimitExceeded({ limit: "maxRows", max: maxRows, actual: index + 1 })
+      return this.fail(new LimitExceeded({ limit: "maxRows", max: maxRows, actual: index + 1 }))
     }
     this.out.push({ index, hidden: false, cells: this.cells })
     this.rowIndex = index + 1
     this.cells = []
     this.column = 0
-    this.recordStarted = false
-    return undefined
+    return true
   }
 
-  /** Ends the field at a delimiter or line break `c`. */
-  private terminate(c: number): LimitExceeded | undefined {
-    const error = this.endField()
-    if (error !== undefined || c === this.delimiter) return error
-    if (c === CR) this.skipLF = true
-    return this.endRecord()
+  afterQuote(at: number): boolean {
+    return this.options.strict
+      ? this.fail(
+        new MalformedFile({
+          format: "csv",
+          offset: this.consumed + at,
+          reason: `unexpected character after closing quote in row ${this.rowIndex + 1}`
+        })
+      )
+      : true
   }
 
-  /** Tokenizes a piece; stops at the first error and returns it. */
-  parse(s: string): SpreadsheetError | undefined {
-    const n = s.length
-    const delim = this.delimiter
-    let error: SpreadsheetError | undefined
-    let i = 0
-    // progress: every branch below moves `i` forward by at least 1, or ends
-    // the loop (error). `i` never decreases.
-    while (i < n && error === undefined) {
-      if (this.skipLF) {
-        this.skipLF = false
-        if (s.charCodeAt(i) === LF) {
-          i++
-          continue // `i` advanced
-        }
-      }
-      switch (this.state) {
-        case State.FieldStart:
-        case State.Unquoted: {
-          if (this.state === State.FieldStart && s.charCodeAt(i) === QUOTE) {
-            this.state = State.Quoted
-            this.recordStarted = true
-            i++
-            break
-          }
-          this.state = State.Unquoted
-          this.recordStarted = true
-          let j = i
-          // progress: j increases up to n
-          for (; j < n; j++) {
-            const c = s.charCodeAt(j)
-            if (c === delim || c === LF || c === CR) break
-          }
-          error = this.appendField(s, i, j)
-          if (error === undefined && j < n) error = this.terminate(s.charCodeAt(j))
-          i = j + 1 // > i; when j === n this ends the loop
-          break
-        }
-        case State.Quoted: {
-          const j = s.indexOf('"', i)
-          if (j < 0) {
-            error = this.appendField(s, i, n)
-            i = n
-          } else {
-            error = this.appendField(s, i, j)
-            this.state = State.QuoteInQuoted
-            i = j + 1
-          }
-          break
-        }
-        case State.QuoteInQuoted: {
-          const c = s.charCodeAt(i)
-          if (c === QUOTE) {
-            error = this.appendField('"', 0, 1)
-            this.state = State.Quoted
-            i++
-          } else if (c === delim || c === LF || c === CR) {
-            error = this.terminate(c)
-            i++
-          } else if (this.options.strict) {
-            error = new MalformedFile({
-              format: "csv",
-              offset: this.consumed + i,
-              reason: `unexpected character after closing quote in row ${this.rowIndex + 1}`
-            })
-          } else {
-            // Lenient: the closing quote ended the quoted part; the rest of
-            // the field is literal. `c` is not a terminator, so the next
-            // iteration (Unquoted) consumes at least `c`.
-            this.state = State.Unquoted
-            let j = i + 1
-            // progress: j increases up to n
-            for (; j < n; j++) {
-              const d = s.charCodeAt(j)
-              if (d === delim || d === LF || d === CR) break
-            }
-            error = this.appendField(s, i, j)
-            if (error === undefined && j < n) error = this.terminate(s.charCodeAt(j))
-            i = j + 1
-          }
-          break
-        }
-      }
-    }
-    this.consumed += n
-    return error
+  /**
+   * Tokenizes a piece from `from` (the first piece starts after `start`);
+   * stops at the first error and returns it.
+   */
+  parse(s: string, from: number): SpreadsheetError | undefined {
+    lexFields(s, from, this, this.ends, this)
+    this.consumed += s.length
+    return this.error
   }
 
   /** End of input: ends the last record, if one has started. Returns the error, if any. */
   finish(): SpreadsheetError | undefined {
-    if (this.state === State.Quoted && this.options.strict) {
+    if (this.mode === Mode.Quoted && this.options.strict) {
       return new MalformedFile({
         format: "csv",
         offset: this.consumed,
@@ -336,7 +259,7 @@ class Tokenizer {
       })
     }
     if (!this.recordStarted) return undefined
-    return this.endField() ?? this.endRecord()
+    return this.endField("", 0, 0) && this.endRecord() ? undefined : this.error
   }
 }
 
