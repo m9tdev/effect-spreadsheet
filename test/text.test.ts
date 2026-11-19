@@ -226,12 +226,33 @@ describe("text: TextInput", () => {
     }
   })
 
-  it("a UTF-16 byte-order mark is dropped, and a U+FEFF after the first character kept, however the first bytes are split", () => {
-    const le = bytes(0xFF, 0xFE, 0x3D, 0xD8, 0x00, 0xDE, 0xFF, 0xFE, 0x41, 0x00) // mark, U+1F600, U+FEFF, A
-    for (let c1 = 0; c1 <= le.length; c1++) {
-      for (let c2 = c1; c2 <= le.length; c2++) {
-        const pieces = [le.subarray(0, c1), le.subarray(c1, c2), le.subarray(c2)]
-        expect(run(fatal(), pieces), `${c1}/${c2}`).toEqual({ text: "\u{1F600}\uFEFFA" })
+  it("only the leading byte-order mark is dropped, in every encoding: a second one, or one after the first character, is kept, however the first bytes are split", () => {
+    const utf16 = (text: string, littleEndian: boolean) => {
+      const out = new Uint8Array(text.length * 2)
+      for (let i = 0; i < text.length; i++) {
+        const c = text.charCodeAt(i)
+        out[2 * i] = littleEndian ? c & 0xFF : c >> 8
+        out[2 * i + 1] = littleEndian ? c >> 8 : c & 0xFF
+      }
+      return out
+    }
+    const encodings: Array<[string, (text: string) => Uint8Array]> = [
+      ["utf-8", (text) => new TextEncoder().encode(text)],
+      ["utf-16le", (text) => utf16(text, true)],
+      ["utf-16be", (text) => utf16(text, false)]
+    ]
+    for (const [encoding, encode] of encodings) {
+      for (const text of ["\uFEFFa\uFEFF", "\u{1F600}\uFEFFA", "a\uFEFF"]) {
+        const input = encode(`\uFEFF${text}`)
+        for (let c1 = 0; c1 <= input.length; c1++) {
+          for (let c2 = c1; c2 <= input.length; c2++) {
+            const pieces = [input.subarray(0, c1), input.subarray(c1, c2), input.subarray(c2)]
+            const where = `${encoding} ${JSON.stringify(text)} ${c1}/${c2}`
+            expect(run(fatal(encoding), pieces), where).toEqual({ text })
+            const auto = new TextInput<number | undefined>({ detect: "bom-utf16-utf8-1252", fatal: false })
+            expect(run(auto, pieces), where).toEqual({ text })
+          }
+        }
       }
     }
   })

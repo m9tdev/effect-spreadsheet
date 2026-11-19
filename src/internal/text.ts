@@ -145,10 +145,10 @@ const NOTHING: Result.Result<string, never> = Result.succeed("")
  * Feeds bytes in, gets text out, incrementally. The first bytes are held
  * back until the encoding is decided: {@link DETECT_BYTES} of them (or the
  * whole input, if shorter) when detecting, else 3, the longest byte-order
- * mark. A leading mark is dropped here, not by `TextDecoder`: decoders
- * differ on what they drop when their first call ends inside a character
- * (some also drop a U+FEFF right after it), so the text would depend on
- * how the input is split.
+ * mark. A leading UTF-8 mark is dropped here, not by `TextDecoder`: when
+ * a UTF-8 decoder's first call ends inside a character, some decoders
+ * also drop a U+FEFF right after it, so the text would depend on how the
+ * input is split. UTF-16 decoders drop their own mark.
  */
 export class TextInput<E = never> {
   private phase: Phase<E> = { _tag: "Detecting", head: [], bytes: 0 }
@@ -157,7 +157,7 @@ export class TextInput<E = never> {
   private readonly hold: number
   /** Bytes decoded so far (after the held ones are released). */
   private consumed = 0
-  /** The last (at most 3) of those bytes: where a UTF-8 sequence cut at a chunk's end starts. */
+  /** The last (at most 3) of those bytes, a byte-order mark left out: where a UTF-8 sequence cut at a chunk's end starts. */
   private tail: Uint8Array = new Uint8Array(0)
 
   constructor(options: Detect & OnInvalid<E>) {
@@ -176,8 +176,10 @@ export class TextInput<E = never> {
         phase.head.push(bytes)
         phase.bytes += bytes.length
         if (phase.bytes < this.hold) return NOTHING
-        const { phase: decoding, rest } = this.begin(concat(phase.head, phase.bytes), false)
-        return this.decode(decoding, rest, false)
+        const head = concat(phase.head, phase.bytes)
+        const decoding = this.begin(head, false)
+        // `consumed` is the length of the mark `begin` dropped (0 without one)
+        return this.decode(decoding, this.consumed === 0 ? head : head.subarray(this.consumed), false)
       }
       case "Decoding":
         return this.decode(phase, bytes, false)
@@ -191,8 +193,10 @@ export class TextInput<E = never> {
     const phase = this.phase
     switch (phase._tag) {
       case "Detecting": {
-        const { phase: decoding, rest } = this.begin(concat(phase.head, phase.bytes), true)
-        return this.decode(decoding, rest, true)
+        const head = concat(phase.head, phase.bytes)
+        const decoding = this.begin(head, true)
+        // `consumed` is the length of the mark `begin` dropped (0 without one)
+        return this.decode(decoding, this.consumed === 0 ? head : head.subarray(this.consumed), true)
       }
       case "Decoding":
         return this.decode(phase, new Uint8Array(0), true)
@@ -203,10 +207,11 @@ export class TextInput<E = never> {
 
   /**
    * Leaves detection: picks the decoder for the held-back bytes `head`
-   * (`complete` says it is the whole input). `rest` is `head` without its
-   * byte-order mark, the bytes left to decode.
+   * (`complete` says it is the whole input). A UTF-8 byte-order mark is
+   * dropped here: its bytes count as decoded, so error offsets stay
+   * offsets into the input, and the caller decodes what follows it.
    */
-  private begin(head: Uint8Array, complete: boolean): { readonly phase: Decoding<E>; readonly rest: Uint8Array } {
+  private begin(head: Uint8Array, complete: boolean): Decoding<E> {
     const detect = this.detect
     const bom = bomEncoding(head)
     const encoding = bom ?? (
@@ -222,14 +227,15 @@ export class TextInput<E = never> {
     const check: Check<E> = !onInvalid.fatal
       ? { _tag: "None" }
       : { _tag: encoding === "utf-8" ? "Utf8" : "Platform", invalid: onInvalid.invalid }
-    // ignoreBOM: true keeps every U+FEFF; the leading mark is dropped below
-    const decoder = new TextDecoder(encoding, { fatal: check._tag !== "None", ignoreBOM: true })
+    // UTF-8 keeps every U+FEFF (ignoreBOM: true) and its mark is dropped
+    // below; other decoders drop a leading mark of their own encoding
+    const utf8 = encoding === "utf-8"
+    const decoder = new TextDecoder(encoding, { fatal: check._tag !== "None", ignoreBOM: utf8 })
     const phase: Decoding<E> = { _tag: "Decoding", decoder, check }
     this.phase = phase
-    // the mark's bytes count as read, so offsets stay offsets into the input
-    const skip = bom === undefined ? 0 : bom === "utf-8" ? 3 : 2
-    this.advance(head.subarray(0, skip))
-    return { phase, rest: head.subarray(skip) }
+    // the mark counts as read (it can't start a sequence cut at a chunk's end)
+    if (bom === "utf-8") this.consumed = 3
+    return phase
   }
 
   /** Decodes `bytes` (and flushes, if `last`), checked as the phase says. */
