@@ -50,8 +50,9 @@ export class UnsupportedFormat extends Schema.TaggedError<UnsupportedFormat>()("
  * The file is recognised but broken: truncated, inconsistent, or violating
  * its format. `part` names the place inside the container (zip entry, CFB
  * stream, ...). `offset` is a byte offset into that part for binary formats;
- * for text formats (CSV) it is a UTF-16 code unit offset into the decoded
- * text.
+ * for text formats (CSV, XML) it is a UTF-16 code unit offset into the
+ * decoded text, except for invalid text encoding in XML, where it is the
+ * byte offset into the part of the first invalid UTF-8 sequence.
  *
  * @since 0.1.0
  * @category errors

@@ -4,7 +4,7 @@ import * as Result from "effect/Result"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { open } from "../src/internal/zip/archive.ts"
-import { parse, XmlDecoder } from "../src/internal/xml/parse.ts"
+import { parse, xmlText } from "../src/internal/xml/parse.ts"
 import { isName, type XmlHandler, XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
 import { isSpreadsheetError, MalformedFile, type SpreadsheetError } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
@@ -578,23 +578,32 @@ describe("xml bytes", () => {
 
   it("a trailing incomplete UTF-8 sequence or odd UTF-16 byte is MalformedFile (the final flush catches it)", async () => {
     const utf8 = await run([bytes("<a/>"), new Uint8Array([0xC3])])
-    expect(failureOf(utf8.exit)).toMatchObject({ _tag: "MalformedFile", reason: "invalid text encoding" })
+    expect(failureOf(utf8.exit)).toMatchObject({ _tag: "MalformedFile", reason: "invalid text encoding", offset: 4 })
     const le = new Uint8Array([0xFF, 0xFE, 0x3C, 0x00, 0x61, 0x00, 0x2F, 0x00, 0x3E, 0x00, 0x20])
     const utf16 = await run([le])
     expect(failureOf(utf16.exit)).toMatchObject({ _tag: "MalformedFile", reason: "invalid text encoding" })
+    // the platform checks UTF-16 and doesn't say where
+    expect(failureOf(utf16.exit)).not.toHaveProperty("offset")
     // the same documents without the extra byte are fine
     expect(Exit.isSuccess((await run([bytes("<a/>")])).exit)).toBe(true)
     expect(Exit.isSuccess((await run([le.subarray(0, 10)])).exit)).toBe(true)
   })
 
-  it("invalid or truncated UTF-8 is MalformedFile", async () => {
-    for (const chunks of [[new Uint8Array([0x3C, 0x61, 0x3E, 0xFF, 0x3C, 0x2F, 0x61, 0x3E])], [bytes("<a>"), new Uint8Array([0xC3])]]) {
+  it("invalid or truncated UTF-8 is MalformedFile, at the byte offset of the first invalid sequence in the part", async () => {
+    const cases: Array<[Array<Uint8Array>, number]> = [
+      [[new Uint8Array([0x3C, 0x61, 0x3E, 0xFF, 0x3C, 0x2F, 0x61, 0x3E])], 3],
+      [[bytes("<a>"), new Uint8Array([0xC3])], 3],
+      // a sequence split across pieces, then cut short; after a byte-order mark
+      [[new Uint8Array([0xEF, 0xBB, 0xBF]), bytes("<a>é"), new Uint8Array([0xE2, 0x82]), bytes("</a>")], 8]
+    ]
+    for (const [chunks, offset] of cases) {
       const { exit } = await run(chunks)
-      expect(failureOf(exit)).toMatchObject({ _tag: "MalformedFile", part: "part.xml" })
+      expect(failureOf(exit)).toMatchObject({ _tag: "MalformedFile", part: "part.xml", offset })
+      expect(failureOf(exit)?.message).toBe(`Malformed xml file in part.xml at offset ${offset}: invalid text encoding`)
     }
-    const decoder = new XmlDecoder()
-    expect(decoder.push(new Uint8Array([0x3C]))).toBe("")
-    expect(decoder.end()).toBe("<")
+    const decoder = xmlText(undefined)
+    expect(decoder.push(new Uint8Array([0x3C]))).toEqual(Result.succeed(""))
+    expect(decoder.end()).toEqual(Result.succeed("<"))
   })
 
   it("parses every XML part of the committed corpus workbooks, hidden-row fixtures included, in linear work", async () => {
@@ -621,15 +630,15 @@ describe("xml bytes", () => {
 
 describe("xml decoder: encoding sniff", () => {
   const decodeAll = (pieces: ReadonlyArray<ReadonlyArray<number>>): string | SpreadsheetError => {
-    const decoder = new XmlDecoder("part.xml")
+    const decoder = xmlText("part.xml")
     let text = ""
     for (const piece of pieces) {
       const out = decoder.push(new Uint8Array(piece))
-      if (typeof out !== "string") return out
-      text += out
+      if (Result.isFailure(out)) return out.failure
+      text += out.success
     }
     const rest = decoder.end()
-    return typeof rest === "string" ? text + rest : rest
+    return Result.isSuccess(rest) ? text + rest.success : rest.failure
   }
   const utf16 = (s: string, littleEndian: boolean): Array<number> =>
     [...s].flatMap((ch) => {
@@ -668,10 +677,18 @@ describe("xml decoder: encoding sniff", () => {
   })
 
   it("held bytes are not decoded until the encoding is known", () => {
-    const decoder = new XmlDecoder()
-    expect(decoder.push(new Uint8Array([0x3C]))).toBe("")
-    expect(decoder.push(new Uint8Array([0x61]))).toBe("<a")
-    expect(decoder.push(new Uint8Array([0x3E]))).toBe(">")
-    expect(decoder.end()).toBe("")
+    const decoder = xmlText(undefined)
+    expect(decoder.push(new Uint8Array([0x3C]))).toEqual(Result.succeed(""))
+    expect(decoder.push(new Uint8Array([0x61]))).toEqual(Result.succeed(""))
+    expect(decoder.push(new Uint8Array([0x3E]))).toEqual(Result.succeed("<a>"))
+    expect(decoder.push(new Uint8Array([0x3C]))).toEqual(Result.succeed("<"))
+    expect(decoder.end()).toEqual(Result.succeed(""))
+  })
+
+  it("a UTF-8 byte-order mark split across pieces is dropped once: a second one is text, however the input is split", () => {
+    const input = [0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF, 0x3C, 0x61, 0x2F, 0x3E]
+    for (let cut = 0; cut <= input.length; cut++) {
+      expect(decodeAll([input.slice(0, cut), input.slice(cut)])).toBe("\uFEFF<a/>")
+    }
   })
 })

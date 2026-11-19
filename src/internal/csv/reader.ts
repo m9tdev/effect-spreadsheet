@@ -10,7 +10,7 @@ import { type InvalidOption, LimitExceeded, type SpreadsheetError } from "../../
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
 import { sliced } from "../bytes.ts"
-import { ByteDecoder } from "./decode.ts"
+import { csvText } from "./decode.ts"
 import type { CsvOptions } from "./options.ts"
 import { CsvParser } from "./parser.ts"
 
@@ -44,7 +44,7 @@ export const rowsFromByteStream = <E, R>(
 ): Stream.Stream<Row, E | SpreadsheetError, R> =>
   Stream.transformPull(sliced(limitInput(input, limits.maxInputBytes)), (upstream) =>
     Effect.sync(() => {
-      const decoder = new ByteDecoder(options.decoding)
+      const decoder = csvText(options.decoding)
       const parser = new CsvParser({
         delimiter: options.delimiter,
         inferTypes: options.inferTypes,
@@ -67,11 +67,11 @@ export const rowsFromByteStream = <E, R>(
           if (next !== undefined) {
             let text = ""
             // progress: one slice per iteration (one per pull, as `sliced` emits them)
-            for (const slice of next) text += decoder.push(slice)
+            for (const slice of next) text += Result.merge(decoder.push(slice))
             rows = parser.feed(text, false)
           } else {
             finished = true
-            rows = parser.feed(decoder.end(), true)
+            rows = parser.feed(Result.merge(decoder.end()), true)
           }
           if (Result.isFailure(rows)) return yield* Effect.fail(rows.failure)
           if (rows.success.length > 0) return rows.success as unknown as Arr.NonEmptyReadonlyArray<Row>

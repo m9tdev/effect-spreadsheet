@@ -8,8 +8,8 @@ import * as Result from "effect/Result"
 import type { ReadOptions } from "../../csv/index.ts"
 import { InvalidOption } from "../../SpreadsheetError.ts"
 
-/** How the bytes become text: `"auto"` detects the encoding, else a decoder for the requested one. */
-export type Decoding = "auto" | (() => TextDecoder)
+/** How the bytes become text: `"auto"` detects the encoding, else the requested one, by its `TextDecoder` name. */
+export type Decoding = "auto" | { readonly encoding: string }
 
 export interface CsvOptions {
   /** The delimiter's character code, or undefined for a `sep=` line, else a guess. */
@@ -56,8 +56,7 @@ export const parseDelimiter = (delimiter: unknown): Result.Result<number | undef
 
 /**
  * Checks an encoding label: `"auto"` or one `TextDecoder` knows (it only
- * says so by throwing). A known label becomes a maker of decoders for its
- * encoding: each run of the rows needs a fresh one, as decoders keep state.
+ * says so by throwing). A known label becomes its encoding's name.
  */
 export const parseEncoding = (label: string): Result.Result<Decoding, InvalidOption> => {
   if (label === "auto") return Result.succeed("auto")
@@ -69,7 +68,7 @@ export const parseEncoding = (label: string): Result.Result<Decoding, InvalidOpt
       new InvalidOption({ option: "encoding", reason: `text encoding ${shown(label)} is not supported` })
     )
   }
-  return Result.succeed(() => makeDecoder(encoding))
+  return Result.succeed({ encoding })
 }
 
 /**
@@ -88,12 +87,6 @@ const shown = (label: unknown): string => {
     }
   }
 }
-
-/**
- * A decoder for `encoding`, a name `TextDecoder` knows. `ignoreBOM: false`
- * makes it drop a BOM of its own encoding.
- */
-export const makeDecoder = (encoding: string): TextDecoder => new TextDecoder(encoding, { ignoreBOM: false })
 
 /**
  * The options of one read, checked: the delimiter first, then the

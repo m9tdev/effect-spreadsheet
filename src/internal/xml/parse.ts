@@ -6,91 +6,32 @@
  * @internal
  */
 import type { Effect, Stream } from "effect"
+import * as Result from "effect/Result"
 import { MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import { drained, type PushDecoder, stopped } from "../decode.ts"
 import type { Meter } from "../meter.ts"
+import { TextInput } from "../text.ts"
 import { type XmlHandler, type XmlLimits, XmlTokenizer } from "./tokenizer.ts"
 
 /**
- * The decoder's phase. Sniffing holds the first 0-1 bytes until there are
- * enough to see a UTF-16 byte-order mark; Decoding has picked the encoding.
+ * Decodes a part's bytes incrementally: UTF-8, or UTF-16 after a UTF-16
+ * byte-order mark. Invalid bytes are `MalformedFile`, with the byte offset
+ * in the part of the first invalid UTF-8 sequence (UTF-16 errors have no
+ * offset).
  */
-type DecoderState =
-  | { readonly _tag: "Sniffing"; readonly head: Uint8Array }
-  | { readonly _tag: "Decoding"; readonly decoder: TextDecoder }
-
-/** Decodes a part's bytes incrementally; picks the encoding from the first bytes. */
-export class XmlDecoder {
-  private state: DecoderState = { _tag: "Sniffing", head: new Uint8Array(0) }
-  private readonly part: string | undefined
-
-  constructor(part?: string) {
-    this.part = part
-  }
-
-  private malformed(): MalformedFile {
-    return new MalformedFile({
-      format: "xml",
-      reason: "invalid text encoding",
-      ...(this.part === undefined ? {} : { part: this.part })
-    })
-  }
-
-  /** Sniffing -> Decoding: picks the encoding from `head`; the new decoder, which has not read `head` yet. */
-  private begin(head: Uint8Array): TextDecoder {
-    const utf16 = head.length >= 2 && ((head[0] === 0xFF && head[1] === 0xFE) || (head[0] === 0xFE && head[1] === 0xFF))
-    const label = !utf16 ? "utf-8" : head[0] === 0xFF ? "utf-16le" : "utf-16be"
-    // ignoreBOM: false drops the byte-order mark itself
-    const decoder = new TextDecoder(label, { fatal: true, ignoreBOM: false })
-    this.state = { _tag: "Decoding", decoder }
-    return decoder
-  }
-
-  /** Decodes the next bytes; the text available so far, or an error. */
-  push(bytes: Uint8Array): string | MalformedFile {
-    try {
-      switch (this.state._tag) {
-        case "Sniffing": {
-          // need 2 bytes to see a UTF-16 byte-order mark
-          const head = this.state.head.length === 0 ? bytes : concat(this.state.head, bytes)
-          if (head.length < 2) {
-            this.state = { _tag: "Sniffing", head }
-            return ""
-          }
-          return this.begin(head).decode(head, { stream: true })
-        }
-        case "Decoding":
-          return this.state.decoder.decode(bytes, { stream: true })
-      }
-    } catch {
-      return this.malformed()
-    }
-  }
-
-  /** Flushes at the end; an incomplete trailing character is an error. */
-  end(): string | MalformedFile {
-    try {
-      switch (this.state._tag) {
-        case "Sniffing": {
-          const head = this.state.head
-          const decoder = this.begin(head)
-          return decoder.decode(head, { stream: true }) + decoder.decode()
-        }
-        case "Decoding":
-          return this.state.decoder.decode()
-      }
-    } catch {
-      return this.malformed()
-    }
-  }
-}
-
-const concat = (a: Uint8Array, b: Uint8Array): Uint8Array => {
-  const out = new Uint8Array(a.length + b.length)
-  out.set(a, 0)
-  out.set(b, a.length)
-  return out
-}
+export const xmlText = (part: string | undefined): TextInput<MalformedFile> =>
+  new TextInput({
+    detect: "bom-only",
+    encoding: "utf-8",
+    fatal: true,
+    invalid: (offset) =>
+      new MalformedFile({
+        format: "xml",
+        reason: "invalid text encoding",
+        ...(part === undefined ? {} : { part }),
+        ...(offset === undefined ? {} : { offset })
+      })
+  })
 
 /**
  * The push decoder of an XML part: its bytes go through the text decoder,
@@ -104,16 +45,16 @@ export const xmlDecoder = (
   part: string | undefined,
   meter: Meter
 ): PushDecoder<never> => {
-  const decoder = new XmlDecoder(part)
+  const decoder = xmlText(part)
   const tokenizer = new XmlTokenizer(handler, limits, part, meter)
   return {
     feed: (piece) => {
       const text = decoder.push(piece)
-      return stopped(typeof text === "string" ? tokenizer.feed(text) : text)
+      return stopped(Result.isSuccess(text) ? tokenizer.feed(text.success) : text.failure)
     },
     end: () => {
       const rest = decoder.end()
-      return stopped(typeof rest === "string" ? (tokenizer.feed(rest) ?? tokenizer.end()) : rest)
+      return stopped(Result.isSuccess(rest) ? (tokenizer.feed(rest.success) ?? tokenizer.end()) : rest.failure)
     }
   }
 }
