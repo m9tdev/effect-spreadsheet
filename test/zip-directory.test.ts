@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs"
+import { Effect } from "effect"
 import * as Result from "effect/Result"
 import { describe, expect, it } from "vitest"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
@@ -7,6 +8,8 @@ import { detect } from "../src/internal/probe.ts"
 import { makeZip } from "./helpers/zip.ts"
 
 const limits = SpreadsheetLimits.defaults
+/** The format detection gives, or its error. */
+const detected = (bytes: Uint8Array) => Effect.runPromise(Effect.match(detect(bytes, limits), { onFailure: (error): unknown => error, onSuccess: (format): unknown => format }))
 const names = (result: ReturnType<typeof readDirectory>) =>
   Result.isSuccess(result) ? result.success.entries.map((e: ZipEntry) => e.name) : result.failure._tag
 const reason = (result: ReturnType<typeof readDirectory>) =>
@@ -42,11 +45,11 @@ const withComment = (zip: Uint8Array, commentLength: number, trailing = 0): Uint
 }
 
 describe("zip central directory", () => {
-  it("reads Python's ZIP64 archive, unpatched and with the EOCD saying 0xFFFF/0xFFFFFFFF", () => {
+  it("reads Python's ZIP64 archive, unpatched and with the EOCD saying 0xFFFF/0xFFFFFFFF", async () => {
     expect(names(readDirectory(ZIP64, limits))).toEqual(EXPECTED)
     const patched = zip64Patched()
     expect(names(readDirectory(patched, limits))).toEqual(EXPECTED)
-    expect(Result.merge(detect(patched, limits))).toBe("xlsx")
+    expect(await detected(patched)).toBe("xlsx")
     // the ZIP64 entry count is checked against maxZipEntries
     expect(names(readDirectory(patched, { ...limits, maxZipEntries: 2 }))).toBe("LimitExceeded")
   })
@@ -140,12 +143,12 @@ describe("zip central directory", () => {
     view.setUint16(8, 0xFFFF, true)
     view.setUint16(10, 0xFFFF, true)
     expect(reason(readDirectory(bytes, limits))).toBe("ZIP64 locator missing")
-    expect(Result.merge(detect(bytes, limits))).toMatchObject({ _tag: "MalformedFile", format: "zip" })
+    expect(await detected(bytes)).toMatchObject({ _tag: "MalformedFile", format: "zip" })
   })
 
-  it("an archive with both workbook parts is xlsb (the binary part wins)", () => {
-    expect(Result.merge(detect(makeZip([{ name: "xl/workbook.xml" }, { name: "xl/workbook.bin" }]), limits))).toBe("xlsb")
-    expect(Result.merge(detect(makeZip([{ name: "xl/workbook.bin" }, { name: "xl/workbook.xml" }]), limits))).toBe("xlsb")
+  it("an archive with both workbook parts and no package relationships is xlsb (the binary part wins)", async () => {
+    expect(await detected(makeZip([{ name: "xl/workbook.xml" }, { name: "xl/workbook.bin" }]))).toBe("xlsb")
+    expect(await detected(makeZip([{ name: "xl/workbook.bin" }, { name: "xl/workbook.xml" }]))).toBe("xlsb")
   })
 
   it("truncated input and entries are MalformedFile", () => {

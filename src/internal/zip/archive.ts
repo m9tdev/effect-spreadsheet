@@ -99,32 +99,73 @@ const kindOf = (entry: ZipEntry): EntryKind => {
   return { unsupported: entry.method }
 }
 
+/** Decodes local header names, as the directory decodes its own (`readDirectory`). */
+const names = new TextDecoder("utf-8")
+
+/**
+ * Whether the `length` name bytes at `start` decode (as UTF-8) to `name`.
+ * ASCII bytes equal to `name`'s characters are compared directly, without
+ * decoding; anything else is decoded.
+ */
+const sameName = (bytes: Uint8Array, start: number, length: number, name: string): boolean => {
+  if (length === name.length) {
+    let i = 0
+    // progress: i increases up to length
+    while (i < length && bytes[start + i]! < 0x80 && bytes[start + i] === name.charCodeAt(i)) i++
+    if (i === length) return true
+  }
+  return names.decode(bytes.subarray(start, start + length)) === name
+}
+
+/**
+ * Checks one entry's local header against its directory entry (signature,
+ * compression method, name) and that its data lies in the buffer, before
+ * the central directory; the entry with where its data is, and how it
+ * reads.
+ */
+export const locateEntry = (
+  bytes: Uint8Array,
+  directory: Directory,
+  entry: ZipEntry
+): Result.Result<LocatedEntry, MalformedFile> =>
+  locateIn(bytes, new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), directory, entry)
+
+const locateIn = (
+  bytes: Uint8Array,
+  view: DataView,
+  directory: Directory,
+  entry: ZipEntry
+): Result.Result<LocatedEntry, MalformedFile> => {
+  const at = entry.localOffset
+  if (at + 30 > bytes.length) return fail("local header out of bounds", entry.name, at)
+  if (view.getUint32(at, true) !== LOCAL) return fail("bad local header signature", entry.name, at)
+  if (view.getUint16(at + 8, true) !== entry.method) {
+    return fail("local header compression method differs from the directory", entry.name, at)
+  }
+  const nameLength = view.getUint16(at + 26, true)
+  const extraLength = view.getUint16(at + 28, true)
+  const start = at + 30 + nameLength + extraLength
+  const end = start + entry.compressedSize
+  if (end > bytes.length) return fail("entry data out of bounds", entry.name, at)
+  // entry data comes before the central directory (and so the EOCD)
+  if (end > directory.directoryStart) return fail("entry data overlaps the central directory", entry.name, at)
+  // The local name must be the directory's name (decoded the same way); a
+  // mismatch means the directory points at the wrong data.
+  if (!sameName(bytes, at + 30, nameLength, entry.name)) {
+    return fail("local header name differs from the directory", entry.name, at)
+  }
+  return Result.succeed({ ...entry, data: { start, end }, kind: kindOf(entry) })
+}
+
 /** Checks the local headers and the layout; the entries, in directory order, with where each one's data is. */
 const locate = (bytes: Uint8Array, directory: Directory): Result.Result<ReadonlyArray<LocatedEntry>, MalformedFile> => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  const names = new TextDecoder("utf-8")
   const located: Array<LocatedEntry> = []
   // progress: one entry per iteration (entries are bounded by maxZipEntries)
   for (const entry of directory.entries) {
-    const at = entry.localOffset
-    if (at + 30 > bytes.length) return fail("local header out of bounds", entry.name, at)
-    if (view.getUint32(at, true) !== LOCAL) return fail("bad local header signature", entry.name, at)
-    if (view.getUint16(at + 8, true) !== entry.method) {
-      return fail("local header compression method differs from the directory", entry.name, at)
-    }
-    const nameLength = view.getUint16(at + 26, true)
-    const extraLength = view.getUint16(at + 28, true)
-    const start = at + 30 + nameLength + extraLength
-    const end = start + entry.compressedSize
-    if (end > bytes.length) return fail("entry data out of bounds", entry.name, at)
-    // entry data comes before the central directory (and so the EOCD)
-    if (end > directory.directoryStart) return fail("entry data overlaps the central directory", entry.name, at)
-    // The local name must be the directory's name (decoded the same way); a
-    // mismatch means the directory points at the wrong data.
-    if (names.decode(bytes.subarray(at + 30, at + 30 + nameLength)) !== entry.name) {
-      return fail("local header name differs from the directory", entry.name, at)
-    }
-    located.push({ ...entry, data: { start, end }, kind: kindOf(entry) })
+    const one = locateIn(bytes, view, directory, entry)
+    if (Result.isFailure(one)) return Result.fail(one.failure)
+    located.push(one.success)
   }
   // No two entries may share bytes: sort by header offset and check the gaps.
   const ordered = [...located].sort((a, b) => a.localOffset - b.localOffset)
@@ -146,8 +187,16 @@ export const open = (
   inflate: InflateRaw = inflateRawWeb
 ): Result.Result<Archive, MalformedFile | LimitExceeded> => {
   const read = readDirectory(bytes, limits)
-  if (Result.isFailure(read)) return Result.fail(read.failure)
-  const directory = read.success
+  return Result.isFailure(read) ? Result.fail(read.failure) : openDirectory(bytes, read.success, limits, inflate)
+}
+
+/** Opens an archive whose central directory `readDirectory` has read. */
+export const openDirectory = (
+  bytes: Uint8Array,
+  directory: Directory,
+  limits: Limits,
+  inflate: InflateRaw = inflateRawWeb
+): Result.Result<Archive, MalformedFile> => {
   // Names are checked before the local headers.
   const keys: Array<string> = []
   const seen = new Set<string>()

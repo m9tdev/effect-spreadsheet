@@ -4,7 +4,6 @@
  * the compound file once.
  */
 import { Effect, Exit, Stream } from "effect"
-import * as Result from "effect/Result"
 import { describe, expect, it } from "vitest"
 import { probe } from "../src/internal/probe.ts"
 import * as Spreadsheet from "../src/Spreadsheet.ts"
@@ -21,10 +20,9 @@ const run = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(Effect.exit
 const formatOf = (bytes: Uint8Array) => Effect.runPromise(Spreadsheet.detectFormat(bytes))
 const xlsError = async (bytes: Uint8Array) => failureOf(await run(Xls.read(bytes)))
 const readError = async (bytes: Uint8Array) => failureOf(await run(Spreadsheet.read(bytes)))
-const tagOf = (bytes: Uint8Array) => {
-  const probed = probe(bytes, limits)
-  return Result.isSuccess(probed) ? probed.success._tag : probed.failure._tag
-}
+// compound files and bare streams are probed synchronously
+const tagOf = (bytes: Uint8Array) =>
+  Effect.runSync(Effect.match(probe(bytes, limits), { onFailure: (error) => error._tag, onSuccess: (probed) => probed._tag }))
 
 const book = (): Uint8Array => X.workbookStream({ sheets: [{ name: "S", records: [X.number(0, 0, 0, 7)] }] })
 

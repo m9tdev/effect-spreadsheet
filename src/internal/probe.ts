@@ -4,6 +4,16 @@
  * the three apply the same rules and a container is opened only once per
  * read.
  *
+ * A zip is first known by its central directory. One that looks like an
+ * OOXML package (it has `_rels/.rels`, `xl/workbook.xml` or
+ * `xl/workbook.bin`) is opened, and a broken one fails. Its workbook part
+ * is the target of the package's `officeDocument` relationship, as the
+ * readers find it: `xl/workbook.xml` is XLSX, `xl/workbook.bin` XLSB, and
+ * a part elsewhere goes by its content type. Without such a relationship
+ * (or with a target the package lacks), `xl/workbook.bin` makes it XLSB and
+ * `xl/workbook.xml` XLSX. A zip with neither is ODS if its `mimetype` entry
+ * says so, and else just a zip.
+ *
  * A compound file is recognised by its directory: it holds a workbook if
  * it has a `Workbook` (BIFF8) or `Book` (BIFF5) stream, which is then
  * trusted to be one (its first record is only checked to name BIFF2-4,
@@ -16,13 +26,24 @@
  *
  * @internal
  */
+import { Effect } from "effect"
 import * as Result from "effect/Result"
-import { Encrypted, type LimitExceeded, MalformedFile, UnsupportedFormat } from "../SpreadsheetError.ts"
+import {
+  Encrypted,
+  type LimitExceeded,
+  MalformedFile,
+  type SpreadsheetError,
+  UnsupportedFormat
+} from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
 import type { Format } from "../Workbook.ts"
 import { type Cfb, type CfbEntry, type CfbError, open as openCfb } from "./cfb/cfb.ts"
 import { type Meter, noMeter } from "./meter.ts"
-import { biffBof, CFB_MAGIC, detectZip, plainFormat, startsWith, ZIP_MAGICS } from "./sniff.ts"
+import { contentType, lookup, type Named, packageRels } from "./opc.ts"
+import { fixedWorkbook } from "./package.ts"
+import { biffBof, CFB_MAGIC, plainFormat, startsWith, ZIP_MAGICS } from "./sniff.ts"
+import { type Archive, locateEntry, openDirectory } from "./zip/archive.ts"
+import { type Directory, normalizeName, readDirectory, type ZipEntry } from "./zip/directory.ts"
 
 /**
  * A BIFF5/8 workbook stream. One in a compound file is read from it only
@@ -57,15 +78,27 @@ export interface Unreadable {
 export type XlsProbe = Biff | EncryptedPackage | Unreadable
 
 /**
- * Anything else, by the format its content shows: a zip (by its entry
- * names) or plain bytes (by magic numbers and text). Read by format.
+ * An OOXML package, opened: its kind and its workbook part (present, or a
+ * part the package lacks, which reading reports).
+ */
+export interface Package {
+  readonly _tag: "Package"
+  readonly kind: "xlsx" | "xlsb"
+  readonly archive: Archive
+  readonly workbook: Named
+}
+
+/**
+ * Anything else, by the format its content shows: a zip that is no
+ * package (an ODF `mimetype`, or nothing known) or plain bytes (by magic
+ * numbers and text). Read by format.
  */
 export interface Detected {
   readonly _tag: "Detected"
-  readonly format: Exclude<Format, "xls" | "cfb">
+  readonly format: Exclude<Format, "xls" | "cfb" | "xlsx" | "xlsb">
 }
 
-export type Probe = XlsProbe | Detected
+export type Probe = XlsProbe | Package | Detected
 
 const OLD_BIFF_REASON = (version: string) => `${version.toUpperCase()} (Excel 2.x-4.x) workbooks aren't supported`
 
@@ -115,25 +148,119 @@ const probeBare = (bytes: Uint8Array, strict: boolean): Result.Result<XlsProbe, 
     : Result.fail(new MalformedFile({ format: "xls", reason: `malformed ${old.toUpperCase()} BOF record` }))
 }
 
+const ODS_MIME = "application/vnd.oasis.opendocument.spreadsheet"
+
+/** The content types of a workbook part, by the package kind they make. */
+const WORKBOOK_TYPES: ReadonlyMap<string, "xlsx" | "xlsb"> = new Map([
+  ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml", "xlsx"],
+  ["application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml", "xlsx"],
+  ["application/vnd.ms-excel.sheet.macroenabled.main+xml", "xlsx"],
+  ["application/vnd.ms-excel.template.macroenabled.main+xml", "xlsx"],
+  ["application/vnd.ms-excel.addin.macroenabled.main+xml", "xlsx"],
+  ["application/vnd.ms-excel.sheet.binary.macroenabled.main", "xlsb"]
+])
+
+/** The package kind of a workbook part found through the package relationships, if it is a workbook. */
+const partKind = (
+  archive: Archive,
+  target: Extract<Named, { readonly _tag: "Part" }>,
+  limits: Limits
+): Effect.Effect<"xlsx" | "xlsb" | undefined, SpreadsheetError> => {
+  const name = normalizeName(target.entry.name)
+  if (name === fixedWorkbook.xlsx) return Effect.succeed("xlsx")
+  if (name === fixedWorkbook.xlsb) return Effect.succeed("xlsb")
+  return Effect.map(
+    contentType(archive, target.entry, limits),
+    (type) => type === undefined ? undefined : WORKBOOK_TYPES.get(type.split(";", 1)[0]!.trim().toLowerCase())
+  )
+}
+
+/**
+ * The workbook of an opened package-looking zip (see the module doc), or
+ * `undefined` if it has none.
+ */
+const probePackage = (archive: Archive, limits: Limits): Effect.Effect<Package | undefined, SpreadsheetError> =>
+  Effect.flatMap(packageRels(archive, limits), (rels) => {
+    const target = rels.named("officeDocument")
+    if (target?._tag === "Part") {
+      return Effect.map(
+        partKind(archive, target, limits),
+        (kind) => kind === undefined ? undefined : { _tag: "Package", kind, archive, workbook: target }
+      )
+    }
+    const kind = archive.find(fixedWorkbook.xlsb) !== undefined
+      ? "xlsb"
+      : archive.find(fixedWorkbook.xlsx) !== undefined
+      ? "xlsx"
+      : undefined
+    return Effect.succeed(
+      kind === undefined ? undefined : { _tag: "Package", kind, archive, workbook: target ?? lookup(archive, fixedWorkbook[kind]) }
+    )
+  })
+
+/**
+ * Whether one of a zip's `mimetype` entries names an ODF spreadsheet (or
+ * template); the last one that reads decides. An entry reads if it is
+ * stored, with the local header the archive would accept, and short.
+ */
+const isOds = (bytes: Uint8Array, directory: Directory, mimetypes: ReadonlyArray<ZipEntry>): boolean => {
+  let mimetype: string | undefined
+  // progress: one entry per iteration, entries bounded by maxZipEntries
+  for (const entry of mimetypes) {
+    if (entry.method !== 0) continue // not stored: no need to look at its local header
+    const located = locateEntry(bytes, directory, entry)
+    if (Result.isFailure(located) || located.success.kind !== "stored") continue
+    const { start, end } = located.success.data
+    if (end - start < 256) mimetype = new TextDecoder().decode(bytes.subarray(start, end)).trim()
+  }
+  return mimetype === ODS_MIME || mimetype === `${ODS_MIME}-template`
+}
+
+/**
+ * What a zip is: a package (opened), an ODF spreadsheet or just a zip. A
+ * broken directory, or a broken package, fails.
+ */
+const probeZip = (bytes: Uint8Array, limits: Limits): Effect.Effect<Package | Detected, SpreadsheetError> => {
+  const read = readDirectory(bytes, limits)
+  if (Result.isFailure(read)) return Effect.fail(read.failure)
+  const directory = read.success
+  // whether a name makes it look like an OOXML package, and the `mimetype` entries
+  let looksLikePackage = false
+  const mimetypes: Array<ZipEntry> = []
+  // progress: one entry per iteration, entries bounded by maxZipEntries
+  for (const entry of directory.entries) {
+    const name = normalizeName(entry.name)
+    if (name === "_rels/.rels" || name === fixedWorkbook.xlsx || name === fixedWorkbook.xlsb) looksLikePackage = true
+    else if (name === "mimetype") mimetypes.push(entry)
+  }
+  const other = (): Detected => ({
+    _tag: "Detected",
+    format: mimetypes.length > 0 && isOds(bytes, directory, mimetypes) ? "ods" : "zip"
+  })
+  if (!looksLikePackage) return Effect.succeed(other())
+  const opened = openDirectory(bytes, directory, limits)
+  if (Result.isFailure(opened)) return Effect.fail(opened.failure)
+  return Effect.map(probePackage(opened.success, limits), (found) => found ?? other())
+}
+
 /**
  * What `bytes` are. Only a container (a compound file or a zip) is opened,
- * and a broken one fails rather than giving a format. The sectors walked
+ * and a broken one fails rather than giving a format; a zip that looks
+ * like a package has its package relationships read. The sectors walked
  * opening a compound file, and later reading its workbook stream, go to
- * `meter`.
+ * `meter`; the bytes inflated from a zip go to the `WorkMeter` in context.
  */
 export const probe = (
   bytes: Uint8Array,
   limits: Limits,
   meter: Meter = noMeter
-): Result.Result<Probe, MalformedFile | LimitExceeded> => {
-  if (bytes.length === 0) return Result.succeed({ _tag: "Detected", format: "csv" })
-  if (startsWith(bytes, CFB_MAGIC)) return probeCfb(bytes, limits, meter)
-  if (ZIP_MAGICS.some((magic) => startsWith(bytes, magic))) {
-    const zip = detectZip(bytes, limits)
-    return Result.isFailure(zip) ? Result.fail(zip.failure) : Result.succeed({ _tag: "Detected", format: zip.success })
-  }
+): Effect.Effect<Probe, SpreadsheetError> => {
+  if (bytes.length === 0) return Effect.succeed({ _tag: "Detected", format: "csv" })
+  if (startsWith(bytes, CFB_MAGIC)) return Effect.fromResult(probeCfb(bytes, limits, meter))
+  if (ZIP_MAGICS.some((magic) => startsWith(bytes, magic))) return probeZip(bytes, limits)
   // a malformed BIFF2-4 BOF may be UTF-16LE text: left to plain detection
-  return probeBare(bytes, false) ?? Result.succeed({ _tag: "Detected", format: plainFormat(bytes) })
+  const bare = probeBare(bytes, false)
+  return bare === undefined ? Effect.succeed({ _tag: "Detected", format: plainFormat(bytes) }) : Effect.fromResult(bare)
 }
 
 /** The format detection reports for a probe. */
@@ -143,6 +270,8 @@ export const formatOf = (probe: Probe): Format => {
       return "xls"
     case "Encrypted":
       return "cfb"
+    case "Package":
+      return probe.kind
     case "Unreadable":
     case "Detected":
       return probe.format
@@ -150,8 +279,8 @@ export const formatOf = (probe: Probe): Format => {
 }
 
 /** The format of `bytes`: `probe`, mapped by `formatOf`. */
-export const detect = (bytes: Uint8Array, limits: Limits): Result.Result<Format, MalformedFile | LimitExceeded> =>
-  Result.map(probe(bytes, limits), formatOf)
+export const detect = (bytes: Uint8Array, limits: Limits): Effect.Effect<Format, SpreadsheetError> =>
+  Effect.map(probe(bytes, limits), formatOf)
 
 /**
  * What the XLS reader reads: the same probe, for a compound file or a bare

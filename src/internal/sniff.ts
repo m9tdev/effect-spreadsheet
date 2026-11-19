@@ -1,16 +1,12 @@
 /**
  * Format detection from content only (magic bytes and structure), for the
- * input probe: magic numbers, a zip's entry names, a bare BIFF BOF record,
- * and what text looks like. File names and extensions are never looked at.
+ * input probe: magic numbers, a bare BIFF BOF record, and what text looks
+ * like. File names and extensions are never looked at.
  *
  * @internal
  */
-import * as Result from "effect/Result"
-import type { LimitExceeded, MalformedFile } from "../SpreadsheetError.ts"
-import type { Limits } from "../SpreadsheetLimits.ts"
 import type { Format } from "../Workbook.ts"
 import { detectEncoding } from "./csv/decode.ts"
-import { normalizeName, readDirectory, storedData, type ZipEntry } from "./zip/directory.ts"
 
 const TEXT_PREFIX_BYTES = 8 * 1024
 
@@ -35,40 +31,9 @@ export const ZIP_MAGICS: ReadonlyArray<ReadonlyArray<number>> = [
 ]
 
 export const CFB_MAGIC: ReadonlyArray<number> = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
-const ODS_MIME = "application/vnd.oasis.opendocument.spreadsheet"
-
-/** What a zip can be. */
-export type ZipFormat = "xlsx" | "xlsb" | "ods" | "zip"
 
 /** What bytes that are neither a container nor a bare BIFF stream can be. */
-export type PlainFormat = Exclude<Format, ZipFormat | "xls" | "cfb">
-
-/** The format of a zip, from its central directory; a broken directory fails. */
-export const detectZip = (bytes: Uint8Array, limits: Limits): Result.Result<ZipFormat, MalformedFile | LimitExceeded> => {
-  const directory = readDirectory(bytes, limits)
-  return Result.isFailure(directory) ? Result.fail(directory.failure) : Result.succeed(zipFormat(bytes, directory.success.entries))
-}
-
-/** What a zip archive holds, from its entry names (and an ODF `mimetype`). */
-const zipFormat = (bytes: Uint8Array, entries: ReadonlyArray<ZipEntry>): ZipFormat => {
-  let xlsxPart = false
-  let xlsbPart = false
-  let mimetype: string | undefined
-  // progress: one entry per iteration, entries bounded by maxZipEntries
-  for (const entry of entries) {
-    const name = normalizeName(entry.name)
-    if (name === "xl/workbook.xml") xlsxPart = true
-    else if (name === "xl/workbook.bin") xlsbPart = true
-    else if (name === "mimetype") {
-      const data = storedData(bytes, entry)
-      if (data !== undefined && data.length < 256) mimetype = new TextDecoder().decode(data).trim()
-    }
-  }
-  if (xlsbPart) return "xlsb"
-  if (xlsxPart) return "xlsx"
-  if (mimetype === ODS_MIME || mimetype === `${ODS_MIME}-template`) return "ods"
-  return "zip"
-}
+export type PlainFormat = Exclude<Format, "xlsx" | "xlsb" | "ods" | "zip" | "xls" | "cfb">
 
 /** BOF "type of the following data": workbook globals, VB module, worksheet, chart, macro sheet, BIFF4 workbook. */
 const BOF_DATA_TYPES = new Set([0x0005, 0x0006, 0x0010, 0x0020, 0x0040, 0x0100])

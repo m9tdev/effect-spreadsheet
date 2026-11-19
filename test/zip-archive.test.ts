@@ -496,6 +496,15 @@ describe("zip archive: hostile input", () => {
     const badName = two.slice()
     badName[30] = "z".charCodeAt(0)
     expect(Result.merge(open(badName, limits))).toMatchObject({ _tag: "MalformedFile", reason: "local header name differs from the directory" })
+    // names compare decoded: a Latin-1 local name ("é" as E9) is not the directory's UTF-8 "é" (C3 A9),
+    // though its bytes are the directory name's character codes
+    const latin1 = await buildZip([{ name: "\u00e9\u00e9", data: new Uint8Array(0), method: "store" }])
+    const lv = new DataView(latin1.buffer)
+    lv.setUint16(26, 2, true) // the local name is 2 bytes; the 2 left over become a gap before the directory
+    latin1.set([0xE9, 0xE9], 30)
+    expect(Result.merge(open(latin1, limits))).toMatchObject({ _tag: "MalformedFile", reason: "local header name differs from the directory" })
+    // and the same names in UTF-8 match
+    expect(Result.isSuccess(open(await buildZip([{ name: "\u00e9\u00e9", data: enc("x") }]), limits))).toBe(true)
     // a directory offset past the end of the data
     const farOffset = two.slice()
     new DataView(farOffset.buffer).setUint32(cd + 46 + 5 + 42, 1_000_000, true)

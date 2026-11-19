@@ -12,7 +12,7 @@ import { MalformedFile, type SpreadsheetError } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
 import type { DefinedName, Format, Row, SheetDetails, Visibility, Workbook } from "../Workbook.ts"
 import { type CellStyles, NO_STYLES } from "./numFmt.ts"
-import { lookup, packageRels, partRels, type Rels } from "./opc.ts"
+import { lookup, type Named, packageRels, partRels, type Rels } from "./opc.ts"
 import { fromSources, type SheetSource } from "./workbook.ts"
 import type { Archive, LocatedEntry } from "./zip/archive.ts"
 
@@ -53,8 +53,6 @@ export interface SheetContext {
 /** A package format's own part readers. */
 export interface PackageFormat<W extends { readonly sheets: ReadonlyArray<SheetEntry>; readonly date1904: boolean }> {
   readonly format: "xlsx" | "xlsb"
-  /** The workbook part when the package relationships name none. */
-  readonly fallbackWorkbook: string
   readonly malformed: (reason: string, part?: string) => MalformedFile
   readonly readWorkbook: (archive: Archive, entry: LocatedEntry, limits: Limits) => Effect.Effect<W, SpreadsheetError>
   readonly readStrings: (archive: Archive, entry: LocatedEntry, limits: Limits) => Effect.Effect<ReadonlyArray<string>, SpreadsheetError>
@@ -87,19 +85,32 @@ type SheetPart =
 const NO_CELLS: SheetSource = { _tag: "NoCells" }
 
 /**
- * Opens the workbook of a package: the workbook part (through the package
- * relationships, else `fallbackWorkbook`), its relationships, the shared
- * strings, styles and defined names, and one source per sheet. A sheet
- * whose part is missing or can't be named still opens; reading it fails.
+ * Where each format keeps its workbook part when the package relationships
+ * name none (or there are none).
+ */
+export const fixedWorkbook = { xlsx: "xl/workbook.xml", xlsb: "xl/workbook.bin" } as const
+
+/**
+ * The workbook part of a package: the target of the package's
+ * `officeDocument` relationship, else `fallback`. It may be missing from the
+ * archive; reading the workbook then fails.
+ */
+export const workbookPart = (archive: Archive, fallback: string, limits: Limits): Effect.Effect<Named, SpreadsheetError> =>
+  Effect.map(packageRels(archive, limits), (rels) => rels.named("officeDocument") ?? lookup(archive, fallback))
+
+/**
+ * Opens the workbook of a package from its workbook part (`workbookPart`):
+ * the part, its relationships, the shared strings, styles and defined
+ * names, and one source per sheet. A sheet whose part is missing or can't
+ * be named still opens; reading it fails.
  */
 export const readPackage = <W extends { readonly sheets: ReadonlyArray<SheetEntry>; readonly date1904: boolean }>(
   archive: Archive,
+  workbookTarget: Named,
   limits: Limits,
   f: PackageFormat<W>
 ): Effect.Effect<Workbook, SpreadsheetError> =>
   Effect.gen(function*() {
-    // the workbook part, through the package relationships
-    const workbookTarget = (yield* packageRels(archive, limits)).named("officeDocument") ?? lookup(archive, f.fallbackWorkbook)
     if (workbookTarget._tag === "Missing") return yield* f.malformed(`workbook part ${workbookTarget.name} is missing`)
     const workbookEntry = workbookTarget.entry
     const workbook = yield* f.readWorkbook(archive, workbookEntry, limits)

@@ -30,7 +30,6 @@ const EOCD = 0x06054b50
 const ZIP64_LOCATOR = 0x07064b50
 const ZIP64_EOCD = 0x06064b50
 const CENTRAL = 0x02014b50
-const LOCAL = 0x04034b50
 
 const malformed = (reason: string, offset?: number) =>
   new MalformedFile(offset === undefined ? { format: "zip", reason } : { format: "zip", reason, offset })
@@ -172,20 +171,4 @@ const findExtra = (
     p = dataEnd
   }
   return undefined
-}
-
-/**
- * The stored (uncompressed) data of an entry, or undefined if it isn't
- * stored or is out of bounds. Used to read an ODF `mimetype`.
- */
-export const storedData = (bytes: Uint8Array, entry: ZipEntry): Uint8Array | undefined => {
-  if (entry.method !== 0) return undefined
-  const at = entry.localOffset
-  if (at + 30 > bytes.length) return undefined
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  if (view.getUint32(at, true) !== LOCAL) return undefined
-  const dataStart = at + 30 + view.getUint16(at + 26, true) + view.getUint16(at + 28, true)
-  const dataEnd = dataStart + entry.compressedSize
-  if (dataEnd > bytes.length) return undefined
-  return bytes.subarray(dataStart, dataEnd)
 }
