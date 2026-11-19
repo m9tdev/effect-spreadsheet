@@ -151,9 +151,10 @@ export class RecordReader {
 
 /**
  * A record of a substream embedded in the one being read (see
- * `SubstreamReader`), skipped. The first of them (`opens`), its BOF, is the
- * one marker a walker acts on; the others come one per call only so that
- * each call reads one record, as `RecordReader.next` does.
+ * `SubstreamReader`), skipped: the walkers treat every one alike. The first
+ * of them (`opens`) is the embedded substream's BOF; the others come one
+ * per call only so that each call reads one record, as `RecordReader.next`
+ * does.
  */
 export class Embedded {
   /** Offset of the record header in the stream. */
