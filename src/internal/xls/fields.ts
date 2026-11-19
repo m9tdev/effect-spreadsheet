@@ -5,7 +5,7 @@
  * @internal
  */
 import { compressed, utf16 } from "../biff/cursor.ts"
-import { ok, type StringRead, tooLongString, TRUNCATED } from "../binary/layout.ts"
+import { ok, type StringFailure, type StringRead, tooLongString, TRUNCATED } from "../binary/layout.ts"
 
 /**
  * Text decoding for the workbook's code page (CODEPAGE record). BIFF5
@@ -66,17 +66,26 @@ const u32At = (data: Uint8Array, at: number): number => (u16At(data, at) | (u16A
 /** The characters of a BIFF8 string, 16-bit when `wide`, else 8-bit (UTF-16 low bytes). */
 const chars8 = (bytes: Uint8Array, wide: boolean): string => (wide ? utf16.decode(bytes) : compressed(bytes))
 
+/** Where the string `measure` checked lies: its characters (`chars` to `charsEnd`, 16-bit when `wide`) and its end. */
+interface Extent {
+  chars: number
+  charsEnd: number
+  end: number
+  wide: boolean
+}
+
+/** The last string `measure` checked: one shared scratch, read right after the call. */
+const extent: Extent = { chars: 0, charsEnd: 0, end: 0, wide: false }
+
 /**
- * A BIFF8 XLUnicodeString (u16 count, flags, optional run count and
- * phonetic block size, characters, then the run and phonetic data) or
- * ShortXLUnicodeString (u8 count, flags, characters), or a BIFF5 string (u16
- * or u8 count, code-page bytes) at `at`, within one record's data. Returns
- * the text and the offset after it; `Truncated` if it runs past the data,
- * `TooLong` with its character count if that is over the limit. Each check
- * comes in the order the fields are read: a count over the limit is found
- * before the characters, and a cut header before the count is looked at.
+ * Checks the string at `at` (see `readString`) without decoding it, and
+ * puts where it lies in `extent`: `Truncated` if it runs past the data,
+ * `TooLong` with its character count if that is over the limit, else
+ * undefined. Each check comes in the order the fields are read: a count
+ * over the limit is found before the characters, and a cut header before
+ * the count is looked at.
  */
-export const readString = (data: Uint8Array, at: number, text: Text, countBytes: 1 | 2): StringRead => {
+const measure = (data: Uint8Array, at: number, text: Text, countBytes: 1 | 2): StringFailure | undefined => {
   if (at > data.length) return TRUNCATED
   const left = data.length - at
   if (text.biff8) {
@@ -96,7 +105,11 @@ export const readString = (data: Uint8Array, at: number, text: Text, countBytes:
       const charsEnd = at + header + count * (wide ? 2 : 1)
       const end = charsEnd + runs * 4 + extSize
       if (end > data.length) return TRUNCATED
-      return ok(chars8(data.subarray(at + header, charsEnd), wide), end)
+      extent.chars = at + header
+      extent.charsEnd = charsEnd
+      extent.end = end
+      extent.wide = wide
+      return undefined
     }
     // ShortXLUnicodeString: u8 count, flags, characters
     if (left < 2) return TRUNCATED
@@ -105,12 +118,40 @@ export const readString = (data: Uint8Array, at: number, text: Text, countBytes:
     const wide = (u8At(data, at + 1) & 0x01) !== 0
     const end = at + 2 + count * (wide ? 2 : 1)
     if (end > data.length) return TRUNCATED
-    return ok(chars8(data.subarray(at + 2, end), wide), end)
+    extent.chars = at + 2
+    extent.charsEnd = end
+    extent.end = end
+    extent.wide = wide
+    return undefined
   }
   if (left < countBytes) return TRUNCATED
   const count = countBytes === 1 ? u8At(data, at) : u16At(data, at)
   if (count > text.maxLength) return tooLongString(count)
   const end = at + countBytes + count
   if (end > data.length) return TRUNCATED
-  return ok(text.decoder.decode(data.subarray(at + countBytes, end)), end)
+  extent.chars = at + countBytes
+  extent.charsEnd = end
+  extent.end = end
+  extent.wide = false
+  return undefined
 }
+
+/**
+ * A BIFF8 XLUnicodeString (u16 count, flags, optional run count and
+ * phonetic block size, characters, then the run and phonetic data) or
+ * ShortXLUnicodeString (u8 count, flags, characters), or a BIFF5 string (u16
+ * or u8 count, code-page bytes) at `at`, within one record's data. Returns
+ * the text and the offset after it; `Truncated` if it runs past the data,
+ * `TooLong` with its character count if that is over the limit (see
+ * `measure`, which checks it first).
+ */
+export const readString = (data: Uint8Array, at: number, text: Text, countBytes: 1 | 2): StringRead => {
+  const failed = measure(data, at, text, countBytes)
+  if (failed !== undefined) return failed
+  const chars = data.subarray(extent.chars, extent.charsEnd)
+  return ok(text.biff8 ? chars8(chars, extent.wide) : text.decoder.decode(chars), extent.end)
+}
+
+/** How `readString` would fail on the string at `at`, found without decoding it; undefined if it would read. */
+export const stringFailure = (data: Uint8Array, at: number, text: Text, countBytes: 1 | 2): StringFailure | undefined =>
+  measure(data, at, text, countBytes)
