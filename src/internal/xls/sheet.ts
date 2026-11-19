@@ -670,10 +670,12 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
         // the cells fill the record between colFirst and colLast (checked by
         // the index pass): cell k's ixfe at 4 + width * k (and its rk after
         // it) ends by data.length - 2. progress: k up to count
+        let sorted = 0
         for (let k = 0; k < count; k++) {
-          const xf = f.u16(4 + width * k)
-          add(mulrk ? xfNumber(globals, first + k, xf, decodeRk(f.u32(6 + width * k))) : Cell.empty(first + k))
+          const cell = mulrk ? xfNumber(globals, first + k, f.u16(4 + width * k), decodeRk(f.u32(6 + width * k))) : Cell.empty(first + k)
+          sorted += row.add(cell, maxColumns)
         }
+        work += count + sorted
         return undefined
       }
       case BOOLERR: {

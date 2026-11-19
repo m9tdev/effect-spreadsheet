@@ -423,6 +423,12 @@ describe("xls sheet: rows whose cells come in several places", () => {
     const rows = await rowsDisplaced(one(records), 2)
     expect(rows.map((r) => [r.index, r.cells.length])).toEqual([[0, 2], ...Array.from({ length: 20 }, (_, r) => [r + 1, 100])])
     expect(values(rows.slice(0, 1))).toEqual([[0, false, [[0, "Number", 7], [1, "Empty", undefined]]]])
+    // records out of place in the same column: the later one wins
+    const twice = [X.blank(0, 0, 0), X.number(1, 0, 0, 0), X.number(0, 1, 0, 1), X.number(1, 1, 0, 0), X.number(0, 1, 0, 2)]
+    expect(values(await rowsDisplaced(one(twice), 3))).toEqual([
+      [0, false, [[0, "Empty", undefined], [1, "Number", 2]]],
+      [1, false, [[0, "Number", 0], [1, "Number", 0]]]
+    ])
     // a cap of 1: the second record out of place fails, where it is
     const book = one(records)
     expect(failureOf(await rowsDisplacing(book, 1))).toMatchObject({
@@ -493,6 +499,12 @@ describe("xls sheet: emitting rows", () => {
     expect(await rowsUntilFailure(waiting)).toEqual({ rows: [0], failure: expect.objectContaining({ reason: "truncated record 0x201" }) })
     const pending = one([X.number(0, 0, 0, 1), X.formula(1, 0, 0, { kind: 0 }), companion(SHRFMLA), X.record(STRING, [...X.u16(9), 0, 0x41])])
     expect(await rowsUntilFailure(pending)).toEqual({ rows: [0], failure: expect.objectContaining({ reason: "truncated record 0x207" }) })
+    // still waiting when the records stop: neither is that row
+    const stopped = X.workbookStream(one([X.number(0, 0, 0, 1), X.formula(1, 0, 0, { kind: 0 }), companion(SHRFMLA), X.number(2, 0, 0, 1)]))
+    const wb = await Effect.runPromise(Xls.read(writeCfb([{ name: "Workbook", data: stopped.subarray(0, stopped.length - 10) }]).bytes))
+    const seen: Array<number> = []
+    const exit = await Effect.runPromise(Effect.exit(Stream.runForEach(Workbook.rows(wb, 0), (row) => Effect.sync(() => void seen.push(row.index)))))
+    expect([seen, failureOf(exit)]).toEqual([[0], expect.objectContaining({ reason: "record 0x203 runs past the end of the stream" })])
     // the maxRows failure of a row comes once the rows before it are out, if no failure in stream order came first
     expect(await rowsUntilFailure(one([X.number(5, 0, 0, 1), X.number(0, 0, 0, 1), X.number(1, 0, 0, 1)]), { maxRows: 2 }))
       .toEqual({ rows: [0, 1], failure: expect.objectContaining({ limit: "maxRows", actual: 6 }) })
@@ -506,6 +518,12 @@ describe("xls sheet: emitting rows", () => {
     const cut = X.record(0x0203, [...X.u16(0), ...X.u16(1)])
     expect(await rowsUntilFailure(one([X.number(0, 0, 0, 1), long, cut]), { maxStringLength: 10 }))
       .toEqual({ rows: [], failure: expect.objectContaining({ limit: "maxStringLength", actual: 17 }) })
+    // so is row 5's missing shared string, and row 5's formula result cut short
+    expect(await rowsUntilFailure(one([X.number(0, 0, 0, 1), X.labelSst(5, 0, 0, 3), cut])))
+      .toEqual({ rows: [], failure: expect.objectContaining({ reason: "shared string 3 doesn't exist" }) })
+    const shortString = X.record(STRING, [...X.u16(9), 0, 0x41])
+    expect(await rowsUntilFailure(one([X.number(0, 0, 0, 1), X.formula(5, 0, 0, { kind: 0 }), shortString, cut])))
+      .toEqual({ rows: [], failure: expect.objectContaining({ reason: "truncated record 0x207" }) })
     // row 1's three cells pass maxCellsPerSheet before row 0's cell in column 10 passes maxColumns
     const cells = [X.number(1, 0, 0, 1), X.number(1, 1, 0, 1), X.number(1, 2, 0, 1), X.number(0, 10, 0, 1)]
     expect(await rowsUntilFailure(one(cells), { maxCellsPerSheet: 2, maxColumns: 5 }))
