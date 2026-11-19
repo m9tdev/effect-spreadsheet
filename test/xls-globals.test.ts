@@ -1,6 +1,6 @@
 /** XLS workbook globals: defined-name text (SUPBOOK/EXTERNSHEET), BOF versions, sheet visibility, SST, text decoding, containers. */
 import { readFileSync } from "node:fs"
-import { Effect, Exit, Stream } from "effect"
+import { Effect, Exit, Fiber, Stream } from "effect"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { readString, type Text, textDecoder } from "../src/internal/xls/fields.ts"
@@ -487,6 +487,8 @@ describe("xls globals: long work yields", () => {
     const run = await turns(Array.from({ length: records }, () => X.xf(14)))
     expect(run.value.sheets).toHaveLength(1)
     expect(run.batches).toBeGreaterThanOrEqual(records / BATCH_RECORDS)
+    // and not far fewer records per batch: an XF's 24 bytes add under a tenth to its cost
+    expect(run.batches).toBeLessThanOrEqual(1.2 * (records / BATCH_RECORDS) + 1)
     expect(run.yields).toBeGreaterThanOrEqual(records / BATCH_RECORDS / 2)
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
   })
@@ -531,6 +533,34 @@ describe("xls globals: long work yields", () => {
     const run = await turns([sstHead(0), ...Array.from({ length: records }, () => X.record(CONTINUE, []))])
     expect(run.batches).toBeGreaterThanOrEqual(records / BATCH_RECORDS)
     expect(run.yields).toBeGreaterThanOrEqual(records / BATCH_RECORDS / 2)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+
+  it("a record's CONTINUEs count by their bytes too, even where the record doesn't read them", async () => {
+    // each block: a NAME with more than BATCH_BYTES of CONTINUEs (which end the batch), then half a batch of XFs
+    const blocks = 8
+    const continues = Math.ceil(BATCH_BYTES / 8000) + 1
+    const block = [
+      X.name("N", X.ref3d(0, 0, 0)),
+      ...Array.from({ length: continues }, () => X.record(CONTINUE, new Array(8000).fill(0))),
+      ...Array.from({ length: BATCH_RECORDS / 2 }, () => X.xf(14))
+    ]
+    const run = await turns(Array.from({ length: blocks }, () => block).flat())
+    expect(run.batches).toBeGreaterThanOrEqual(blocks)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+
+  it("a run of CONTINUEs takes only what is left of a batch: small records and CONTINUEs share it", async () => {
+    // each block: half a batch of XFs, then a whole batch of empty CONTINUEs (after an SST of no strings)
+    const blocks = 8
+    const block = [
+      ...Array.from({ length: BATCH_RECORDS / 2 }, () => X.xf(14)),
+      sstHead(0),
+      ...Array.from({ length: BATCH_RECORDS }, () => X.record(CONTINUE, []))
+    ]
+    const run = await turns(Array.from({ length: blocks }, () => block).flat())
+    // one and a half batches of records per block
+    expect(run.batches).toBeGreaterThanOrEqual(1.5 * blocks)
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
   })
 
@@ -584,13 +614,41 @@ describe("xls globals: long work yields", () => {
     expect(formulas(run.value)).toEqual({ Far: "[1]There!$A$1", Near: "S!$A$1" })
   })
 
+  it("a long walk can be interrupted between batches, and reads nothing after it", async () => {
+    const records = 32 * BATCH_RECORDS
+    const bytes = X.workbookStream({ globals: Array.from({ length: records }, () => X.xf(14)), sheets: [{ name: "S", records: [] }] })
+    const batches = counter("batches")
+    const exit = await Effect.runPromise(Effect.gen(function*() {
+      const fiber = yield* Effect.forkChild(metered(batches, Xls.read(bytes)))
+      // progress: i up to 4; the walk runs about one batch per turn meanwhile
+      for (let i = 0; i < 4; i++) yield* Effect.promise(() => new Promise((resolve) => setImmediate(resolve)))
+      return yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
+    }))
+    expect(Exit.hasInterrupts(exit)).toBe(true)
+    const at = batches.total()
+    expect(at).toBeGreaterThanOrEqual(2)
+    expect(at).toBeLessThan(records / BATCH_RECORDS)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(batches.total()).toBe(at)
+  })
+
   it("many defined names are read and resolved with yields", async () => {
     const records = 8 * BATCH_RECORDS
     const run = await turns([X.externSheet([0]), ...Array.from({ length: records }, (_, k) => X.name(`N${k}`, X.ref3d(0, k % 65536, 0)))])
     expect(run.value.definedNames).toHaveLength(records)
     expect(run.value.definedNames[5]).toEqual({ name: "N5", formula: "S!$A$6", hidden: false })
+    // a batch reads BATCH_RECORDS NAMEs, and another one resolves their formulas
+    expect(run.batches).toBeGreaterThanOrEqual(2 * (records / BATCH_RECORDS))
     expect(run.yields).toBeGreaterThanOrEqual(records / BATCH_RECORDS)
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+})
+
+describe("xls globals: shared strings", () => {
+  it("of two SST records, the last one wins (the first one's strings are dropped)", async () => {
+    const stream = X.workbookStream({ globals: [X.sst(["a", "b"]), X.sst(["c"])], sheets: [{ name: "S", records: [] }] })
+    const globals = await Effect.runPromise(readGlobals(stream, SpreadsheetLimits.defaults))
+    expect(globals.strings).toEqual(["c"])
   })
 })
 
