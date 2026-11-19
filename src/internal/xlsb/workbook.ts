@@ -19,11 +19,12 @@ import type { DefinedName } from "../../Workbook.ts"
 import { readNullableWideString, readWideString } from "../biff12/fields.ts"
 import { type Biff12Record, type Handled, readRecords } from "../biff12/records.ts"
 import { type Fixed, FixedReader, type StringFailure } from "../binary/layout.ts"
+import { readers } from "../opc.ts"
 import { malformedIn, type SheetEntry, sheetVisibility } from "../package.ts"
 import { areaText, BIFF12_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import { toDefinedNames } from "../workbook.ts"
-import type { Archive, LocatedEntry } from "../zip/archive.ts"
+import type { Archive, LocatedEntry, ReaderKey } from "../zip/archive.ts"
 
 export const malformed = malformedIn("xlsb")
 
@@ -279,7 +280,7 @@ export const readWorkbookBin = (
           return undefined
       }
     }
-    return readRecords(archive.read(entry), handle, limits, part).pipe(
+    return readRecords(archive.read(entry, readers.open), handle, limits, part).pipe(
       Effect.filterOrFail((records) => records > 0, () => malformed("empty workbook part", part)),
       Effect.map((): WorkbookBin => {
         const unique = uniqueSheetNames(sheets.map((s) => s.name))
@@ -297,11 +298,13 @@ export const readWorkbookBin = (
 
 /**
  * The sheet names of an external link part (its BrtSupTabs record), at
- * most `maxSheets`. The part is read up to that record only.
+ * most `maxSheets`, read by `by`. The part is read up to that record
+ * only.
  */
 export const readExternalSheets = (
   archive: Archive,
   entry: LocatedEntry,
+  by: ReaderKey,
   limits: Limits
 ): Effect.Effect<ReadonlyArray<string>, SpreadsheetError> =>
   Effect.suspend(() => {
@@ -326,15 +329,16 @@ export const readExternalSheets = (
       // the sheet list is all this part is read for
       return "stop"
     }
-    return Effect.as(readRecords(archive.read(entry), handle, limits, entry.name), names)
+    return Effect.as(readRecords(archive.read(entry, by), handle, limits, entry.name), names)
   })
 
 /**
  * The sheet names of the external books that defined names point into, by
- * book index. Each external link part is read once, however many books
- * point at it (the inflate budget counts a part once, so reading it per
- * book would be free work); a book whose part is missing gets none, so its
- * references are `#REF!`.
+ * book index. Each book reads its link part as its own reader, so books
+ * that share a part would each be charged for it; the part is read once
+ * all the same, for the first of them, and its names reused for the
+ * others. A book whose part is missing gets none, so its references are
+ * `#REF!`.
  */
 export const readExternalBooks = (
   archive: Archive,
@@ -355,7 +359,7 @@ export const readExternalBooks = (
       if (linkEntry === undefined) continue
       let names = byPart.get(linkEntry)
       if (names === undefined) {
-        names = yield* readExternalSheets(archive, linkEntry, limits)
+        names = yield* readExternalSheets(archive, linkEntry, readers.book(xti.book), limits)
         byPart.set(linkEntry, names)
       }
       out.set(xti.book, names)

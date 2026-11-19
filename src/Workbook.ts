@@ -178,8 +178,10 @@ export interface RowsOptions {
    * overrides). The context at streaming time doesn't matter. Zip inflate
    * limits (`maxDecompressedBytes`, `maxInflateRatio`, `inflateFloorBytes`)
    * set this call's budget against the archive-wide total; bytes of the
-   * sheet already inflated by an earlier read aren't counted again, so a
-   * lower limit doesn't stop a re-read of them.
+   * sheet already inflated by an earlier read of that sheet (its rows or
+   * details) aren't counted again, so a lower limit doesn't stop a re-read
+   * of them. Each sheet counts for itself: two sheets that point at the same
+   * part each pay for what they read of it.
    */
   readonly limits?: LimitOverrides | undefined
 }

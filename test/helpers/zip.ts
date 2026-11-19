@@ -182,6 +182,6 @@ export const buildZip = async (entries: ReadonlyArray<BuildEntry>): Promise<Uint
   return concat([...locals, ...centrals, eocd])
 }
 
-/** A whole entry of an opened archive, read with the archive's limits. */
-export const readAll = (archive: Archive, entry: LocatedEntry): Effect.Effect<Uint8Array, SpreadsheetError> =>
-  Effect.map(Stream.runCollect(archive.read(entry)), (chunks) => concat(Array.from(chunks)))
+/** A whole entry of an opened archive, read with the archive's limits, by `reader` (one reader unless given). */
+export const readAll = (archive: Archive, entry: LocatedEntry, reader = "test"): Effect.Effect<Uint8Array, SpreadsheetError> =>
+  Effect.map(Stream.runCollect(archive.read(entry, reader)), (chunks) => concat(Array.from(chunks)))

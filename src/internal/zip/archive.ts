@@ -9,12 +9,15 @@
  * - Inflated bytes count against the entry's declared size and against one
  *   budget for the whole archive, `inflateBudget`: max(`inflateFloorBytes`,
  *   `maxInflateRatio` × archive size), capped at `maxDecompressedBytes`.
- *   Reading an entry again doesn't spend the budget again (each entry
- *   counts up to the most it has inflated), so a sheet can be streamed
- *   twice, even after another entry went over the budget; many entries,
- *   however small each one is, can't add up past it. A read may be given
- *   other limits than the archive's: its budget comes from them, checked
- *   against the same archive-wide total.
+ *   Each read names its reader (a sheet, the open-time reads, ...): an
+ *   entry counts, per reader, up to the most that reader has inflated of
+ *   it. So a reader reading an entry again doesn't spend the budget again
+ *   (a sheet can be streamed twice, even after another entry went over
+ *   the budget), while two readers pointed at one entry each pay for what
+ *   they read: aliasing an entry costs what it reads, never nothing. Many
+ *   entries, however small each one is, can't add up past the budget. A
+ *   read may be given other limits than the archive's: its budget comes
+ *   from them, checked against the same archive-wide total.
  *   The CRC-32 is checked at the end. Decompression only runs as far as
  *   the stream is read.
  * - A read emits one slice of at most `SLICE_BYTES` per pull, after a
@@ -68,16 +71,25 @@ export interface LocatedEntry extends ZipEntry {
   readonly kind: EntryKind
 }
 
+/**
+ * Who reads an entry, for the inflate budget: re-reads under one key are
+ * free up to what that key has already inflated of the entry; reads under
+ * different keys are charged separately. One key per sheet (`sheet:3`),
+ * one for the reads made while a workbook opens (`open`), and so on.
+ */
+export type ReaderKey = string
+
 export interface Archive {
   readonly entries: ReadonlyArray<LocatedEntry>
   /** The entry with this name (case-insensitive, a leading `/` ignored), if any. */
   readonly find: (name: string) => LocatedEntry | undefined
   /**
    * The entry's uncompressed bytes, one slice of at most `SLICE_BYTES`
-   * per pull, each after a yield. Re-runnable. `limits`
-   * (default: the archive's) set this read's inflate budget.
+   * per pull, each after a yield. Re-runnable. `reader` is who reads it
+   * (see `ReaderKey`); `limits` (default: the archive's) set this read's
+   * inflate budget.
    */
-  readonly read: (entry: LocatedEntry, limits?: Limits) => Stream.Stream<Uint8Array, SpreadsheetError>
+  readonly read: (entry: LocatedEntry, reader: ReaderKey, limits?: Limits) => Stream.Stream<Uint8Array, SpreadsheetError>
 }
 
 const malformed = (reason: string, part?: string, offset?: number) =>
@@ -224,23 +236,39 @@ const archive = (
   entries: ReadonlyArray<LocatedEntry>,
   byName: ReadonlyMap<string, LocatedEntry>
 ): Archive => {
-  /** Bytes counted against the budget: per entry, the most it has inflated so far. */
+  /** Bytes counted against the budget: per reader and entry, the most that reader has inflated of it so far. */
   let charged = 0
-  const highWater = new Map<LocatedEntry, number>()
+  /** Per reader key, each entry's high-water mark. */
+  const highWater = new Map<ReaderKey, Map<LocatedEntry, number>>()
+  /** The high-water marks of `reader`'s entries. */
+  const marksOf = (reader: ReaderKey): Map<LocatedEntry, number> => {
+    let marks = highWater.get(reader)
+    if (marks === undefined) {
+      marks = new Map()
+      highWater.set(reader, marks)
+    }
+    return marks
+  }
 
   /**
    * Counts output bytes of `entry` (`soFar` of them so far) under
-   * `limits`; an error if a limit is crossed. Only bytes past the entry's
-   * high-water mark are charged, so re-reads of what was already inflated
-   * pass. A chunk that would take the total over the budget is rejected
-   * without being charged or raising the high-water mark, so a re-read
-   * fails at the same point again.
+   * `limits`, for the reader whose marks are `marks`; an error if a limit
+   * is crossed. Only bytes past that reader's high-water mark on the entry
+   * are charged, so its re-reads of what it already inflated pass. A
+   * chunk that would take the total over the budget is rejected without
+   * being charged or raising the high-water mark, so a re-read fails at
+   * the same point again.
    */
-  const account = (entry: LocatedEntry, soFar: number, limits: Limits): SpreadsheetError | undefined => {
+  const account = (
+    entry: LocatedEntry,
+    marks: Map<LocatedEntry, number>,
+    soFar: number,
+    limits: Limits
+  ): SpreadsheetError | undefined => {
     if (soFar > entry.uncompressedSize) {
       return malformed(`entry inflates past its declared size of ${entry.uncompressedSize} bytes`, entry.name)
     }
-    const before = highWater.get(entry) ?? 0
+    const before = marks.get(entry) ?? 0
     if (soFar <= before) return undefined
     const total = charged + (soFar - before)
     const budget = inflateBudget(bytes.length, limits)
@@ -250,7 +278,7 @@ const archive = (
         : new LimitExceeded({ limit: "maxDecompressedBytes", max: limits.maxDecompressedBytes, actual: total })
     }
     charged = total
-    highWater.set(entry, soFar)
+    marks.set(entry, soFar)
     return undefined
   }
 
@@ -262,7 +290,7 @@ const archive = (
     return undefined
   }
 
-  const read = (entry: LocatedEntry, readLimits: Limits = limits): Stream.Stream<Uint8Array, SpreadsheetError> => {
+  const read = (entry: LocatedEntry, reader: ReaderKey, readLimits: Limits = limits): Stream.Stream<Uint8Array, SpreadsheetError> => {
     const kind = entry.kind
     if (typeof kind === "object") {
       return Stream.fail(new UnsupportedFormat({ format: "zip", reason: `compression method ${kind.unsupported} in ${entry.name}` }))
@@ -274,7 +302,7 @@ const archive = (
         return Stream.fail(malformed("stored entry with different compressed and uncompressed sizes", entry.name))
       case "stored":
       case "deflate":
-        return readData(entry, kind, readLimits)
+        return readData(entry, kind, reader, readLimits)
       default:
         return absurd(kind)
     }
@@ -284,9 +312,11 @@ const archive = (
   const readData = (
     entry: LocatedEntry,
     kind: "stored" | "deflate",
+    reader: ReaderKey,
     readLimits: Limits
   ): Stream.Stream<Uint8Array, SpreadsheetError> => {
     const data = bytes.subarray(entry.data.start, entry.data.end)
+    const marks = marksOf(reader)
     return Stream.fromChannel(Channel.fromTransform((_, scope: Scope.Scope) =>
       Effect.gen(function*() {
         let size = 0
@@ -336,7 +366,7 @@ const archive = (
             if (chunk.length === 0) continue // the decompressor advanced its input
             size += chunk.length
             meter.add("bytes", chunk.length)
-            const error = account(entry, size, readLimits)
+            const error = account(entry, marks, size, readLimits)
             if (error !== undefined) {
               done = true
               inflater?.cancel()

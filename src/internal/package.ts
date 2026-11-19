@@ -12,7 +12,7 @@ import { MalformedFile, type SpreadsheetError } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
 import type { DefinedName, Row, SheetDetails, Visibility, Workbook } from "../Workbook.ts"
 import { type CellStyles, NO_STYLES } from "./numFmt.ts"
-import { lookup, type Named, packageRels, partRels, type Rels } from "./opc.ts"
+import { lookup, type Named, packageRels, partRels, readers, type Rels } from "./opc.ts"
 import { fromSources, type SheetSource } from "./workbook.ts"
 import type { Archive, LocatedEntry } from "./zip/archive.ts"
 
@@ -128,31 +128,15 @@ export const readPackage = <W extends { readonly sheets: ReadonlyArray<SheetEntr
     }
     const sheets = workbook.sheets.map((sheet) => ({ sheet, part: sheetPart(sheet) }))
 
-    // Two sheets may not read the same worksheet part: the inflate budget
-    // counts each part once, so N sheets on one part would inflate it N
-    // times for free. Excel never writes this.
-    const owners = new Map<LocatedEntry | string, string>()
-    // progress: one sheet per iteration (bounded by maxSheets)
-    for (const { sheet, part } of sheets) {
-      if (part._tag !== "Part" && part._tag !== "Missing") continue
-      const name = sheet.name
-      // a present part is its entry; missing ones compare by name, case-insensitively
-      const key = part._tag === "Part" ? part.entry : part.name.toLowerCase()
-      const owner = owners.get(key)
-      if (owner !== undefined) {
-        const shared = part._tag === "Part" ? part.entry.name : part.name
-        return yield* f.malformed(`sheets ${JSON.stringify(owner)} and ${JSON.stringify(name)} share part ${shared}`, workbookEntry.name)
-      }
-      owners.set(key, name)
-    }
-
     const stringsEntry = rels.part("sharedStrings")
     const stylesEntry = rels.part("styles")
     const strings = stringsEntry === undefined ? undefined : yield* f.readStrings(archive, stringsEntry, limits)
     const styles: CellStyles = stylesEntry === undefined ? NO_STYLES : yield* f.readStyles(archive, stylesEntry, limits)
     const definedNames = yield* f.definedNames(workbook, rels, archive, limits)
 
-    const sourceOf = (part: SheetPart): SheetSource => {
+    // Each sheet reads its part as its own reader: reading it again is free,
+    // and sheets that share a part (Excel never writes this) each pay for it.
+    const sourceOf = (part: SheetPart, index: number): SheetSource => {
       switch (part._tag) {
         case "NoCells":
         case "Broken":
@@ -161,17 +145,18 @@ export const readPackage = <W extends { readonly sheets: ReadonlyArray<SheetEntr
           return { _tag: "Broken", error: f.malformed(`sheet part ${part.name} is missing`, workbookEntry.name) }
         case "Part": {
           const entry = part.entry
+          const reader = readers.sheet(index)
           return {
             _tag: "Cells",
             rows: (effective) =>
-              f.rows(archive.read(entry, effective), {
+              f.rows(archive.read(entry, reader, effective), {
                 part: entry.name,
                 strings,
                 styles,
                 date1904: workbook.date1904,
                 limits: effective
               }),
-            details: (effective) => f.details(archive.read(entry, effective), entry.name, effective)
+            details: (effective) => f.details(archive.read(entry, reader, effective), entry.name, effective)
           }
         }
       }
@@ -179,7 +164,7 @@ export const readPackage = <W extends { readonly sheets: ReadonlyArray<SheetEntr
 
     return fromSources({
       format: f.format,
-      sheets: sheets.map(({ sheet, part }) => ({ name: sheet.name, visibility: sheet.visibility, source: sourceOf(part) })),
+      sheets: sheets.map(({ sheet, part }, index) => ({ name: sheet.name, visibility: sheet.visibility, source: sourceOf(part, index) })),
       definedNames,
       limits
     })

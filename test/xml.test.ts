@@ -617,7 +617,7 @@ describe("xml bytes", () => {
         for (const entry of archive.entries.filter((e) => /\.(xml|rels)$/.test(e.name))) {
           const handler: XmlHandler = { open: () => undefined, close: () => undefined, text: () => undefined }
           const characters = counter("characters")
-          const exit = await Effect.runPromise(Effect.exit(metered(characters, parse(archive.read(entry), handler, limits, entry.name))))
+          const exit = await Effect.runPromise(Effect.exit(metered(characters, parse(archive.read(entry, "test"), handler, limits, entry.name))))
           expect(Exit.isSuccess(exit), `${name}: ${entry.name}: ${JSON.stringify(failureOf(exit))}`).toBe(true)
           expect(characters.total()).toBeLessThanOrEqual(6 * entry.uncompressedSize + 64)
           parts++

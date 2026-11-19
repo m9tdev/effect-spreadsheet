@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect"
+import { Effect, Exit, Stream } from "effect"
 import * as Result from "effect/Result"
 import { describe, expect, it } from "vitest"
 import { packageRels, partRels, resolveName } from "../src/internal/opc.ts"
@@ -190,20 +190,20 @@ describe.each(["xlsx", "xlsb"] as const)("%s: relationship targets of sheets", (
       .toMatchObject({ _tag: "Success", value: [[1]] })
   })
 
-  it("sheets may not share a part, present or missing", async () => {
+  it("sheets that share a part each read it, present or missing", async () => {
     const twoSheets = [{ name: "A", relationshipId: "a" }, { name: "B", relationshipId: "b" }]
     const present: ReadonlyArray<TestRel> = [
       { id: "a", kind: "worksheet", target: `worksheets/sheet1.${ext}` },
       { id: "b", kind: "worksheet", target: `/XL/worksheets/SHEET1.${ext}` }
     ]
     const shared = await readAll(format, { sheets: twoSheets, workbookPath, packageRels: office, workbookRels: present, parts: [sheetPart] })
-    expect(failureOf(shared)).toMatchObject({ reason: `sheets "A" and "B" share part xl/worksheets/sheet1.${ext}` })
+    expect(shared).toMatchObject({ _tag: "Success", value: [[1], [1]] })
     const missing: ReadonlyArray<TestRel> = [
       { id: "a", kind: "worksheet", target: "worksheets/gone.bin" },
       { id: "b", kind: "worksheet", target: "WORKSHEETS/GONE.BIN" }
     ]
     const sharedMissing = await readAll(format, { sheets: twoSheets, workbookPath, packageRels: office, workbookRels: missing })
-    expect(failureOf(sharedMissing)).toMatchObject({ reason: `sheets "A" and "B" share part xl/WORKSHEETS/GONE.BIN` })
+    expect(sharedMissing).toMatchObject({ _tag: "Success", value: ["sheet part xl/worksheets/gone.bin is missing", "sheet part xl/WORKSHEETS/GONE.BIN is missing"] })
     // external and invalid targets own nothing
     const bad: ReadonlyArray<TestRel> = [
       { id: "a", kind: "worksheet", target: "same", external: true },
@@ -244,6 +244,27 @@ describe("xlsb: external books by relationship target", () => {
     })
     const wb = await Effect.runPromise(Xlsb.read(bytes))
     expect(wb.definedNames.map((n) => n.formula)).toEqual(["[1]Rates!$A$1", "#REF!$A$1", "#REF!$A$1", "#REF!$A$1", "[5]Rates!$A$1"])
+  })
+
+  it("an external book reads its link part as its own reader: a part the open already read is charged again", async () => {
+    const B = await import("./helpers/xlsb.ts")
+    // the book's link part is the workbook part itself, padded with 100 KB of a record no reader keeps
+    const padding = 100_000
+    const globals = [B.supSelf(), B.supBookSrc("x1"), B.externSheet([[1, 0, 0]]), B.name("N", B.ref3d(0, 0, 0)), B.record(0x16B, new Uint8Array(padding))]
+    const book = await xlsbPackage({
+      sheets: [{ name: "S", relationshipId: "a" }],
+      workbookPath: "xl/workbook.bin",
+      packageRels: [{ id: "r", kind: "officeDocument", target: "xl/workbook.bin" }],
+      workbookRels: [{ id: "a", kind: "worksheet", target: "worksheets/sheet1.bin" }, { id: "x1", kind: "externalLink", target: "workbook.bin" }],
+      parts: [{ name: "xl/worksheets/sheet1.bin", data: worksheet("xlsb", 1) }],
+      globals
+    })
+    const read = (max: number) => Effect.runPromiseExit(Xlsb.read(book, { limits: { maxDecompressedBytes: max } }))
+    // room for the workbook part twice: it opens, and the name finds no sheet list there
+    const twice = await read(2.5 * padding)
+    expect(Exit.isSuccess(twice) && twice.value.definedNames.map((n) => n.formula)).toEqual(["#REF!$A$1"])
+    // room for it once only: the book's read of it goes over
+    expect(failureOf(await read(1.5 * padding))).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes" })
   })
 
   it("reads each external link part for its own books", async () => {

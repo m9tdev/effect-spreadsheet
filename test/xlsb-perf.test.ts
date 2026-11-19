@@ -120,13 +120,13 @@ describe("xlsb: 200 000 rows", () => {
     let rows = 0
     const records = counter("records")
     const run = await countYields(
-      () => Effect.runPromise(metered(records, Stream.runForEach(sheetRows(archive.read(entry), context), () => Effect.sync(() => void rows++)))),
+      () => Effect.runPromise(metered(records, Stream.runForEach(sheetRows(archive.read(entry, "test"), context), () => Effect.sync(() => void rows++)))),
       records.total
     )
     expect(rows).toBe(ROWS)
     expect(run.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
     const detailRecords = counter("records")
-    const details = await countYields(() => Effect.runPromise(metered(detailRecords, sheetDetails(archive.read(entry), "one.bin", limits))), detailRecords.total)
+    const details = await countYields(() => Effect.runPromise(metered(detailRecords, sheetDetails(archive.read(entry, "test"), "one.bin", limits))), detailRecords.total)
     expect(details.maxPerTurn).toBeLessThanOrEqual(MAX_RECORDS_PER_TURN)
   }, 300_000)
 
