@@ -14,6 +14,9 @@
  * in 8 224 bytes; `nextWithContinues` gathers them with their record, as
  * separate segments (string data restarts at each segment boundary).
  *
+ * `SubstreamReader` reads one substream with the substreams embedded in
+ * it (BOF ... EOF, such as a chart object in a sheet) skipped.
+ *
  * @internal
  */
 import { LimitExceeded, MalformedFile } from "../../SpreadsheetError.ts"
@@ -45,8 +48,8 @@ export class RecordReader {
   offset: number
   /** Records read so far: a work counter. */
   records = 0
-  private readonly bytes: Uint8Array
-  private readonly view: DataView
+  protected readonly bytes: Uint8Array
+  protected readonly view: DataView
   private readonly part: string
   /** Where reading stops: no record may run past it. */
   readonly end: number
@@ -59,7 +62,7 @@ export class RecordReader {
     this.end = Math.min(end, bytes.length)
   }
 
-  private pastEnd(at: number, type: number): MalformedFile {
+  protected pastEnd(at: number, type: number): MalformedFile {
     const where = this.end === this.bytes.length ? "the stream" : "its substream"
     return new MalformedFile({ format: "xls", part: this.part, offset: at, reason: `record 0x${type.toString(16)} runs past the end of ${where}` })
   }
@@ -143,6 +146,72 @@ export class RecordReader {
       g.count++
     }
     return undefined
+  }
+}
+
+/**
+ * A record of a substream embedded in the one being read (see
+ * `SubstreamReader`), skipped. The first of them (`opens`), its BOF, is the
+ * one marker a walker acts on; the others come one per call only so that
+ * each call reads one record, as `RecordReader.next` does.
+ */
+export class Embedded {
+  /** Offset of the record header in the stream. */
+  readonly offset: number
+  /** Whether this is the BOF that opens the embedded substream. */
+  readonly opens: boolean
+
+  constructor(offset: number, opens: boolean) {
+    this.offset = offset
+    this.opens = opens
+  }
+}
+
+/**
+ * The records of one substream (a sheet's, after its BOF), with every
+ * substream embedded in it skipped: an embedded chart sits between a BOF
+ * and its EOF inside the sheet, and may hold substreams of its own. Their
+ * records come from `read` as `Embedded`, so a walker never reads them;
+ * the substream's own EOF comes as a record like any other. One record per
+ * call, as `next`; errors and the end are the same as `next`'s. (`next`
+ * itself reads records as they are, for the substream's own BOF.)
+ */
+export class SubstreamReader extends RecordReader {
+  /** Embedded substreams open at the reader's offset (each one opened by a BOF read: bounded by the records read). */
+  private depth = 0
+
+  /** The next record of this substream, or an embedded substream's; undefined at the end of the stream. */
+  read(): BiffRecord | Embedded | undefined | MalformedFile {
+    // the header is read here rather than through `next`: this is the
+    // sheet walkers' loop over every record, and the extra call costs
+    // about a tenth of a bare record loop
+    const at = this.offset
+    if (at + 4 > this.end) return undefined
+    const type = this.view.getUint16(at, true)
+    const end = at + 4 + this.view.getUint16(at + 2, true)
+    if (end > this.end) return this.pastEnd(at, type)
+    // progress: offset grows by 4 + length >= 4
+    this.offset = end
+    this.records++
+    if (this.depth > 0) {
+      if (type === BOF_BIFF5_8) this.depth++
+      else if (type === EOF) this.depth--
+      return new Embedded(at, false)
+    }
+    if (type === BOF_BIFF5_8) {
+      this.depth++
+      return new Embedded(at, true)
+    }
+    return { type, offset: at, data: this.bytes.subarray(at + 4, end) }
+  }
+
+  /**
+   * As `read`, but a record of this substream of type `type` comes with
+   * its `CONTINUE` records (see `nextWithContinues`); in an embedded
+   * substream, it is skipped as any other.
+   */
+  readContinued(type: number, maxBytes: number, limit: string): ContinuedRecord | BiffRecord | Embedded | undefined | MalformedFile | LimitExceeded {
+    return this.depth === 0 && this.peekType() === type ? this.nextWithContinues(maxBytes, limit) : this.read()
   }
 }
 
