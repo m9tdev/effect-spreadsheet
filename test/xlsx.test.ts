@@ -451,6 +451,9 @@ describe("xlsx: an element nested in one of its own kind", () => {
     // after a sheet: not a workbook with only the sheets before it
     const after = await withWorkbook(`<sheets><sheet name="A" sheetId="1" r:id="rId1"/><sheets/><sheet name="B" sheetId="2" r:id="rId2"/></sheets>`)
     expect(failureOf(after)).toMatchObject(malformedIn("<sheets> inside <sheets>", "xl/workbook.xml"))
+    // also below another element of the list
+    const wrapped = await withWorkbook(`<sheets><x><sheets/></x><sheet name="A" sheetId="1" r:id="rId1"/><sheet name="B" sheetId="2" r:id="rId2"/></sheets>`)
+    expect(failureOf(wrapped)).toMatchObject(malformedIn("<sheets> inside <sheets>", "xl/workbook.xml"))
     // the same list without the nested element reads both sheets
     const ok = await withWorkbook(`<sheets><sheet name="A" sheetId="1" r:id="rId1"/><sheet name="B" sheetId="2" r:id="rId2"/></sheets>`)
     expect(Exit.isSuccess(ok) && ok.value.wb.sheets.map((s) => s.name)).toEqual(["A", "B"])
@@ -458,6 +461,9 @@ describe("xlsx: an element nested in one of its own kind", () => {
 
   it("a <definedName> inside a defined name is MalformedFile, not a name replacing the open one", async () => {
     expect(await errorOf({ sheets: [{ name: "S" }], definedNames: `<definedName name="A">x<definedName name="B">y</definedName>z</definedName>` }))
+      .toMatchObject(malformedIn("<definedName> inside a <definedName>", "xl/workbook.xml"))
+    // also below another element of the name
+    expect(await errorOf({ sheets: [{ name: "S" }], definedNames: `<definedName name="A">x<y><definedName name="B"/></y>z</definedName>` }))
       .toMatchObject(malformedIn("<definedName> inside a <definedName>", "xl/workbook.xml"))
   })
 

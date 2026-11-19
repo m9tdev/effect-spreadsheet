@@ -91,6 +91,7 @@ export const readWorkbookPart = (
           return undefined
         },
         close: (text) => {
+          // a guard: every <definedName> that gets here was opened by the rule above
           if (name === undefined) return
           definedNames.push({ name: name.name, formula: Attr.unescapeXstring(text ?? ""), hidden: name.hidden, scope: name.scope })
           name = undefined
