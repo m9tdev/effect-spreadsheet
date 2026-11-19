@@ -75,17 +75,24 @@ const AREA3D_LENGTH = 11
 
 export type SheetKind = "worksheet" | "macrosheet" | "chartsheet" | "other"
 
+/**
+ * Where a sheet's records are: its substream, which ends at `end` (the next
+ * substream's offset, in offset order whatever the BOUNDSHEET order, or the
+ * stream's end; substreams don't overlap, so all sheets together read the
+ * stream at most once), or `Broken` when its offset is no substream start
+ * (see `substreams`): reading that sheet fails with `error`, while the
+ * workbook and its other sheets still read.
+ */
+export type SheetStart =
+  | { readonly _tag: "Substream"; readonly end: number }
+  | { readonly _tag: "Broken"; readonly error: MalformedFile }
+
 export interface SheetEntry {
   readonly name: string
   readonly visibility: "visible" | "hidden" | "veryHidden"
-  /** Offset of the sheet's BOF in the workbook stream. */
+  /** Offset of the sheet's BOF in the workbook stream, as its BOUNDSHEET gives it. */
   readonly offset: number
-  /**
-   * Where its substream must end: the next substream's offset (in offset
-   * order, whatever the BOUNDSHEET order), or the stream's end. Substreams
-   * don't overlap, so all sheets together read the stream at most once.
-   */
-  readonly end: number
+  readonly start: SheetStart
   readonly kind: SheetKind
 }
 
@@ -184,43 +191,64 @@ const nameFormula = (
   return ""
 }
 
+/** The part a sheet's errors name. */
+export const sheetPart = (name: string): string => `sheet ${JSON.stringify(name)}`
+
 /**
- * Each sheet's substream end (see `SheetEntry.end`), after checking that
- * no sheet starts inside the globals (which end at `globalsEnd`) and that
- * no two sheets share a substream: either would let a small file make the
- * reader walk the same records once per sheet. VB module offsets count as
- * substream starts only where they point at a BOF past the globals (they
- * are often 0 or stale: a module's code lives outside the workbook stream).
+ * Each sheet's substream (see `SheetStart`). A substream starts at a BOF
+ * record past the globals (which end at `globalsEnd`), seen by a peek at
+ * the offset's record type, not by a walk over the stream. A sheet whose
+ * offset is past the stream, inside the globals, not at a BOF, or another
+ * sheet's (the first in BOUNDSHEET order keeps it) is `Broken`: the same
+ * records read once per sheet would let a small file make the reader walk
+ * them many times, and an offset that is no start doesn't end the
+ * substream before it. VB module offsets count as substream starts only
+ * where they point at a BOF past the globals (they are often 0 or stale: a
+ * module's code lives outside the workbook stream).
  */
-const sheetEnds = (
+const substreams = (
   stream: Uint8Array,
   globalsEnd: number,
-  sheets: ReadonlyArray<Omit<SheetEntry, "end">>,
+  sheets: ReadonlyArray<Omit<SheetEntry, "start">>,
   modules: ReadonlyArray<number>
-): Array<SheetEntry> | MalformedFile => {
-  const owner = new Map<number, string>()
-  // progress: one sheet per iteration (at most maxSheets)
-  for (const sheet of sheets) {
-    if (sheet.offset < globalsEnd) {
-      return malformed(`sheet ${JSON.stringify(sheet.name)} starts at ${sheet.offset}, inside the workbook globals (which end at ${globalsEnd})`)
-    }
-    const other = owner.get(sheet.offset)
-    if (other !== undefined) {
-      return malformed(`sheets ${JSON.stringify(other)} and ${JSON.stringify(sheet.name)} both start at ${sheet.offset}`)
-    }
-    owner.set(sheet.offset, sheet.name)
-  }
+): Array<SheetEntry> => {
   const view = new DataView(stream.buffer, stream.byteOffset, stream.byteLength)
+  const atBof = (offset: number) => offset + 4 <= stream.length && view.getUint16(offset, true) === BOF_BIFF5_8
+  const owner = new Map<number, string>()
+  const broken = (sheet: Omit<SheetEntry, "start">): MalformedFile | undefined => {
+    const { name, offset } = sheet
+    const part = sheetPart(name)
+    if (offset + 4 > stream.length) return new MalformedFile({ format: "xls", part, reason: `sheet offset ${offset} is outside the workbook stream` })
+    if (offset < globalsEnd) {
+      return new MalformedFile({
+        format: "xls",
+        part,
+        reason: `sheet ${JSON.stringify(name)} starts at ${offset}, inside the workbook globals (which end at ${globalsEnd})`
+      })
+    }
+    if (!atBof(offset)) return new MalformedFile({ format: "xls", part, reason: "the sheet doesn't start with a BOF", offset })
+    const other = owner.get(offset)
+    if (other !== undefined) {
+      return new MalformedFile({ format: "xls", part, reason: `sheets ${JSON.stringify(other)} and ${JSON.stringify(name)} both start at ${offset}` })
+    }
+    owner.set(offset, name)
+    return undefined
+  }
+  // progress: one sheet per iteration (at most maxSheets)
+  const errors = sheets.map(broken)
   const unique = new Set(owner.keys())
   // progress: one module per iteration (bounded by the BOUNDSHEET records read)
   for (const offset of modules) {
-    if (offset >= globalsEnd && offset + 4 <= stream.length && view.getUint16(offset, true) === BOF_BIFF5_8) unique.add(offset)
+    if (offset >= globalsEnd && atBof(offset)) unique.add(offset)
   }
   const starts = Float64Array.from(unique).sort()
   const ends = new Map<number, number>()
   // progress: k up to starts.length
   for (let k = 0; k < starts.length; k++) ends.set(starts[k]!, k + 1 < starts.length ? starts[k + 1]! : stream.length)
-  return sheets.map((sheet) => ({ ...sheet, end: ends.get(sheet.offset)! }))
+  return sheets.map((sheet, k) => {
+    const error = errors[k]
+    return { ...sheet, start: error === undefined ? { _tag: "Substream", end: ends.get(sheet.offset)! } : { _tag: "Broken", error } }
+  })
 }
 
 /**
@@ -256,7 +284,7 @@ class GlobalsWalk {
   biff8 = true
   text: Text
   date1904 = false
-  readonly sheets: Array<Omit<SheetEntry, "end">> = []
+  readonly sheets: Array<Omit<SheetEntry, "start">> = []
   /** Offsets of VB module BOUNDSHEETs: not sheets, but they may start a substream. */
   readonly modules: Array<number> = []
   /** Custom number formats by id, classified as their FORMAT is read. */
@@ -567,7 +595,7 @@ class GlobalsWalk {
 
 /**
  * The globals walk (see `Walk`): the records up to the EOF, then the sheets'
- * substream ends (sheet names made unique, `uniqueSheetNames`), the cell
+ * substreams (sheet names made unique, `uniqueSheetNames`), the cell
  * styles and the defined names, one step each.
  */
 function* globalsWalk(stream: Uint8Array, limits: Limits, turn: Turn): Walk<Globals, SpreadsheetError> {
@@ -578,8 +606,7 @@ function* globalsWalk(stream: Uint8Array, limits: Limits, turn: Turn): Walk<Glob
   if (failed !== undefined) return Result.fail(failed)
   const { sheets, xtis, books, custom } = walk
   const unique = uniqueSheetNames(sheets.map((s) => s.name))
-  const ended = sheetEnds(stream, walk.reader.offset, sheets.map((s, k) => ({ ...s, name: unique[k]! })), walk.modules)
-  if (ended instanceof MalformedFile) return Result.fail(ended)
+  const ended = substreams(stream, walk.reader.offset, sheets.map((s, k) => ({ ...s, name: unique[k]! })), walk.modules)
 
   // a lookup per cell: the codes were classified as their FORMATs were read
   const styles = cellStyles(walk.xfFormats, walk.xfFormats.length, custom)
