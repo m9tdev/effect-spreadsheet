@@ -35,8 +35,8 @@ import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row, SheetDetails } from "../../Workbook.ts"
-import { type BiffRecord, CONTINUE, type ContinuedRecord, Embedded, EOF, readBof, SubstreamReader } from "../biff/records.ts"
-import { readRichString, SegmentReader } from "../biff/segments.ts"
+import { readRichString, RecordCursor } from "../biff/cursor.ts"
+import { type BiffRecord, CONTINUE, Embedded, EOF, readBof, SubstreamReader } from "../biff/records.ts"
 import { decodeRk, ERROR_CODES } from "../binary.ts"
 import { FixedReader, type StringFailure } from "../binary/layout.ts"
 import { WorkMeter } from "../meter.ts"
@@ -137,14 +137,6 @@ const malformed = (part: string, reason: string, offset?: number) =>
   new MalformedFile({ format: "xls", part, reason, ...(offset === undefined ? {} : { offset }) })
 
 /**
- * The data of a STRING record and its CONTINUEs may take at most this many
- * bytes: the header (9), 2 bytes per character plus a 5-byte CONTINUE
- * header and option byte per character in the worst split, and 4 bytes
- * per rich-text run. More is a string over `maxStringLength`.
- */
-const stringMaxBytes = (limits: Limits): number => 16 + 7 * limits.maxStringLength + 4 * 0xFFFF
-
-/**
  * Unknown error codes (BOOLERR, FORMULA results) give `#N/A`, not a failure:
  * as the XLSX reader, which keeps whatever error text a cell has.
  */
@@ -160,13 +152,14 @@ const stringFailed = (read: StringFailure, part: string, record: BiffRecord, lim
 
 /**
  * Opens the substream: checks the offset and the worksheet BOF; the reader
- * of its records after it (embedded substreams skipped), or why not.
+ * of its records after it (embedded substreams skipped, records of type
+ * `continued` read with their CONTINUEs), or why not.
  */
-const openSubstream = (context: SheetContext): SubstreamReader | SpreadsheetError => {
+const openSubstream = (context: SheetContext, continued?: number): SubstreamReader | SpreadsheetError => {
   if (context.offset < 0 || context.offset + 4 > context.stream.length) {
     return malformed(context.part, `sheet offset ${context.offset} is outside the workbook stream`)
   }
-  const reader = new SubstreamReader(context.stream, context.part, context.offset, context.end)
+  const reader = new SubstreamReader(context.stream, context.part, context.offset, context.end, continued)
   const bof = reader.next()
   if (bof === undefined) return malformed(context.part, "the sheet has no BOF", context.offset)
   if (bof instanceof MalformedFile) return bof
@@ -420,7 +413,7 @@ const xfNumber = (globals: Globals, column: number, xf: number, value: number): 
  * Handles one record of the substream; `true` at its EOF. An embedded
  * substream (a chart object) is skipped; its BOF ends a formula's wait.
  */
-const handle = (record: BiffRecord | ContinuedRecord | Embedded, rows: Rows, context: SheetContext): SpreadsheetError | boolean => {
+const handle = (record: BiffRecord | Embedded, rows: Rows, context: SheetContext): SpreadsheetError | boolean => {
   const { globals, part } = context
   // a formula's string result comes right after it, or after its SHRFMLA, ARRAY or TABLE
   // (any of them maybe continued by CONTINUE records, which are part of it). Any other
@@ -545,9 +538,11 @@ const handle = (record: BiffRecord | ContinuedRecord | Embedded, rows: Rows, con
       if (pending._tag === "Idle") return false // a STRING without a formula: ignored
       rows.wait = IDLE
       // BIFF8: an XLUnicodeString, maybe continued (each CONTINUE restarts
-      // with an option byte); BIFF5: a u16-count code-page string
-      const read = "segments" in record
-        ? readRichString(new SegmentReader(record.segments), context.limits.maxStringLength)
+      // with an option byte; the reader checked them and moved past them);
+      // its character count is checked before any character is read.
+      // BIFF5: a u16-count code-page string, never continued
+      const read = globals.biff8
+        ? readRichString(new RecordCursor(context.stream, record, context.end), context.limits.maxStringLength)
         : readString(data, 0, globals.text, 2)
       if (read._tag !== "Ok") return stringFailed(read, part, record, context.limits)
       return rows.cell(pending.row, Cell.text(pending.column, read.value)) ?? false
@@ -576,13 +571,13 @@ const DONE: Phase = { _tag: "Done" }
 /** The rows of a worksheet substream. Re-runnable. */
 export const sheetRows = (context: SheetContext): Stream.Stream<Row, SpreadsheetError> =>
   Stream.fromPull(Effect.map(WorkMeter, (meter) => {
-    const opened = openSubstream(context)
+    // a BIFF8 STRING comes with its CONTINUEs (a BIFF5 one has none)
+    const opened = openSubstream(context, context.globals.biff8 ? STRING : undefined)
     let phase: Phase = opened instanceof SubstreamReader
       ? { _tag: "Scanning", reader: opened, scan: new RowScan(context, opened.offset) }
       : { _tag: "Failed", error: opened }
     const rows = new Rows(context)
     const heldCells = context.heldCells ?? HELD_CELLS
-    const maxStringBytes = stringMaxBytes(context.limits)
     /** Hands the steps of the last batch to the meter. */
     const report = Effect.sync(() => {
       meter.add("steps", rows.takeSteps())
@@ -619,14 +614,9 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
             // progress: k up to BATCH_RECORDS; every read() advances the reader
             for (let k = 0; k < BATCH_RECORDS && rows.effort < rows.budget && !rows.behind(current.handledAt); k++) {
               rows.steps++
-              // a BIFF8 STRING comes with its CONTINUEs (a BIFF5 one has none)
-              const record = context.globals.biff8 ? reader.readContinued(STRING, maxStringBytes, "maxStringLength") : reader.read()
+              const record = reader.read()
               if (record === undefined) return yield* Effect.fail(malformed(context.part, "the sheet has no EOF"))
               if (record instanceof MalformedFile) return yield* Effect.fail(record)
-              if (record instanceof LimitExceeded) {
-                const max = context.limits.maxStringLength
-                return yield* Effect.fail(new LimitExceeded({ limit: "maxStringLength", max, actual: max + 1 }))
-              }
               const result = handle(record, rows, context)
               if (result === true) {
                 phase = DRAINING

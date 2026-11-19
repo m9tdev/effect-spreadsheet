@@ -169,16 +169,48 @@ describe("xls sheet: formula string results", () => {
     expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), companion(ARRAY), ...wide])).toEqual([[0, 0, "Text", "abcдеж"]])
     expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(6), 0, ...chars("abc")]), X.record(CONTINUE, [0, ...chars("d")])])))
       .toMatchObject({ _tag: "MalformedFile", reason: "truncated record 0x207" })
+    // a CONTINUE of the STRING that runs past the end of the stream is that record's error, not the string's
+    const cut = new Uint8Array([0x3C, 0x00, 0xFF, 0x00, 0x00, 0x62, 0x63])
+    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(3), 0, ...chars("a")]), cut])))
+      .toMatchObject({ _tag: "MalformedFile", reason: "record 0x3c runs past the end of the stream" })
   })
 
-  it("a continued STRING over maxStringLength, by its count or by its bytes, is LimitExceeded", async () => {
+  it("a STRING's characters don't continue past the end of its sheet's substream", async () => {
+    // sheet S ends with a STRING short of its count; the CONTINUE with the rest is where sheet T starts
+    const short = X.record(STRING, [...X.u16(3), 0, ...chars("a")])
+    const stream = X.workbookStream({ sheets: [{ name: "S", records: [X.formula(0, 0, 0, { kind: 0 }), short, X.record(CONTINUE, [0, ...chars("bc")])] }, { name: "T", records: [] }] })
+    const view = new DataView(stream.buffer, stream.byteOffset, stream.byteLength)
+    /** Offsets of the records from `at` on, up to the end of the stream. */
+    const headers = (at: number): Array<number> => {
+      const out: Array<number> = []
+      // progress: each record moves `at` by 4 + its length
+      for (; at + 4 <= stream.length; at += 4 + view.getUint16(at + 2, true)) out.push(at)
+      return out
+    }
+    const bounds = headers(0).filter((at) => view.getUint16(at, true) === 0x0085)
+    const sheetS = view.getUint32(bounds[0]! + 4, true)
+    const string = headers(sheetS).find((at) => view.getUint16(at, true) === STRING)!
+    const continued = string + 4 + view.getUint16(string + 2, true)
+    expect(view.getUint16(continued, true)).toBe(CONTINUE)
+    // point sheet T at the CONTINUE: sheet S's substream now ends right before it
+    view.setUint32(bounds[1]! + 4, continued, true)
+    expect(failureOf(await readExit(stream))).toMatchObject({ _tag: "MalformedFile", reason: "truncated record 0x207", offset: string })
+  })
+
+  it("a continued STRING over maxStringLength is LimitExceeded with its character count, however many bytes follow", async () => {
     const long = [X.record(STRING, [...X.u16(20), 0, ...chars("0123456789")]), X.record(CONTINUE, [0, ...chars("0123456789")])]
     expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), ...long]), { maxStringLength: 10 })).toMatchObject({ limit: "maxStringLength", max: 10, actual: 20 })
     expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), ...long])).toEqual([[0, 0, "Text", "01234567890123456789"]])
-    // a short count but CONTINUEs far over any string of maxStringLength characters
+    // CONTINUEs far over any string of maxStringLength characters: the count is what is checked
     const filler = Array.from({ length: 40 }, () => X.record(CONTINUE, new Array(8000).fill(0)))
-    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(1), 0, 0x41]), ...filler]), { maxStringLength: 10 }))
-      .toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(15), 0, 0x41]), ...filler]), { maxStringLength: 10 }))
+      .toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 10, actual: 15 })
+    // the count is checked before any character is read: characters cut short don't make it Truncated
+    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(15), 0, 0x41, 0x42])]), { maxStringLength: 10 }))
+      .toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max: 10, actual: 15 })
+    // a count within the limit reads the string: the CONTINUEs after its characters are passed over
+    const short = [X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(1), 0, 0x41]), ...filler, X.number(1, 0, 0, 2)]
+    expect(values((await readOk(one(short), { maxStringLength: 10 })).sheets[0]!)).toEqual([[0, false, [[0, "Text", "A"]]], [1, false, [[0, "Number", 2]]]])
   })
 
   it("BIFF5: STRING and LABEL are u16-count code-page strings; RSTRING (BIFF8) skips its runs", async () => {

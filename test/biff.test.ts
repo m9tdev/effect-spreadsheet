@@ -1,9 +1,9 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import { CONTINUE, Embedded, RecordReader, readBof, SubstreamReader } from "../src/internal/biff/records.ts"
-import { readRichString, SegmentReader, type Segments } from "../src/internal/biff/segments.ts"
+import { readRichString, RecordCursor } from "../src/internal/biff/cursor.ts"
+import { type BiffRecord, CONTINUE, Embedded, RecordReader, readBof, SubstreamReader } from "../src/internal/biff/records.ts"
 import type { StringRead } from "../src/internal/binary/layout.ts"
-import { LimitExceeded, MalformedFile } from "../src/SpreadsheetError.ts"
+import { MalformedFile } from "../src/SpreadsheetError.ts"
 
 const record = (type: number, data: ReadonlyArray<number> | Uint8Array): Uint8Array => {
   const out = new Uint8Array(4 + data.length)
@@ -13,9 +13,6 @@ const record = (type: number, data: ReadonlyArray<number> | Uint8Array): Uint8Ar
   out.set(data, 4)
   return out
 }
-const listSegments = (s: Segments): Array<Array<number>> =>
-  Array.from({ length: s.count }, (_, k) => Array.from(s.bytes.subarray(s.bounds[2 * k]!, s.bounds[2 * k + 1]!)))
-
 const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array => {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
   let at = 0
@@ -24,6 +21,31 @@ const concat = (parts: ReadonlyArray<Uint8Array>): Uint8Array => {
     at += p.length
   }
   return out
+}
+
+/** The record the reader reads next (it must be one). */
+const nextOf = (reader: RecordReader): BiffRecord => {
+  const r = reader.next()
+  if (r === undefined || r instanceof MalformedFile) throw new Error("expected a record")
+  return r
+}
+
+/** Every byte a cursor reads, one u8 at a time, up to the end of its record's data. */
+const bytesOf = (cursor: RecordCursor): Array<number> => {
+  const out: Array<number> = []
+  // progress: each u8 consumes a byte that has(1) found
+  while (cursor.has(1)) out.push(cursor.u8())
+  return out
+}
+
+/**
+ * A cursor over `parts`: the first is a record's data, each other one a
+ * CONTINUE's (an empty one an empty CONTINUE), then an EOF that isn't part
+ * of them.
+ */
+const cursorOf = (parts: ReadonlyArray<Uint8Array>): RecordCursor => {
+  const stream = concat([record(0x00FC, parts[0] ?? []), ...parts.slice(1).map((p) => record(CONTINUE, p)), record(0x000A, [])])
+  return new RecordCursor(stream, { offset: 0, data: stream.subarray(4, 4 + (parts[0]?.length ?? 0)) }, stream.length)
 }
 
 describe("biff records", () => {
@@ -66,35 +88,38 @@ describe("biff records", () => {
     )
   })
 
-  it("gathers CONTINUE records with their record, within a byte limit", () => {
+  it("passes over the CONTINUE records after a record, within a byte limit; a cursor reads their data with the record's", () => {
     const stream = concat([record(0x00FC, [1]), record(CONTINUE, [2, 3]), record(CONTINUE, []), record(CONTINUE, [4]), record(0x00FF, [9])])
     const reader = new RecordReader(stream, "Workbook")
-    const sst = reader.nextWithContinues(100, "maxDecompressedBytes")
-    // the empty CONTINUE continues nothing and is dropped
-    expect(sst && !(sst instanceof MalformedFile) && !(sst instanceof LimitExceeded) && listSegments(sst.segments)).toEqual([[1], [2, 3], [4]])
+    const sst = nextOf(reader)
+    expect(reader.continues(sst, Infinity, 100, "maxDecompressedBytes")).toBe("done")
     expect(reader.peekType()).toBe(0x00FF)
+    // the empty CONTINUE continues nothing
+    expect(bytesOf(new RecordCursor(stream, sst, reader.offset))).toEqual([1, 2, 3, 4])
     // 4 records' headers + 4 bytes = 20: 19 is over, under the caller's name
-    const limited = new RecordReader(stream, "Workbook").nextWithContinues(19, "maxDecompressedBytes")
-    expect(limited).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 19, actual: 20 })
-    expect(new RecordReader(stream, "Workbook").nextWithContinues(20, "x")).toMatchObject({ type: 0x00FC })
+    const limited = new RecordReader(stream, "Workbook")
+    expect(limited.continues(nextOf(limited), Infinity, 19, "maxDecompressedBytes"))
+      .toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 19, actual: 20 })
+    const fits = new RecordReader(stream, "Workbook")
+    expect(fits.continues(nextOf(fits), Infinity, 20, "x")).toBe("done")
   })
 
-  it("10 million empty CONTINUEs (40 MB) under a 1 GiB cap: no storage per empty segment", () => {
+  it("10 million empty CONTINUEs (40 MB) under a 1 GiB cap: passed over, and a cursor reads the record's one byte", () => {
     const stream = new Uint8Array(4 + 1 + 10_000_000 * 4)
     const v = new DataView(stream.buffer)
     v.setUint16(0, 0x00FC, true)
     v.setUint16(2, 1, true)
+    stream[4] = 7
     for (let k = 0; k < 10_000_000; k++) v.setUint16(5 + 4 * k, CONTINUE, true)
     const reader = new RecordReader(stream, "Workbook")
-    const result = reader.nextWithContinues(1024 * 1024 * 1024, "maxDecompressedBytes")
-    if (result === undefined || "_tag" in result) throw new Error("expected a record")
+    const first = nextOf(reader)
+    expect(reader.continues(first, Infinity, 1024 * 1024 * 1024, "maxDecompressedBytes")).toBe("done")
     expect(reader.records).toBe(10_000_001)
-    expect(result.segments.count).toBe(1)
-    expect(result.segments.bounds.byteLength).toBe(8)
-    expect(result.segments.bytes).toBe(stream) // ranges of the stream, no copy
+    expect(reader.offset).toBe(stream.length)
+    expect(bytesOf(new RecordCursor(stream, first, reader.offset))).toEqual([7])
   })
 
-  it("1-byte CONTINUEs cost 8 bytes of storage each, under 2x the input", () => {
+  it("1-byte CONTINUEs: a cursor reads across each of them, in order", () => {
     const n = 1_000_000
     const stream = new Uint8Array(4 + 1 + n * 5)
     const v = new DataView(stream.buffer)
@@ -105,27 +130,25 @@ describe("biff records", () => {
       v.setUint16(7 + 5 * k, 1, true)
       stream[9 + 5 * k] = k & 0xFF
     }
-    const result = new RecordReader(stream, "Workbook").nextWithContinues(1024 * 1024 * 1024, "maxDecompressedBytes")
-    if (result === undefined || "_tag" in result) throw new Error("expected a record")
-    expect(result.segments.count).toBe(n + 1)
-    // the used bounds: 8 bytes per segment; the array behind them at most twice that
-    expect(result.segments.count * 8).toBe(8 * (n + 1))
-    expect(result.segments.bounds.byteLength).toBe(8 * (n + 1))
-    expect(result.segments.bounds.buffer.byteLength).toBeLessThanOrEqual(2 * 8 * (n + 1))
-    // a view of the growable array (here it grew past the used part), not a copy of it
-    expect(result.segments.bounds.buffer.byteLength).toBeGreaterThan(result.segments.bounds.byteLength)
-    expect(result.segments.bounds.buffer.byteLength).toBeLessThan(4 * stream.length)
-    const r = new SegmentReader(result.segments)
-    expect(r.remaining()).toBe(n + 1)
+    const reader = new RecordReader(stream, "Workbook")
+    const first = nextOf(reader)
+    expect(reader.continues(first, Infinity, 1024 * 1024 * 1024, "maxDecompressedBytes")).toBe("done")
+    const r = new RecordCursor(stream, first, reader.offset)
+    expect(r.has(n + 1)).toBe(true)
+    expect(r.has(n + 2)).toBe(false)
     r.skip(1)
     expect([r.u8(), r.u8(), r.u8()]).toEqual([0, 1, 2])
+    expect(r.u32()).toBe(0x06050403)
+    expect(r.skip(n - 9)).toBe(true)
+    expect(r.consumed()).toBe(n - 1)
+    expect([r.u8(), r.u8(), r.has(1), r.u8()]).toEqual([(n - 2) & 0xFF, (n - 1) & 0xFF, false, 0])
   })
 
   it("empty CONTINUE records count against the limit (4 bytes each)", () => {
     const many = concat([record(0x00FC, [1]), ...Array.from({ length: 10_000 }, () => record(CONTINUE, []))])
     const reader = new RecordReader(many, "Workbook")
-    const result = reader.nextWithContinues(1000, "maxDecompressedBytes")
-    expect(result).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 1000 })
+    const result = reader.continues(nextOf(reader), Infinity, 1000, "maxDecompressedBytes")
+    expect(result).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 1000, actual: 1001 })
     // it stopped early: about 1000 / 4 records read, not 10 000
     expect(reader.records).toBeLessThanOrEqual(252)
   })
@@ -201,98 +224,95 @@ describe("biff substream reader", () => {
     expect(cut.end).toMatchObject({ _tag: "MalformedFile", offset: 8 })
   })
 
-  it("readContinued gathers CONTINUEs only for a record of the substream itself", () => {
+  it("a record of the continued type comes with its CONTINUEs, only in the substream itself", () => {
     const STRING = 0x0207
     const stream = concat([
       record(STRING, [1]), // 0
       record(CONTINUE, [2]), // 5
-      record(BOF, [0, 6, 0x20, 0]), // 10
-      record(STRING, [3]), // 18
-      record(CONTINUE, [4]), // 23
-      record(EOF, []) // 28
+      record(CONTINUE, []), // 10
+      record(BOF, [0, 6, 0x20, 0]), // 14
+      record(STRING, [3]), // 22
+      record(CONTINUE, [4]), // 27
+      record(EOF, []), // 32
+      record(NUMBER, [5]), // 36
+      record(CONTINUE, [6]) // 41
     ])
-    const reader = new SubstreamReader(stream, "sheet")
-    const first = reader.readContinued(STRING, 100, "maxStringLength")
-    if (first === undefined || first instanceof MalformedFile || first instanceof LimitExceeded || first instanceof Embedded || !("segments" in first)) {
-      throw new Error("expected a continued record")
-    }
-    expect(listSegments(first.segments)).toEqual([[1], [2]])
-    expect(reader.offset).toBe(10)
-    expect(reader.readContinued(STRING, 100, "maxStringLength")).toEqual(new Embedded(10, true))
+    const reader = new SubstreamReader(stream, "sheet", 0, stream.length, STRING)
+    const first = reader.read()
+    if (first === undefined || first instanceof MalformedFile || first instanceof Embedded) throw new Error("expected a record")
+    expect([first.type, first.offset, Array.from(first.data)]).toEqual([STRING, 0, [1]])
+    expect([reader.offset, reader.records]).toEqual([14, 3])
+    expect(bytesOf(new RecordCursor(stream, first, stream.length))).toEqual([1, 2])
+    expect(reader.read()).toEqual(new Embedded(14, true))
     // inside the embedded substream, a STRING is skipped as any record, and so is its CONTINUE
-    expect(reader.readContinued(STRING, 100, "maxStringLength")).toEqual(new Embedded(18, false))
-    expect(reader.readContinued(STRING, 100, "maxStringLength")).toEqual(new Embedded(23, false))
-    expect(reader.readContinued(STRING, 100, "maxStringLength")).toEqual(new Embedded(28, false))
-    expect(reader.readContinued(STRING, 100, "maxStringLength")).toBeUndefined()
+    expect(reader.read()).toEqual(new Embedded(22, false))
+    expect(reader.read()).toEqual(new Embedded(27, false))
+    expect(reader.read()).toEqual(new Embedded(32, false))
+    // another type's CONTINUE is a record of its own
+    expect(reader.read()).toMatchObject({ type: NUMBER, offset: 36 })
+    expect(reader.read()).toMatchObject({ type: CONTINUE, offset: 41 })
+    expect(reader.read()).toBeUndefined()
+    // without a continued type, the STRING's CONTINUEs are records too
+    expect(walk(stream).seen.slice(0, 3)).toEqual([[STRING, 0], [CONTINUE, 5], [CONTINUE, 10]])
+  })
+
+  it("a CONTINUE of the continued type's record that runs past the end is MalformedFile with its offset", () => {
+    const STRING = 0x0207
+    const stream = concat([record(STRING, [1]), record(CONTINUE, [2]), new Uint8Array([0x3C, 0x00, 0x09, 0x00, 1])])
+    const reader = new SubstreamReader(stream, "sheet", 0, stream.length, STRING)
+    expect(reader.read()).toMatchObject({ _tag: "MalformedFile", offset: 10 })
   })
 })
 
-describe("biff CONTINUE gathering in bounded steps", () => {
+describe("biff CONTINUE records in bounded steps", () => {
   // an SST with three CONTINUEs (one of them empty), then an EOF
   const stream = concat([record(0x00FC, [1]), record(CONTINUE, [2, 3]), record(CONTINUE, []), record(CONTINUE, [4]), record(0x000A, [])])
-  const start = (bytes: Uint8Array, maxBytes = 100) => {
+  const start = (bytes: Uint8Array) => {
     const reader = new RecordReader(bytes, "Workbook")
-    const first = reader.next()
-    if (first === undefined || first instanceof MalformedFile) throw new Error("expected a record")
-    return { reader, gathering: reader.startContinues(first, maxBytes, "maxDecompressedBytes") }
+    return { reader, first: nextOf(reader) }
   }
 
-  it("a step that reaches its bound before the last CONTINUE is More; a later one is Done with every segment", () => {
-    const { gathering, reader } = start(stream)
-    expect(reader.continues(gathering, 1)).toEqual({ _tag: "More" })
-    expect(reader.continues(gathering, 1)).toEqual({ _tag: "More" })
-    const done = reader.continues(gathering, 1)
-    if (done._tag !== "Done") throw new Error(`expected Done, got ${done._tag}`)
-    expect(done.record.type).toBe(0x00FC)
-    expect(listSegments(done.record.segments)).toEqual([[1], [2, 3], [4]])
+  it("a step that reaches its bound before the last CONTINUE is more; a later one is done, with every segment read by a cursor", () => {
+    const { first, reader } = start(stream)
+    expect(reader.continues(first, 1, 100, "maxDecompressedBytes")).toBe("more")
+    expect(reader.continues(first, 1, 100, "maxDecompressedBytes")).toBe("more")
+    expect(reader.records).toBe(3)
+    expect(reader.continues(first, 1, 100, "maxDecompressedBytes")).toBe("done")
     expect(reader.peekType()).toBe(0x000A)
+    expect(bytesOf(new RecordCursor(stream, first, reader.offset))).toEqual([1, 2, 3, 4])
   })
 
-  it("the record from bounded steps equals the one nextWithContinues gives", () => {
-    const { gathering, reader } = start(stream)
-    let step = reader.continues(gathering, 1)
-    // progress: each More step consumes one CONTINUE, and there are three
-    while (step._tag === "More") step = reader.continues(gathering, 1)
-    if (step._tag !== "Done") throw new Error(`expected Done, got ${step._tag}`)
-    const whole = new RecordReader(stream, "Workbook").nextWithContinues(100, "maxDecompressedBytes")
-    if (whole === undefined || "_tag" in whole) throw new Error("expected a record")
-    expect({ ...step.record, segments: listSegments(step.record.segments) }).toEqual({ ...whole, segments: listSegments(whole.segments) })
-  })
-
-  it("a step after Done is Done again and reads nothing", () => {
-    const { gathering, reader } = start(stream)
-    expect(reader.continues(gathering, 10)._tag).toBe("Done")
+  it("a step after done is done again and reads nothing", () => {
+    const { first, reader } = start(stream)
+    expect(reader.continues(first, 10, 100, "maxDecompressedBytes")).toBe("done")
     const records = reader.records
     const offset = reader.offset
-    const again = reader.continues(gathering, 10)
-    if (again._tag !== "Done") throw new Error(`expected Done, got ${again._tag}`)
-    expect(listSegments(again.record.segments)).toEqual([[1], [2, 3], [4]])
+    expect(reader.continues(first, 10, 100, "maxDecompressedBytes")).toBe("done")
     expect([reader.records, reader.offset]).toEqual([records, offset])
   })
 
-  it("a step that goes past the byte limit is LimitExceeded, after some More steps", () => {
+  it("a step that goes past the byte limit is LimitExceeded with the size so far, after some more steps", () => {
     // 4 records' headers + 4 bytes = 20: the last CONTINUE goes over 19
-    const { gathering, reader } = start(stream, 19)
-    expect(reader.continues(gathering, 1)._tag).toBe("More")
-    expect(reader.continues(gathering, 1)._tag).toBe("More")
-    expect(reader.continues(gathering, 1)).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 19, actual: 20 })
+    const { first, reader } = start(stream)
+    expect(reader.continues(first, 1, 19, "maxDecompressedBytes")).toBe("more")
+    expect(reader.continues(first, 1, 19, "maxDecompressedBytes")).toBe("more")
+    expect(reader.continues(first, 1, 19, "maxDecompressedBytes")).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 19, actual: 20 })
   })
 
-  it("an empty CONTINUE counts towards the limit but adds no segment", () => {
+  it("an empty CONTINUE counts towards the limit but adds no data", () => {
     const empties = concat([record(0x00FC, [1]), record(CONTINUE, []), record(CONTINUE, [])])
     // two empty CONTINUEs: 5 + 4 + 4 = 13 bytes
-    const fits = start(empties, 13)
-    const done = fits.reader.continues(fits.gathering, 10)
-    if (done._tag !== "Done") throw new Error(`expected Done, got ${done._tag}`)
-    expect(listSegments(done.record.segments)).toEqual([[1]])
-    const over = start(empties, 12)
-    expect(over.reader.continues(over.gathering, 10)).toMatchObject({ _tag: "LimitExceeded", max: 12, actual: 13 })
+    const fits = start(empties)
+    expect(fits.reader.continues(fits.first, 10, 13, "maxDecompressedBytes")).toBe("done")
+    expect(bytesOf(new RecordCursor(empties, fits.first, fits.reader.offset))).toEqual([1])
+    const over = start(empties)
+    expect(over.reader.continues(over.first, 10, 12, "maxDecompressedBytes")).toMatchObject({ _tag: "LimitExceeded", max: 12, actual: 13 })
   })
 
   it("a CONTINUE that runs past the end of the stream is MalformedFile", () => {
     const cut = concat([record(0x00FC, [1]), record(CONTINUE, [2, 3])]).subarray(0, 10)
-    const { gathering, reader } = start(cut)
-    expect(reader.continues(gathering, 10)).toMatchObject({ _tag: "MalformedFile" })
+    const { first, reader } = start(cut)
+    expect(reader.continues(first, 10, 100, "maxDecompressedBytes")).toMatchObject({ _tag: "MalformedFile", offset: 5 })
   })
 })
 
@@ -332,54 +352,53 @@ const splitString = (text: string, wide: boolean, cuts: ReadonlyArray<number>, e
 /** A string read's text, or the failure itself. */
 const textOf = (read: StringRead) => (read._tag === "Ok" ? read.value : read)
 
-describe("biff segments", () => {
+describe("biff record cursor", () => {
   it("numbers cross segment boundaries; has() checks what is left; skips past the end fail", () => {
-    const r = new SegmentReader([new Uint8Array([1]), new Uint8Array([2, 3]), new Uint8Array([]), new Uint8Array([4, 5])])
+    const r = cursorOf([new Uint8Array([1]), new Uint8Array([2, 3]), new Uint8Array([]), new Uint8Array([4, 5])])
     expect(r.has(5)).toBe(true)
     expect(r.has(6)).toBe(false)
     expect(r.u16()).toBe(0x0201)
     expect(r.u16()).toBe(0x0403)
-    expect(r.remaining()).toBe(1)
     expect(r.consumed()).toBe(4)
     expect(r.has(1)).toBe(true)
     expect(r.has(2)).toBe(false)
     expect(r.skip(1)).toBe(true)
-    expect(r.remaining()).toBe(0)
+    expect(r.consumed()).toBe(5)
     expect(r.has(1)).toBe(false)
-    const s = new SegmentReader([new Uint8Array(3)])
+    const s = cursorOf([new Uint8Array(3)])
     expect(s.skip(4)).toBe(false)
-    expect(s.remaining()).toBe(3)
-    const u = new SegmentReader([new Uint8Array([0x78, 0x56]), new Uint8Array([0x34, 0x12])])
+    expect([s.consumed(), s.has(3)]).toEqual([0, true])
+    const u = cursorOf([new Uint8Array([0x78, 0x56]), new Uint8Array([0x34, 0x12])])
     expect(u.u32()).toBe(0x12345678)
   })
 
   it("strings switch width at each CONTINUE (option byte), including right after the header", () => {
     // header ends its segment: the characters start with an option byte
     const segments = [new Uint8Array([3, 0, 0]), new Uint8Array([1, 0x41, 0, 0x42, 0, 0x43, 0])]
-    expect(textOf(readRichString(new SegmentReader(segments), 100))).toBe("ABC")
+    expect(textOf(readRichString(cursorOf(segments), 100))).toBe("ABC")
     // 8-bit, then 16-bit, then 8-bit again
-    expect(textOf(readRichString(new SegmentReader(splitString("héllo wörld", false, [3, 7])), 100))).toBe("héllo wörld")
+    expect(textOf(readRichString(cursorOf(splitString("héllo wörld", false, [3, 7])), 100))).toBe("héllo wörld")
     // 16-bit characters on both sides of a boundary
     const wide = (s: string) => s.split("").flatMap((c) => [c.charCodeAt(0) & 0xFF, c.charCodeAt(0) >> 8])
     const cjk = [new Uint8Array([4, 0, 1, ...wide("日本")]), new Uint8Array([1, ...wide("語!")])]
-    expect(textOf(readRichString(new SegmentReader(cjk), 100))).toBe("日本語!")
+    expect(textOf(readRichString(cursorOf(cjk), 100))).toBe("日本語!")
   })
 
   it("a segment holding only an option byte is followed by the next segment's option byte, not a character", () => {
     // 8-bit: "ab" | [00] | [00 "c"], then another string
-    const narrow = new SegmentReader([
+    const narrow = cursorOf([
       new Uint8Array([3, 0, 0, 0x61, 0x62]),
       new Uint8Array([0]),
       new Uint8Array([0, 0x63, 3, 0, 0, 0x78, 0x79, 0x7A])
     ])
     expect(textOf(readRichString(narrow, 100))).toBe("abc")
     expect(textOf(readRichString(narrow, 100))).toBe("xyz")
-    expect(narrow.remaining()).toBe(0)
+    expect(narrow.has(1)).toBe(false)
     // 16-bit: "a" | [01] | [01 "b" "c"]
-    const wide = new SegmentReader([new Uint8Array([3, 0, 0, 0x61]), new Uint8Array([1]), new Uint8Array([1, 0x62, 0, 0x63, 0])])
+    const wide = cursorOf([new Uint8Array([3, 0, 0, 0x61]), new Uint8Array([1]), new Uint8Array([1, 0x62, 0, 0x63, 0])])
     expect(textOf(readRichString(wide, 100))).toBe("abc")
     // several in a row, right after the header, widths switching: the last option byte wins
-    const many = new SegmentReader([
+    const many = cursorOf([
       new Uint8Array([2, 0, 0]),
       new Uint8Array([1]),
       new Uint8Array([0]),
@@ -388,45 +407,65 @@ describe("biff segments", () => {
     ])
     expect(textOf(readRichString(many, 100))).toBe("日本")
     // option bytes and then nothing left: truncated
-    expect(textOf(readRichString(new SegmentReader([new Uint8Array([2, 0, 0, 0x61]), new Uint8Array([0]), new Uint8Array([0])]), 100)))
+    expect(textOf(readRichString(cursorOf([new Uint8Array([2, 0, 0, 0x61]), new Uint8Array([0]), new Uint8Array([0])]), 100)))
       .toEqual({ _tag: "Truncated" })
   })
 
   it("8-bit characters are code units: 0x80-0x9F are C1 controls, not windows-1252", () => {
-    const r = new SegmentReader([new Uint8Array([3, 0, 0, 0x80, 0x93, 0x9F])])
+    const r = cursorOf([new Uint8Array([3, 0, 0, 0x80, 0x93, 0x9F])])
     expect(textOf(readRichString(r, 100))).toBe("\u0080\u0093\u009F")
   })
 
-  it("remaining() is O(1): it doesn't walk the segments", () => {
-    const parts = Array.from({ length: 1000 }, () => new Uint8Array([7]))
-    let reads = 0
-    const counted = new Proxy(parts, {
-      get: (target, key, receiver) => {
-        if (typeof key === "string" && /^\d+$/.test(key)) reads++
-        return Reflect.get(target, key, receiver)
-      }
-    })
-    const r = new SegmentReader(counted)
-    const before = reads
-    for (let k = 0; k < 1000; k++) r.remaining()
-    expect(reads - before).toBe(0)
+  it("has() looks ahead across CONTINUEs without moving; reads then go on from where they were", () => {
+    const r = cursorOf([new Uint8Array([1, 2]), new Uint8Array([]), new Uint8Array([3]), new Uint8Array([4, 5, 6])])
+    expect(r.u8()).toBe(1)
+    expect(r.has(5)).toBe(true)
+    expect(r.has(6)).toBe(false)
+    expect(r.consumed()).toBe(1)
+    expect([r.u16(), r.u8()]).toEqual([0x0302, 4])
+    expect([r.has(2), r.has(3)]).toEqual([true, false])
+    expect(r.skip(3)).toBe(false)
+    expect(r.u16()).toBe(0x0605)
+    expect([r.has(1), r.u8(), r.consumed()]).toEqual([false, 0, 6])
   })
 
-  it("remaining() follows every kind of read", () => {
+  it("the record's data ends at the first record that isn't a CONTINUE, or one that doesn't fit before the end", () => {
+    const stream = concat([record(0x00FC, [1]), record(CONTINUE, [2]), record(0x00FF, [3]), record(CONTINUE, [4])])
+    const first = { offset: 0, data: stream.subarray(4, 5) }
+    expect(bytesOf(new RecordCursor(stream, first, stream.length))).toEqual([1, 2])
+    // a CONTINUE whose header fits before the end, but not its data
+    expect(bytesOf(new RecordCursor(stream, first, 9))).toEqual([1])
+    expect(bytesOf(new RecordCursor(stream, first, 10))).toEqual([1, 2])
+    // an end past the stream reads only the stream
+    const cut = stream.subarray(0, 9)
+    expect(bytesOf(new RecordCursor(cut, first, 100))).toEqual([1])
+    // with the end at the record's own end, a cursor over one range
+    expect(bytesOf(new RecordCursor(stream, first, 5))).toEqual([1])
+  })
+
+  it("characters at the very start of the record's data have no option byte; those at a CONTINUE's start do", () => {
+    expect(textOf(cursorOf([new Uint8Array([0x41, 0x42])]).chars(2, false))).toBe("AB")
+    expect(textOf(cursorOf([new Uint8Array([]), new Uint8Array([0, 0x41, 0x42])]).chars(2, false))).toBe("AB")
+  })
+
+  it("consumed() follows every kind of read", () => {
     const segments = splitString("abcdef", false, [2, 4], { runs: 1, ext: 2 })
     const total = segments.reduce((n, s) => n + s.length, 0)
-    const r = new SegmentReader(segments)
-    expect(r.remaining()).toBe(total)
-    expect(textOf(readRichString(r, 100))).toBe("abcdef")
-    expect(r.remaining()).toBe(0)
+    const r = cursorOf(segments)
+    expect(r.has(total)).toBe(true)
+    expect(r.has(total + 1)).toBe(false)
+    const read = readRichString(r, 100)
+    expect(textOf(read)).toBe("abcdef")
+    expect([r.consumed(), read._tag === "Ok" && read.end]).toEqual([total, total])
+    expect(r.has(1)).toBe(false)
   })
 
   it("rich-text runs and phonetic data are skipped, across boundaries", () => {
     const segments = splitString("rich", false, [2], { runs: 2, ext: 5 })
-    const reader = new SegmentReader([...segments, new Uint8Array([3, 0, 0, 0x78, 0x79, 0x7A])])
+    const reader = cursorOf([...segments, new Uint8Array([3, 0, 0, 0x78, 0x79, 0x7A])])
     expect(textOf(readRichString(reader, 100))).toBe("rich")
     expect(textOf(readRichString(reader, 100))).toBe("xyz")
-    expect(reader.remaining()).toBe(0)
+    expect(reader.has(1)).toBe(false)
   })
 
   it("random strings split anywhere decode back", () => {
@@ -436,7 +475,7 @@ describe("biff segments", () => {
         fc.boolean(),
         fc.array(fc.nat(60), { maxLength: 6 }),
         (text, wide, cuts) => {
-          expect(textOf(readRichString(new SegmentReader(splitString(text, wide, cuts)), 1000))).toBe(text)
+          expect(textOf(readRichString(cursorOf(splitString(text, wide, cuts)), 1000))).toBe(text)
         }
       ),
       { numRuns: 1000 }
@@ -444,11 +483,14 @@ describe("biff segments", () => {
   })
 
   it("strings past maxLength, truncated strings and half characters fail", () => {
-    expect(textOf(readRichString(new SegmentReader([new Uint8Array([200, 0, 0, ...new Uint8Array(200)])]), 100))).toEqual({ _tag: "TooLong", count: 200 })
-    expect(textOf(readRichString(new SegmentReader([new Uint8Array([5, 0, 0, 0x41])]), 100))).toEqual({ _tag: "Truncated" })
-    expect(textOf(readRichString(new SegmentReader([new Uint8Array([2, 0, 1, 0x41])]), 100))).toEqual({ _tag: "Truncated" })
+    expect(textOf(readRichString(cursorOf([new Uint8Array([200, 0, 0, ...new Uint8Array(200)])]), 100))).toEqual({ _tag: "TooLong", count: 200 })
+    expect(textOf(readRichString(cursorOf([new Uint8Array([5, 0, 0, 0x41])]), 100))).toEqual({ _tag: "Truncated" })
+    expect(textOf(readRichString(cursorOf([new Uint8Array([2, 0, 1, 0x41])]), 100))).toEqual({ _tag: "Truncated" })
+    // a 16-bit character split across a CONTINUE boundary: its first byte ends a segment
+    expect(textOf(readRichString(cursorOf([new Uint8Array([2, 0, 1, 0x41, 0x00, 0x42]), new Uint8Array([1, 0x00, 0x43, 0x00])]), 100)))
+      .toEqual({ _tag: "Truncated" })
     // a huge phonetic block size can't skip past the end
-    const huge = new SegmentReader([new Uint8Array([1, 0, 4, 0xFF, 0xFF, 0xFF, 0x7F, 0x41])])
+    const huge = cursorOf([new Uint8Array([1, 0, 4, 0xFF, 0xFF, 0xFF, 0x7F, 0x41])])
     expect(textOf(readRichString(huge, 100))).toEqual({ _tag: "Truncated" })
   })
 })

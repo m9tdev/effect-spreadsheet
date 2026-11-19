@@ -3,10 +3,10 @@ import { Effect, Stream } from "effect"
 import * as Result from "effect/Result"
 import * as Csv from "../../src/csv/index.ts"
 import * as Spreadsheet from "../../src/Spreadsheet.ts"
+import { readRichString, RecordCursor } from "../../src/internal/biff/cursor.ts"
 import { RecordReader } from "../../src/internal/biff/records.ts"
 import { readRichStr, readWideString } from "../../src/internal/biff12/fields.ts"
 import { readRecords } from "../../src/internal/biff12/records.ts"
-import { readRichString, SegmentReader } from "../../src/internal/biff/segments.ts"
 import { open as openCfb } from "../../src/internal/cfb/cfb.ts"
 import { open } from "../../src/internal/zip/archive.ts"
 import { parse } from "../../src/internal/xml/parse.ts"
@@ -69,14 +69,16 @@ export const effectOf = (task: FuzzTask): Effect.Effect<unknown, unknown> => {
             const reader = new RecordReader(data, entry.path)
             // progress: every record advances the reader
             for (;;) {
-              const record = reader.nextWithContinues(limits.maxDecompressedBytes, "maxDecompressedBytes")
+              const record = reader.next()
               if (record === undefined) break
               if ("_tag" in record) return Effect.fail(record)
+              const continued = reader.continues(record, Infinity, limits.maxDecompressedBytes, "maxDecompressedBytes")
+              if (typeof continued !== "string") return Effect.fail(continued)
               if (record.type !== 0x00FC) continue
-              const strings = new SegmentReader(record.segments)
+              const strings = new RecordCursor(data, record, reader.offset)
               if (!strings.skip(8)) continue
               // progress: each string read consumes at least 3 bytes or fails
-              while (strings.remaining() > 0) {
+              while (strings.has(1)) {
                 if (readRichString(strings, limits.maxStringLength)._tag === "Truncated") break
               }
             }

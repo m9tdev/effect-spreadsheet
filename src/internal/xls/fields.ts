@@ -4,7 +4,7 @@
  *
  * @internal
  */
-import { compressed, utf16 } from "../biff/segments.ts"
+import { compressed, utf16 } from "../biff/cursor.ts"
 import { ok, type StringRead, tooLongString, TRUNCATED } from "../binary/layout.ts"
 
 /**
