@@ -118,6 +118,8 @@ describe("xls sheet: formula string results", () => {
       [0, 0, "Text", ""],
       [1, 0, "Number", 2]
     ])
+    // a STRING after it isn't read at all: one cut short is no failure
+    expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), X.bof(0x0020), X.eof(), X.record(STRING, [...X.u16(9), 0, 0x41])])).toEqual([[0, 0, "Text", ""]])
     // nor is a STRING inside it, or the one after it
     expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), X.bof(0x0020), X.string("chart"), X.eof(), X.string("late"), X.number(1, 0, 0, 2)])).toEqual([
       [0, 0, "Text", ""],
@@ -492,6 +494,9 @@ describe("xls sheet: emitting rows", () => {
     const records = [X.number(0, 0, 0, 1), X.number(1, 0, 0, 1), X.number(2, 0, 0, 1), X.number(3, 0, 0, 1), cut, X.number(2, 1, 0, 1)]
     const book = one(records)
     expect(await rowsUntilFailure(book)).toEqual({ rows: [0, 1], failure: expect.objectContaining({ reason: "truncated record 0x203", offset: recordOffset(book, 4) }) })
+    // a ROW record cut before its flags fails where it is
+    expect(await rowsUntilFailure(one([X.number(0, 0, 0, 1), X.record(0x0208, [...X.u16(3), 0, 0, 0, 0]), X.number(1, 0, 0, 1)])))
+      .toEqual({ rows: [0], failure: expect.objectContaining({ reason: "truncated record 0x208" }) })
     // ROW-only rows are complete from the start, wherever their ROW record is
     expect(await rowsUntilFailure(one([X.row(0), X.row(1), cut, X.row(4)]))).toEqual({ rows: [0, 1, 4], failure: expect.objectContaining({ reason: "truncated record 0x203" }) })
     // a row whose FORMULA waits for its STRING until the failing record (which ends the wait) isn't complete
@@ -553,6 +558,13 @@ describe("xls sheet: emitting rows", () => {
       [0, 0, "Text", ""],
       [0, 1, "Text", "b"]
     ])
+  })
+
+  it("ROW-only rows come out in chunks of at most BATCH_RECORDS rows", async () => {
+    const wb = await Effect.runPromise(Xls.read(X.xls(one(Array.from({ length: 10 * BATCH_RECORDS }, (_, r) => X.row(r))))))
+    const chunks = Array.from(await Effect.runPromise(Stream.runCollect(Stream.chunks(Workbook.rows(wb, 0)))))
+    expect(chunks.reduce((n, c) => n + c.length, 0)).toBe(10 * BATCH_RECORDS)
+    expect(Math.max(...chunks.map((c) => c.length))).toBe(BATCH_RECORDS)
   })
 
   it("repeated ROW records give one row each, hidden if any of them hides it", async () => {
