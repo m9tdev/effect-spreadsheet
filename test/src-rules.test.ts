@@ -30,6 +30,13 @@ describe("src rules (AGENTS.md)", () => {
     }
   })
 
+  it("readers yield through internal/yield.ts, not Effect.yieldNow (clamped to 4 ms in browsers)", () => {
+    for (const file of files(srcDir)) {
+      if (file.endsWith(join("internal", "yield.ts"))) continue
+      expect(readFileSync(file, "utf8"), file).not.toMatch(/\bEffect\.yieldNow/)
+    }
+  })
+
   it("no third-party licence or derived-code markers under src (plain MIT)", () => {
     for (const file of files(srcDir)) {
       const text = readFileSync(file, "utf8")

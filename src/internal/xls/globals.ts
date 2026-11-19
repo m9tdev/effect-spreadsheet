@@ -26,6 +26,7 @@ import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../nu
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import { type DefinedNameEntry, toDefinedNames } from "../workbook.ts"
+import { yieldNow } from "../yield.ts"
 import { codepageLabel, readString, type Text, textDecoder } from "./fields.ts"
 import { BATCH_CELLS, BATCH_RECORDS } from "./sheet.ts"
 
@@ -605,7 +606,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
     if (started !== undefined) return yield* Effect.fail(started)
     // progress: every step reads at least one record, CONTINUE or string, or ends
     for (let k = 0;; k++) {
-      if (k > 0) yield* Effect.yieldNow
+      if (k > 0) yield* yieldNow
       meter.add("batches", 1)
       const outcome = walk.step()
       if (outcome === "done") break
@@ -624,7 +625,7 @@ export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<G
     // progress: k up to names.length (at most maxDefinedNames), yielding every BATCH_RECORDS
     for (let k = 0; k < walk.names.length; k++) {
       if (k % BATCH_RECORDS === 0) {
-        if (k > 0) yield* Effect.yieldNow
+        if (k > 0) yield* yieldNow
         meter.add("batches", 1)
       }
       const n = walk.names[k]!

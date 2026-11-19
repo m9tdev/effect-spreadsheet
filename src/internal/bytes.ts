@@ -11,6 +11,7 @@
  */
 import { Effect, Pull, Stream } from "effect"
 import type * as Arr from "effect/Array"
+import { yieldNow } from "./yield.ts"
 
 /** Most bytes handed to a reader between two event-loop turns. */
 export const SLICE_BYTES = 64 * 1024
@@ -44,7 +45,7 @@ export const sliced = <E, R>(bytes: Stream.Stream<Uint8Array, E, R>): Stream.Str
             at = 0
             continue
           }
-          yield* Effect.yieldNow
+          yield* yieldNow
           const slice = piece.subarray(at, Math.min(piece.length, at + SLICE_BYTES))
           at += slice.length
           return [slice] as const
