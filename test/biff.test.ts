@@ -182,6 +182,18 @@ describe("biff substream reader", () => {
     })
   })
 
+  it("a BIFF2-4 BOF is a record like any other, inside an embedded substream too", () => {
+    const stream = concat([
+      record(0x0409, [0, 0, 0x20, 0]), // 0
+      record(BOF, [0, 6, 0x20, 0]), // 8
+      record(0x0209, [0, 0, 0x20, 0]), // 16
+      record(EOF, []), // 24
+      record(0x0009, [0, 0, 0x20, 0]), // 28
+      record(EOF, []) // 36
+    ])
+    expect(walk(stream).seen).toEqual([[0x0409, 0], ["opens", 8], ["embedded", 16], ["embedded", 24], [0x0009, 28], [EOF, 36]])
+  })
+
   it("an unterminated embedded substream runs to the end; a record past it is the reader's error", () => {
     expect(walk(concat([record(BOF, [0, 6, 0x20, 0]), record(NUMBER, [1])])).seen).toEqual([["opens", 0], ["embedded", 8]])
     const cut = walk(concat([record(BOF, [0, 6, 0x20, 0]), new Uint8Array([0x03, 0x02, 0x10, 0x00, 1])]))

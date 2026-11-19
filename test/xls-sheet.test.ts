@@ -604,6 +604,17 @@ describe("xls sheet: sheetDetails", () => {
     expect(values(sheets[0]!)).toEqual([[0, false, [[1, "Number", 1]]]])
   })
 
+  it("a BIFF2-4 BOF record inside a sheet is an ordinary record: it opens no substream", async () => {
+    // BOF record numbers of BIFF2 (0x0009), BIFF3 (0x0209) and BIFF4 (0x0409): only BIFF5/8's 0x0809 opens one
+    for (const type of [0x0009, 0x0209, 0x0409]) {
+      const old = X.record(type, [...X.u16(0), ...X.u16(0x0020)])
+      const { details, sheets } = await readOk(one([X.number(0, 0, 0, 1), old, X.colInfo(5, 5, true), X.number(1, 0, 0, 2), X.eof(), X.number(2, 0, 0, 3)]))
+      // the EOF after it is the sheet's own: nothing after it is read
+      expect(details[0], type.toString(16)).toEqual({ hiddenColumns: [{ first: 5, last: 5 }], merges: [] })
+      expect(values(sheets[0]!), type.toString(16)).toEqual([[0, false, [[0, "Number", 1]]], [1, false, [[0, "Number", 2]]]])
+    }
+  })
+
   it("an EOF inside a doubly nested substream closes one level only", async () => {
     // BOF BOF EOF (records of the outer nested substream) EOF: those records are skipped too
     const { details, sheets } = await readOk(one([
@@ -829,5 +840,21 @@ describe("xls sheet: the rows reader's phases", () => {
     const wb = await Effect.runPromise(Xls.read(fromStream(stream)))
     const rows = await rowsOf(wb, 0)
     expect(Exit.isSuccess(rows) && Array.from(rows.value).map((r) => r.index)).toEqual([0])
+  })
+
+  it("each pass counts one step per record it reads, the sheet's EOF included", async () => {
+    // an empty sheet: the header scan and the reading pass each read its EOF;
+    // with an embedded substream (BOF, EOF) before it, each reads 3 records
+    const cases: ReadonlyArray<[string, ReadonlyArray<Uint8Array>, number]> = [
+      ["an empty sheet", [], 2],
+      ["an embedded substream only", [X.bof(0x0020), X.eof()], 6]
+    ]
+    for (const [label, records, expected] of cases) {
+      const wb = await Effect.runPromise(Xls.read(X.xls(one(records))))
+      const steps = counter("steps")
+      const rows = await rowsOf(wb, 0, steps)
+      expect(Exit.isSuccess(rows) && Array.from(rows.value), label).toEqual([])
+      expect(steps.total(), label).toBe(expected)
+    }
   })
 })
