@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest"
 import * as Cell from "../src/Cell.ts"
 import { type Meter, noMeter } from "../src/internal/meter.ts"
 import { readGlobals } from "../src/internal/xls/globals.ts"
-import { BATCH_RECORDS, Rows, type SheetContext, sheetRows } from "../src/internal/xls/sheet.ts"
+import { BATCH_RECORDS, DISPLACED_RECORDS, sheetRows } from "../src/internal/xls/sheet.ts"
 import type { LimitOverrides } from "../src/SpreadsheetLimits.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import * as Workbook from "../src/Workbook.ts"
@@ -43,19 +43,35 @@ const readOk = async (book: X.TestBook, limits?: LimitOverrides) => {
   return exit.value
 }
 const errorOf = async (book: X.TestBook, limits?: LimitOverrides) => failureOf(await readExit(X.xls(book), limits))
-/** The rows of a book's first sheet, read with `heldCells` as the cap on held cells. */
-const rowsHolding = (book: X.TestBook, heldCells: number) =>
+/** The rows of a book's first sheet, read with `displacedRecords` as the cap on records out of place. */
+const rowsDisplacing = (book: X.TestBook, displacedRecords: number) =>
   Effect.runPromise(Effect.exit(Effect.gen(function*() {
     const stream = X.workbookStream(book)
     const limits = SpreadsheetLimits.defaults
     const globals = yield* readGlobals(stream, limits)
     const { offset, end } = globals.sheets[0]!
-    return Array.from(yield* Stream.runCollect(sheetRows({ stream, offset, end, part: "sheet", globals, limits, heldCells })))
+    return Array.from(yield* Stream.runCollect(sheetRows({ stream, offset, end, part: "sheet", globals, limits, displacedRecords })))
   })))
-const rowsHeld = async (book: X.TestBook, heldCells: number) => {
-  const exit = await rowsHolding(book, heldCells)
+const rowsDisplaced = async (book: X.TestBook, displacedRecords: number) => {
+  const exit = await rowsDisplacing(book, displacedRecords)
   if (Exit.isFailure(exit)) throw new Error(`read failed: ${JSON.stringify(failureOf(exit))}`)
   return exit.value
+}
+/** The rows a sheet's stream gives before it fails (or all of them), and the failure. */
+const rowsUntilFailure = async (book: X.TestBook, limits?: LimitOverrides) => {
+  const wb = await Effect.runPromise(Xls.read(X.xls(book), { limits }))
+  const seen: Array<Workbook.Row> = []
+  const exit = await Effect.runPromise(Effect.exit(Stream.runForEach(Workbook.rows(wb, 0), (row) => Effect.sync(() => void seen.push(row)))))
+  return { rows: seen.map((r) => r.index), failure: failureOf(exit) }
+}
+/** Offset of record `k` of a one-sheet book's sheet (its BOF is record -1). */
+const recordOffset = (book: X.TestBook, k: number): number => {
+  const stream = X.workbookStream(book)
+  const sheet = book.sheets[0]!
+  const before = X.workbookStream({ ...book, sheets: [{ ...sheet, records: sheet.records.slice(0, k) }] })
+  // the shorter stream's EOF is where record k is
+  expect(stream.length).toBeGreaterThan(before.length - 4)
+  return before.length - 4
 }
 const one = (records: ReadonlyArray<Uint8Array>, globals: ReadonlyArray<Uint8Array> = [], biff: 5 | 8 = 8): X.TestBook => ({ biff, globals, sheets: [{ name: "S", records }] })
 
@@ -339,16 +355,19 @@ describe("xls sheet: rows whose cells come in several places", () => {
     ])
   })
 
-  it("ROW records after the cells hold no row back: they don't count against the held-cell cap", async () => {
+  it("ROW records after the cells are never out of place: a cap of 0 records out of place still reads them", async () => {
     // 20 rows of cells, then a ROW record for an empty row before them
     const empty = [...Array.from({ length: 20 }, (_, r) => X.number(r + 1, 0, 0, r)), X.row(0)]
-    expect((await rowsHeld(one(empty), 10)).map((r) => [r.index, r.hidden, r.cells.length])).toEqual([
+    expect((await rowsDisplaced(one(empty), 0)).map((r) => [r.index, r.hidden, r.cells.length])).toEqual([
       [0, false, 0],
       ...Array.from({ length: 20 }, (_, r) => [r + 1, false, 1])
     ])
     // a hiding ROW record for the first row with cells, and a visible one repeated, both after all the cells
     const late = [X.row(0), ...Array.from({ length: 21 }, (_, r) => X.number(r, 0, 0, r)), X.row(0, true), X.row(1)]
-    expect((await rowsHeld(one(late), 10)).map((r) => [r.index, r.hidden])).toEqual(Array.from({ length: 21 }, (_, r) => [r, r === 0]))
+    expect((await rowsDisplaced(one(late), 0)).map((r) => [r.index, r.hidden])).toEqual(Array.from({ length: 21 }, (_, r) => [r, r === 0]))
+    // rows in reverse order, each row's cells together: none is out of place
+    const reversed = Array.from({ length: 30 }, (_, r) => [X.number(29 - r, 0, 0, r), X.number(29 - r, 1, 0, r)]).flat()
+    expect((await rowsDisplaced(one(reversed), 0)).map((r) => [r.index, r.cells.length])).toEqual(Array.from({ length: 30 }, (_, r) => [r, 2]))
   })
 
   it("rows declared only by ROW records come out in row order among the others, whatever the record order", async () => {
@@ -374,16 +393,19 @@ describe("xls sheet: rows whose cells come in several places", () => {
     ])
   })
 
-  it("an embedded substream's BOF that ends a formula's wait is the record that passes the cap on held cells", async () => {
-    // row 0 waits for its last cell, row 1 holds 2 cells; the BOF gives the formula its empty text: 4 cells held
-    const records = [X.blank(0, 0, 0), X.blank(1, 0, 0), X.blank(1, 1, 0), X.formula(1, 2, 0, { kind: 0 }), X.bof(0x0020), X.eof(), X.blank(0, 1, 0)]
+  it("a FORMULA, its STRING, records between them and an embedded substream are never out of place; a cell record back in its row is", async () => {
+    // row 0's last BLANK comes after row 1: the one record out of place
+    const records = [X.blank(0, 0, 0), X.blank(1, 0, 0), X.blank(1, 1, 0), X.formula(1, 2, 0, { kind: 0 }), companion(SHRFMLA), X.string("s"), X.bof(0x0020), X.number(0, 5, 0, 1), X.eof(), X.blank(0, 1, 0)]
     const book = one(records)
-    const stream = X.workbookStream(book)
-    const bofAt = X.workbookStream(one(records.slice(0, 4))).length - 4 // where the EOF of the shorter sheet is
-    expect(Array.from(stream.subarray(bofAt, bofAt + 2))).toEqual([0x09, 0x08])
-    expect(failureOf(await rowsHolding(book, 3))).toMatchObject({ _tag: "MalformedFile", offset: bofAt, reason: "rows split too far apart: over 3 cells held for rows not complete" })
-    // the last BLANK makes it 5, then rows 0 and 1 are complete
-    expect((await rowsHeld(book, 5)).map((r) => [r.index, r.cells.length])).toEqual([[0, 2], [1, 3]])
+    expect(failureOf(await rowsDisplacing(book, 0))).toMatchObject({
+      _tag: "MalformedFile",
+      offset: recordOffset(book, 9),
+      reason: "rows split too far apart: over 0 cell records out of their row's place"
+    })
+    expect(values(await rowsDisplaced(book, 1))).toEqual([
+      [0, false, [[0, "Empty", undefined], [1, "Empty", undefined]]],
+      [1, false, [[0, "Empty", undefined], [1, "Empty", undefined], [2, "Text", "s"]]]
+    ])
   })
 
   it("a row whose last cell is a formula with a string result is emitted only after its STRING", async () => {
@@ -394,36 +416,48 @@ describe("xls sheet: rows whose cells come in several places", () => {
     ])
   })
 
-  it("rows held back by a row split far apart are capped: past the cap the sheet is MalformedFile", async () => {
-    // a BLANK in row 0, rows 1-20 of 100 cells each, then row 0's second BLANK: rows 1-20 wait for row 0
-    const records = [X.blank(0, 0, 0), ...Array.from({ length: 20 }, (_, r) => X.mulrk(r + 1, 0, Array.from({ length: 100 }, (_, c) => [0, X.rkInt(c)] as const))), X.blank(0, 1, 0)]
-    const error = failureOf(await rowsHolding(one(records), 1000))
-    expect(error).toMatchObject({ _tag: "MalformedFile", reason: "rows split too far apart: over 1000 cells held for rows not complete" })
-    // at 1 000 cells (row 0's first BLANK and rows 1-10), not before: the record that passes it
-    expect((error as { offset: number }).offset).toBeGreaterThan(0)
-    // all 2 002 cells are held when the last BLANK comes: a cap of 2 002 reads, 2 001 doesn't
-    expect(failureOf(await rowsHolding(one(records), 2001))).toMatchObject({ reason: "rows split too far apart: over 2001 cells held for rows not complete" })
-    const rows = await rowsHeld(one(records), 2002)
+  it("a row split far apart reads, its cells merged in stream order; past the cap on records out of place the sheet is MalformedFile", async () => {
+    // a BLANK in row 0, rows 1-20 of 100 cells each, then row 0's NUMBER in the same column and a BLANK:
+    // two records out of place, the NUMBER the last cell of column 0
+    const records = [X.blank(0, 0, 0), ...Array.from({ length: 20 }, (_, r) => X.mulrk(r + 1, 0, Array.from({ length: 100 }, (_, c) => [0, X.rkInt(c)] as const))), X.number(0, 0, 0, 7), X.blank(0, 1, 0)]
+    const rows = await rowsDisplaced(one(records), 2)
     expect(rows.map((r) => [r.index, r.cells.length])).toEqual([[0, 2], ...Array.from({ length: 20 }, (_, r) => [r + 1, 100])])
+    expect(values(rows.slice(0, 1))).toEqual([[0, false, [[0, "Number", 7], [1, "Empty", undefined]]]])
+    // a cap of 1: the second record out of place fails, where it is
+    const book = one(records)
+    expect(failureOf(await rowsDisplacing(book, 1))).toMatchObject({
+      _tag: "MalformedFile",
+      offset: recordOffset(book, 22),
+      reason: "rows split too far apart: over 1 cell records out of their row's place"
+    })
+    // the default cap
+    expect(DISPLACED_RECORDS).toBe(1_048_576)
   })
 
-  it("held cells are exactly the cells of rows not emitted, through compaction and emitting", async () => {
-    const limits = { ...SpreadsheetLimits.defaults, maxColumns: 8 }
-    const rows = new Rows({ limits } as unknown as SheetContext)
-    rows.start(new Map([[0, 10_000], [1, 20_000]]))
-    const open = (rows as unknown as { rows: { rows: Map<number, { cells: Array<unknown> }> } }).rows.rows
-    const heldNow = () => [...open.values()].reduce((n, r) => n + r.cells.length, 0)
-    // progress: k up to 100
-    for (let k = 0; k < 100; k++) {
-      expect(rows.cell(k % 2, Cell.number(7 - (k % 8), k))).toBeUndefined()
-      expect(rows.held).toBe(heldNow())
-    }
-    expect(rows.complete(10_000)).toBeUndefined() // row 0 out
-    expect(rows.held).toBe(heldNow())
-    expect(rows.held).toBeGreaterThan(0)
-    expect(rows.complete(20_000)).toBeUndefined()
-    expect(rows.held).toBe(0)
-  })
+  it("a row split around more cells than the old cap on held cells (1 Mi) reads: what is out of place costs an offset, not its cells", async () => {
+    // row 0's first BLANK, rows 1-260 of 4 096 empty cells each (1 064 960 cells waiting for row 0), then row 0's last BLANK
+    const xfs = new Array<number>(4096).fill(0)
+    const records = [X.blank(0, 0, 0), ...Array.from({ length: 260 }, (_, r) => X.mulBlank(r + 1, 0, xfs)), X.blank(0, 1, 0)]
+    const { sheets } = await readOk(one(records))
+    expect(sheets[0]!.map((r) => r.cells.length)).toEqual([2, ...new Array(260).fill(4096)])
+  }, 60_000)
+
+  it("past the default cap on records out of place (1 Mi) the sheet is MalformedFile", async () => {
+    // rows 0 and 1 alternating: after the first two, every BLANK is back in a row another row's cells ended
+    const size = X.blank(0, 0, 0).length
+    const count = DISPLACED_RECORDS + 3
+    const blob = new Uint8Array(count * size)
+    // progress: k up to count
+    for (let k = 0; k < count; k++) blob.set(X.blank(k % 2, 0, 0), k * size)
+    const book = one([blob])
+    const failure = failureOf(await rowsDisplacing(book, DISPLACED_RECORDS))
+    expect(failure).toMatchObject({ _tag: "MalformedFile", reason: `rows split too far apart: over ${DISPLACED_RECORDS} cell records out of their row's place` })
+    // the record after the cap's last: 2 in place, then DISPLACED_RECORDS out of place
+    expect((failure as { offset: number }).offset).toBe(recordOffset(book, 0) + (DISPLACED_RECORDS + 2) * size)
+    // one record fewer reads
+    const fewer = one([blob.subarray(0, (count - 1) * size)])
+    expect((await rowsDisplaced(fewer, DISPLACED_RECORDS)).map((r) => [r.index, r.cells.length])).toEqual([[0, 1], [1, 1]])
+  }, 60_000)
 
   it("a duplicate column in a row keeps the last cell", async () => {
     expect(await cellsOf([X.number(0, 3, 0, 1), X.number(0, 1, 0, 2), X.number(0, 3, 0, 3)])).toEqual([
@@ -446,96 +480,61 @@ describe("xls sheet: rows whose cells come in several places", () => {
 })
 
 describe("xls sheet: emitting rows", () => {
-  it("complete(Infinity) with a string still pending stops once every row is out", () => {
-    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
-    rows.start(new Map([[0, 5]]))
-    expect(rows.cell(0, Cell.number(0, 1))).toBeUndefined()
-    expect(rows.complete(5)).toBeUndefined()
-    // a FORMULA on a row the scan didn't place still waits for its STRING
-    rows.wait = { _tag: "AwaitingString", row: 1, column: 0 }
-    // the loop's bound is order.length: count the reads of `order`, so a
-    // loop that only stops by luck fails here instead of hanging the worker
-    const inner = (rows as unknown as { order: Uint32Array }).order
-    let reads = 0
-    ;(rows as unknown as { order: Uint32Array }).order = new Proxy(inner, {
-      get: (target, key) => {
-        if (++reads > 1000) throw new Error("complete() doesn't stop")
-        const value = Reflect.get(target, key, target)
-        return typeof value === "function" ? value.bind(target) : value
-      }
-    })
-    expect(rows.complete(Infinity)).toBeUndefined()
-    expect(rows.take().map((r) => r.index)).toEqual([0])
+  it("a row goes out only if it and every row before it were complete before the first failure in stream order", async () => {
+    // rows 0 and 1 complete; row 2's last cell after a truncated NUMBER (in row 9); row 3 complete before it
+    const cut = X.record(0x0203, [...X.u16(9), ...X.u16(0)])
+    const records = [X.number(0, 0, 0, 1), X.number(1, 0, 0, 1), X.number(2, 0, 0, 1), X.number(3, 0, 0, 1), cut, X.number(2, 1, 0, 1)]
+    const book = one(records)
+    expect(await rowsUntilFailure(book)).toEqual({ rows: [0, 1], failure: expect.objectContaining({ reason: "truncated record 0x203", offset: recordOffset(book, 4) }) })
+    // ROW-only rows are complete from the start, wherever their ROW record is
+    expect(await rowsUntilFailure(one([X.row(0), X.row(1), cut, X.row(4)]))).toEqual({ rows: [0, 1, 4], failure: expect.objectContaining({ reason: "truncated record 0x203" }) })
+    // a row whose FORMULA waits for its STRING until the failing record (which ends the wait) isn't complete
+    const waiting = one([X.number(0, 0, 0, 1), X.formula(1, 0, 0, { kind: 0 }), companion(SHRFMLA), X.record(0x0201, [0])])
+    expect(await rowsUntilFailure(waiting)).toEqual({ rows: [0], failure: expect.objectContaining({ reason: "truncated record 0x201" }) })
+    const pending = one([X.number(0, 0, 0, 1), X.formula(1, 0, 0, { kind: 0 }), companion(SHRFMLA), X.record(STRING, [...X.u16(9), 0, 0x41])])
+    expect(await rowsUntilFailure(pending)).toEqual({ rows: [0], failure: expect.objectContaining({ reason: "truncated record 0x207" }) })
+    // the maxRows failure of a row comes once the rows before it are out, if no failure in stream order came first
+    expect(await rowsUntilFailure(one([X.number(5, 0, 0, 1), X.number(0, 0, 0, 1), X.number(1, 0, 0, 1)]), { maxRows: 2 }))
+      .toEqual({ rows: [0, 1], failure: expect.objectContaining({ limit: "maxRows", actual: 6 }) })
+    expect(await rowsUntilFailure(one([X.number(5, 0, 0, 1), X.number(0, 0, 0, 1), cut, X.number(1, 0, 0, 1)]), { maxRows: 2 }))
+      .toEqual({ rows: [0], failure: expect.objectContaining({ reason: "truncated record 0x203" }) })
   })
 
-  it("ROW-only rows count towards a batch: complete() and end() stop at the budget and go on in the next batch", () => {
-    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
-    // rows 0-999 and 2000 declared by ROW records only (due at once), row 1000 with a cell (its last at offset 5)
-    const declared = new Set([...Array.from({ length: 1000 }, (_, r) => r), 2000])
-    const hidden = new Set(Array.from({ length: 1000 }, (_, r) => r).filter((r) => r % 3 === 0))
-    rows.start(new Map([...[...declared].map((r) => [r, -1] as const), [1000, 5]]), declared, hidden)
-    const out: Array<[number, boolean]> = []
-    const drain = () => {
-      // progress: each take() takes at least one row
-      while (rows.queued()) out.push(...rows.take().map((r) => [r.index, r.hidden] as [number, boolean]))
-    }
-    // before row 1000's cell: the ROW-only rows before it are due, over several batches
-    // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
-    for (let batch = 0; rows.behind(-1); batch++) {
-      if (batch > 1002) throw new Error("complete() doesn't go on")
-      rows.budget = rows.effort + 100
-      expect(rows.complete(-1)).toBeUndefined()
-      const before = out.length
-      drain()
-      // a budget of 100: at most 100 rows, one more for the row it ends with
-      expect(out.length - before).toBeLessThanOrEqual(101)
-    }
-    expect(out).toEqual(Array.from({ length: 1000 }, (_, r) => [r, r % 3 === 0]))
-    // row 1000 waits for its cell; once it is in, row 2000 follows at once
-    expect(rows.cell(1000, Cell.number(0, 1))).toBeUndefined()
-    rows.budget = rows.effort + 100
-    expect(rows.complete(5)).toBeUndefined()
-    drain()
-    expect(out.slice(1000)).toEqual([[1000, false], [2000, false]])
-    // after the EOF: rows the scan didn't place, through end()
-    // progress: r up to 1000
-    for (let r = 0; r < 1000; r++) expect(rows.cell(3000 + r, Cell.number(0, r))).toBeUndefined()
-    let ended: unknown = false
-    // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
-    for (let batch = 0; ended !== true; batch++) {
-      if (batch > 1002) throw new Error("end() doesn't go on")
-      rows.budget = rows.effort + 100
-      ended = rows.end()
-      expect(typeof ended).toBe("boolean")
-      const before = out.length
-      drain()
-      expect(out.length - before).toBeLessThanOrEqual(101)
-    }
-    expect(out.slice(1002).map(([r]) => r)).toEqual(Array.from({ length: 1000 }, (_, r) => 3000 + r))
+  it("the failure is the first in stream order, whatever row its record is in; cells are counted in stream order", async () => {
+    // row 5's LABEL over maxStringLength comes before row 0's truncated record
+    const long = X.label(5, 0, 0, "a string too long")
+    const cut = X.record(0x0203, [...X.u16(0), ...X.u16(1)])
+    expect(await rowsUntilFailure(one([X.number(0, 0, 0, 1), long, cut]), { maxStringLength: 10 }))
+      .toEqual({ rows: [], failure: expect.objectContaining({ limit: "maxStringLength", actual: 17 }) })
+    // row 1's three cells pass maxCellsPerSheet before row 0's cell in column 10 passes maxColumns
+    const cells = [X.number(1, 0, 0, 1), X.number(1, 1, 0, 1), X.number(1, 2, 0, 1), X.number(0, 10, 0, 1)]
+    expect(await rowsUntilFailure(one(cells), { maxCellsPerSheet: 2, maxColumns: 5 }))
+      .toEqual({ rows: [], failure: expect.objectContaining({ limit: "maxCellsPerSheet", actual: 3 }) })
+    expect(await rowsUntilFailure(one(cells.slice(1).concat(cells.slice(0, 1))), { maxCellsPerSheet: 3, maxColumns: 5 }))
+      .toEqual({ rows: [], failure: expect.objectContaining({ limit: "maxColumns", actual: 11 }) })
+    // within a MULRK, cell by cell: a column at maxColumns before the count, the count before a later column
+    const mul = X.mulrk(0, 3, [[0, 1], [0, 2], [0, 3]])
+    expect(await errorOf(one([mul]), { maxColumns: 6, maxCellsPerSheet: 2 })).toMatchObject({ limit: "maxCellsPerSheet", actual: 3 })
+    expect(await errorOf(one([mul]), { maxColumns: 5, maxCellsPerSheet: 3 })).toMatchObject({ limit: "maxColumns", actual: 6 })
+    expect(await errorOf(one([mul]), { maxColumns: 4, maxCellsPerSheet: 1 })).toMatchObject({ limit: "maxColumns", actual: 5 })
+    // a formula's "" result counts where its wait ends
+    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.number(1, 0, 0, 1)]), { maxCellsPerSheet: 1 })).toMatchObject({ limit: "maxCellsPerSheet", actual: 2 })
   })
 
-  it("end() emits rows the scan didn't place within the budget, over several batches", () => {
-    const rows = new Rows({ limits: SpreadsheetLimits.defaults } as unknown as SheetContext)
-    rows.start(new Map())
-    // 1 000 rows with a cell each, none placed by the scan: all left for end()
-    // progress: r up to 1000
-    for (let r = 0; r < 1000; r++) expect(rows.cell(999 - r, Cell.number(0, r))).toBeUndefined()
-    const out: Array<number> = []
-    let ended: unknown = false
-    let batches = 0
-    // progress: each batch emits rows (budget 100 > 0), up to 1 002 batches
-    for (; ended !== true; batches++) {
-      if (batches > 1002) throw new Error("end() doesn't go on")
-      rows.budget = rows.effort + 100
-      ended = rows.end()
-      expect(typeof ended).toBe("boolean")
-      const before = out.length
-      // progress: each take() takes at least one row
-      while (rows.queued()) out.push(...rows.take().map((r) => r.index))
-      expect(out.length - before).toBeLessThanOrEqual(101)
+  it("a FORMULA out of place takes its STRING, right after it or after a SHRFMLA, ARRAY, TABLE or CONTINUE", async () => {
+    for (const between of [[], [companion(SHRFMLA)], [companion(TABLE), X.record(CONTINUE, [0, 0])], [X.record(CONTINUE, [1])]]) {
+      expect(await cellsOf([X.number(0, 0, 0, 1), X.number(1, 0, 0, 2), X.formula(0, 1, 0, { kind: 0 }), ...between, X.string("late"), X.number(2, 0, 0, 3)]), String(between.length)).toEqual([
+        [0, 0, "Number", 1],
+        [0, 1, "Text", "late"],
+        [1, 0, "Number", 2],
+        [2, 0, "Number", 3]
+      ])
     }
-    expect(batches).toBeGreaterThanOrEqual(10)
-    expect(out).toEqual(Array.from({ length: 1000 }, (_, r) => r))
+    // in place, and without a STRING after its SHRFMLA: ""
+    expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), companion(ARRAY), X.formula(0, 1, 0, { kind: 0 }), companion(SHRFMLA), X.string("b")])).toEqual([
+      [0, 0, "Text", ""],
+      [0, 1, "Text", "b"]
+    ])
   })
 
   it("repeated ROW records give one row each, hidden if any of them hides it", async () => {
@@ -559,20 +558,7 @@ describe("xls sheet: emitting rows", () => {
 })
 
 describe("xls sheet: repeated columns", () => {
-  it("a row's repeated columns don't pile up: past 2 x maxColumns cells it is compacted, the last cell of a column kept", async () => {
-    const limits = { ...SpreadsheetLimits.defaults, maxColumns: 8 }
-    const rows = new Rows({ limits } as unknown as SheetContext)
-    rows.start(new Map([[0, Infinity]]))
-    let most = 0
-    // 1 000 passes over columns 7..0 (unsorted): 8 000 cells for 8 columns
-    for (let k = 0; k < 8000; k++) {
-      expect(rows.cell(0, Cell.number(7 - (k % 8), k))).toBeUndefined()
-      most = Math.max(most, (rows as unknown as { rows: { rows: Map<number, { cells: Array<unknown> }> } }).rows.rows.get(0)!.cells.length)
-    }
-    expect(most).toBeLessThanOrEqual(2 * 8 + 1)
-    expect(rows.end()).toBe(true)
-    const [row] = rows.take()
-    expect(row.cells.map((c) => [c.column, Cell.value(c)])).toEqual(Array.from({ length: 8 }, (_, c) => [c, 8000 - 8 + 7 - c]))
+  it("a row's repeated columns are compacted, the last cell of a column kept", async () => {
     // read end to end: the same rule over many MULBLANK and NUMBER records on the same columns
     const records = Array.from({ length: 50 }, (_, k) => [X.mulBlank(0, 0, new Array(8).fill(0)), X.number(0, 7 - (k % 8), 0, k)]).flat()
     const { sheets } = await readOk(one(records), { maxColumns: 8 })
@@ -813,7 +799,7 @@ describe("xls sheet: each sheet reads its own substream once", () => {
       expect(failureOf(await rowsOf(wb, k, steps))).toMatchObject({ reason: "the sheet has no EOF" })
       expect(failureOf(await detailsOf(wb, k, steps))).toMatchObject({ reason: "the sheet has no EOF" })
     }
-    // rows: the header pass and the main pass, details: one pass (each step at most once per record)
+    // rows: the index pass (no row is complete), details: one pass (each step at most once per record)
     expect(steps.total()).toBeLessThanOrEqual(3 * records)
   })
 
@@ -874,18 +860,21 @@ describe("xls sheet: the rows reader's phases", () => {
     expect(Exit.isSuccess(rows) && Array.from(rows.value).map((r) => r.index)).toEqual([0])
   })
 
-  it("each pass counts one step per record it reads, the sheet's EOF included", async () => {
-    // an empty sheet: the header scan and the reading pass each read its EOF;
-    // with an embedded substream (BOF, EOF) before it, each reads 3 records
+  it("the index pass counts one step per record it reads, the sheet's EOF included; the rows one per record, cell and row", async () => {
+    // an empty sheet: the index pass reads its EOF; with an embedded
+    // substream (BOF, EOF) before it, 3 records; a row of one NUMBER: the
+    // index pass reads 2 records, the row's record is read again, its cell
+    // and the row
     const cases: ReadonlyArray<[string, ReadonlyArray<Uint8Array>, number]> = [
-      ["an empty sheet", [], 2],
-      ["an embedded substream only", [X.bof(0x0020), X.eof()], 6]
+      ["an empty sheet", [], 1],
+      ["an embedded substream only", [X.bof(0x0020), X.eof()], 3],
+      ["a row of one cell", [X.number(0, 0, 0, 1)], 5]
     ]
     for (const [label, records, expected] of cases) {
       const wb = await Effect.runPromise(Xls.read(X.xls(one(records))))
       const steps = counter("steps")
       const rows = await rowsOf(wb, 0, steps)
-      expect(Exit.isSuccess(rows) && Array.from(rows.value), label).toEqual([])
+      expect(Exit.isSuccess(rows) && Array.from(rows.value).length, label).toBe(label === "a row of one cell" ? 1 : 0)
       expect(steps.total(), label).toBe(expected)
     }
   })

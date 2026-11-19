@@ -97,8 +97,8 @@ describe("xls: 65 536 rows", () => {
     // 64 rows of 16 384 empty cells, 4 MULBLANK records each: few records, many cells
     const xfs = new Array<number>(4096).fill(0)
     const records = Array.from({ length: 64 }, (_, r) => [0, 1, 2, 3].map((k) => X.mulBlank(r, 4096 * k, xfs))).flat()
-    // and 48 of them (under the held-cells cap) all waiting for a last cell
-    // of row 0 at the end: they complete together, and come out in chunks
+    // and 48 of them all waiting for a last cell of row 0 at the end (one
+    // record out of place): they come out in chunks
     const wb = await Effect.runPromise(Xls.read(X.xls({
       sheets: [{ name: "Wide", records }, { name: "Waiting", records: [...records.slice(0, 4 * 48), X.number(0, 0, 0, 1)] }]
     })))
@@ -175,7 +175,7 @@ describe("xls: 65 536 rows", () => {
       // a batch: BATCH_CELLS of cells read and rows emitted, then at most
       // one more record (4 109 cells), plus a few steps per record and row
       expect(steps.maxPerTurn, `sheet ${sheet}`).toBeLessThanOrEqual(BATCH_CELLS + 4109 + 4 * BATCH_RECORDS)
-      // the flood: a step to scan and one to read each record, about two per row out
+      // the flood: a step to index each record, about two per row out
       if (sheet === 0) expect(counted.total()).toBeLessThan(2 * 16 * ROWS + 3 * ROWS)
     }
   }, 300_000)

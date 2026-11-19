@@ -184,8 +184,10 @@ export class RecordCursor {
    * at each segment boundary inside the string, a new option byte gives
    * the width of the rest. `Truncated` if the segments end first, or end
    * a segment in the middle of a 16-bit character; `end` is `consumed()`.
+   * With `decode` false, the characters are checked and passed over, and
+   * the text is "".
    */
-  chars(count: number, highByte: boolean): StringRead {
+  chars(count: number, highByte: boolean, decode = true): StringRead {
     let wide = highByte
     let left = count
     const parts: Array<string> = []
@@ -205,8 +207,10 @@ export class RecordCursor {
       const fit = Math.floor((this.segmentEnd - this.at) / width)
       if (fit === 0) return TRUNCATED // half a 16-bit character at the end of a segment
       const take = Math.min(left, fit)
-      const slice = this.bytes.subarray(this.at, this.at + take * width)
-      parts.push(wide ? utf16.decode(slice) : compressed(slice))
+      if (decode) {
+        const slice = this.bytes.subarray(this.at, this.at + take * width)
+        parts.push(wide ? utf16.decode(slice) : compressed(slice))
+      }
       this.at += take * width
       this.known -= take * width
       this.read += take * width
@@ -227,8 +231,11 @@ export class RecordCursor {
  * After `TooLong` the reader sits before that string's characters, so the
  * caller must stop reading the SST there (fail with `LimitExceeded`): the
  * next read would start in the middle of a string.
+ *
+ * With `decode` false, the string is checked the same way and passed over
+ * without decoding its characters (the text is "").
  */
-export const readRichString = (reader: RecordCursor, maxLength: number): StringRead => {
+export const readRichString = (reader: RecordCursor, maxLength: number, decode = true): StringRead => {
   // cch u16, flags u8, then cRun u16 and cbExtRst u32 when the flags say so
   if (!reader.has(3)) return TRUNCATED
   const count = reader.u16()
@@ -239,7 +246,7 @@ export const readRichString = (reader: RecordCursor, maxLength: number): StringR
   const runs = rich ? reader.u16() : 0
   const extSize = ext ? reader.u32() : 0
   if (count > maxLength) return tooLongString(count)
-  const text = reader.chars(count, (flags & 0x01) !== 0)
+  const text = reader.chars(count, (flags & 0x01) !== 0, decode)
   if (text._tag !== "Ok") return text
   if (!reader.skip(runs * 4) || !reader.skip(extSize)) return TRUNCATED
   return ok(text.value, reader.consumed())

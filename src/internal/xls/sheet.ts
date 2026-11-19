@@ -2,21 +2,31 @@
  * A worksheet substream of a BIFF8/BIFF5 workbook stream -> rows, streamed.
  *
  * The substream starts at its BOUNDSHEET offset with a worksheet BOF and
- * runs to its EOF. Records are read in batches (at most `BATCH_RECORDS`
- * records or about `BATCH_CELLS` cells per pull, with a yield before each),
- * and rows come out in chunks of at most `BATCH_RECORDS` rows or about
- * `BATCH_CELLS` cells, so the work between event-loop turns is bounded.
+ * runs to its EOF. Its rows are read in two steps, both in bounded turns
+ * with a yield to the event loop between them (`sheetRows`):
  *
- * - Rows: ROW records give hidden rows (fDyZero) and rows without cells;
- *   cells mostly come row by row after their block of ROW records, but
- *   some writers put a row's cells in several places, or ROW records after
- *   the cells. A first pass over the record headers (`RowScan`) finds where
- *   each row's last cell is, and the rows ROW records declare or hide; a
- *   row is emitted, merged, once its last cell record is handled, in row
- *   order (rows before it wait, holding only cells already counted against
- *   `maxCellsPerSheet`). ROW-only rows are emitted at their place in that
- *   order, without waiting for any record. Hidden rows are emitted with
- *   `hidden: true`, never skipped.
+ * 1. **The index** (`indexRecords`): one pass over the substream's records,
+ *    in stream order. It checks every record as it will be read (record
+ *    lengths, strings, shared-string indexes, column ranges, and the
+ *    `maxColumns` and `maxCellsPerSheet` limits, which count cells in stream
+ *    order), and notes where each row's cell records are: one range per row
+ *    for the common case, where a row's cells come together, and the
+ *    offsets of the records that come later, out of place (a row whose
+ *    cells some writers put in several places), grouped by row. ROW records
+ *    give hidden rows (fDyZero) and rows without cells, wherever they come.
+ *    It holds a few numbers per row and one per out-of-place record, never
+ *    a cell. The first failure is kept with the offset where it happens;
+ *    the pass then goes on over the record headers only, to the EOF.
+ * 2. **The rows** (`emitRows`): in row order, each row's records are read
+ *    again from the index and decoded into its cells, merged (the last cell
+ *    of a column wins, in stream order), and the row goes out. A row goes
+ *    out only if it was complete before the failure, as when the records
+ *    were read in stream order: its records, and those of the rows before
+ *    it, all come before the failure's offset (a FORMULA with a string
+ *    result is complete at its STRING). Then the failure is reported. ROW-only
+ *    rows are complete from the start. Hidden rows are emitted with
+ *    `hidden: true`, never skipped.
+ *
  * - Cells: LABELSST, LABEL, RSTRING (text), NUMBER, RK, MULRK (numbers),
  *   BOOLERR (booleans and errors), BLANK, MULBLANK (Empty), FORMULA with
  *   its cached result (a following STRING record for text, after any
@@ -28,7 +38,7 @@
  *
  * @internal
  */
-import { absurd, Cause, Effect, Stream } from "effect"
+import { Cause, Effect, Stream } from "effect"
 import type * as Arr from "effect/Array"
 import type * as Pull from "effect/Pull"
 import * as Cell from "../../Cell.ts"
@@ -42,30 +52,32 @@ import { FixedReader, type StringFailure } from "../binary/layout.ts"
 import { WorkMeter } from "../meter.ts"
 import { numberCell } from "../numFmt.ts"
 import { LayoutBuilder } from "../sheet/layout.ts"
-import { HeldRows, NO_ROWS } from "../sheet/rows.ts"
+import { RowCells } from "../sheet/rows.ts"
+import { Turn } from "../walk.ts"
 import { yieldNow } from "../yield.ts"
-import { readString } from "./fields.ts"
+import { readString, stringFailure } from "./fields.ts"
 import type { Globals } from "./globals.ts"
 
-/** Records handled per pull: bounded work between event-loop turns. */
+/** Records per turn: bounded work between event-loop turns. */
 export const BATCH_RECORDS = 4096
 /**
- * Cells per pull, read or emitted: a batch ends once it passes this (one
+ * Cells per turn, read or emitted: a turn ends once it passes this (one
  * MULBLANK holds up to 4 109 cells), and so does a chunk of rows (a row
  * holds at most `maxColumns` cells, see `compact`).
  */
 export const BATCH_CELLS = 65_536
+/** What a record costs in a turn, against a cell's 1: a turn holds `BATCH_RECORDS` records or `BATCH_CELLS` cells. */
+const RECORD_COST = BATCH_CELLS / BATCH_RECORDS
 
 /**
- * Cells held in rows not emitted yet (rows waiting for a later cell of
- * theirs, or for an earlier row): at most 16 batches. Rows
- * stream in row order, so a row whose cells come both early and late in
- * the sheet holds back every row after it; real files split rows across a
- * few rows only (the corpus holds at most a few thousand cells). Past it,
- * the sheet is MalformedFile: MS-XLS puts a row's cells in its row block.
- * Tests may lower it (`SheetContext.heldCells`).
+ * Records of a sheet out of place: cell records of a row that come after
+ * another row's cells started (a row split far apart, or rows out of
+ * order). Each costs one offset in the index. Real files split rows across
+ * a few rows only; past this many, the sheet is MalformedFile (MS-XLS puts
+ * a row's cells in its row block). Tests may lower it
+ * (`SheetContext.displacedRecords`).
  */
-export const HELD_CELLS = 16 * BATCH_CELLS
+export const DISPLACED_RECORDS = 1_048_576
 
 const ROW = 0x0208
 const LABELSST = 0x00FD
@@ -129,8 +141,8 @@ export interface SheetContext {
   readonly part: string
   readonly globals: Globals
   readonly limits: Limits
-  /** The cap on held cells, `HELD_CELLS` by default (tests lower it). */
-  readonly heldCells?: number
+  /** The cap on records out of place, `DISPLACED_RECORDS` by default (tests lower it). */
+  readonly displacedRecords?: number
 }
 
 const malformed = (part: string, reason: string, offset?: number) =>
@@ -168,493 +180,642 @@ const openSubstream = (context: SheetContext, continued?: number): SubstreamRead
   return reader
 }
 
-/** Cell records: each starts with its row (u16). */
-const CELL_RECORDS: ReadonlySet<number> = new Set([LABELSST, LABEL, RSTRING, NUMBER, RK, MULRK, BOOLERR, BLANK, MULBLANK, FORMULA, FORMULA_BIFF4])
+/** Whether a record of `type` is a cell record: each starts with its row (u16). */
+const isCell = (type: number): boolean =>
+  type === LABELSST || type === LABEL || type === RSTRING || type === NUMBER || type === RK || type === MULRK ||
+  type === BOOLERR || type === BLANK || type === MULBLANK || type === FORMULA || type === FORMULA_BIFF4
 
 /**
- * A first pass over the substream's records (headers, row numbers and ROW
- * flags only): the offset of each row's last cell record, and the rows ROW
- * records declare and hide. Some writers emit a row's cells in several
- * places, or ROW records after the cells; knowing all this up front lets the
- * main pass merge a row's cells, with its hidden flag, and still emit every
- * row, in row order, as soon as its cells are complete. A row declared only
- * by ROW records has no cell to wait for: its entry is -1, due at once. One
- * entry per row with cells or a ROW record (at most 65 536: rows are u16).
+ * Whether a record of `type` keeps a FORMULA's wait for its string result:
+ * its STRING comes right after it, or after its SHRFMLA, ARRAY or TABLE
+ * (any of them maybe continued by CONTINUE records, which are part of it).
+ * Any other record ends the wait (the result is ""), an embedded
+ * substream's BOF too.
  */
-class RowScan {
-  readonly lastAt = new Map<number, number>()
-  /** Rows with a ROW record. */
-  readonly declared = new Set<number>()
-  /** Rows with a ROW record that hides them (fDyZero). */
-  readonly hidden = new Set<number>()
-  done = false
-  private readonly reader: SubstreamReader
-  private readonly fields = new FixedReader()
-
-  constructor(context: SheetContext, offset: number) {
-    this.reader = new SubstreamReader(context.stream, context.part, offset, context.end)
-  }
-
-  /**
-   * Reads up to `max` records; `done` at the sheet's EOF or where the records
-   * stop (the main pass reports why). Returns its steps, for the work meter.
-   */
-  step(max: number): number {
-    // progress: k up to max; every read() advances the reader
-    for (let k = 0; k < max; k++) {
-      const record = this.reader.read()
-      if (record === undefined || record instanceof MalformedFile) {
-        this.done = true
-        return k + 1
-      }
-      if (record instanceof Embedded) continue
-      if (record.type === EOF) {
-        this.done = true
-        return k + 1
-      }
-      // a cell or ROW record too short for its row is reported by the
-      // main pass; any other record isn't read here
-      const f = this.fields.fixed(record.data, ROW_FIELD_MIN)
-      if (f === undefined) continue
-      const row = f.u16(0)
-      if (CELL_RECORDS.has(record.type)) this.lastAt.set(row, record.offset)
-      else if (record.type === ROW) {
-        this.declared.add(row)
-        // the flags byte, if the record reaches it (a ROW cut before
-        // ROW_MIN fails in the main pass, after rows before it are out)
-        if (record.data.length > 12 && (f.u8(12) & 0x20) !== 0) this.hidden.add(row)
-        if (!this.lastAt.has(row)) this.lastAt.set(row, -1)
-      }
-    }
-    return max
-  }
-}
-
-/**
- * The wait for a formula's text result: none, or after a FORMULA whose
- * string result comes in the next STRING record (MS-XLS: FORMULA, then
- * maybe SHRFMLA, ARRAY or TABLE, then STRING, any of them maybe continued
- * by CONTINUE records).
- */
-export type FormulaWait =
-  | { readonly _tag: "Idle" }
-  | { readonly _tag: "AwaitingString"; readonly row: number; readonly column: number }
-
-const IDLE: FormulaWait = { _tag: "Idle" }
-
-/**
- * Builds rows from cell records and the `RowScan`'s ROW records, through
- * the shared `HeldRows`. Cells of a row are gathered until the record
- * holding its last cell is handled, then rows are emitted in row order.
- * Rows waiting for later cells hold only cells already counted against
- * `maxCellsPerSheet`.
- */
-export class Rows {
-  /** Rows ready to emit; `out[outAt]` is the next one (see `take`). */
-  private out: ReadonlyArray<Row> = NO_ROWS
-  private outAt = 0
-  /** The rows' cells, limits and compaction. */
-  private readonly rows: HeldRows
-  /** Offset of each row's last cell record, -1 for a row with ROW records only (see `RowScan`). */
-  private lastAt: ReadonlyMap<number, number> = new Map()
-  /** Rows the scan placed, ascending; `order[nextRow]` is the next one to emit. */
-  private order: Uint32Array = new Uint32Array(0)
-  private nextRow = 0
-  /** `lastAt` of `order[nextRow]` (Infinity when none is left). */
-  private nextAt = Infinity
-  /** Rows declared by ROW records, and those they hide (from the `RowScan`). */
-  private declared: ReadonlySet<number> = new Set()
-  private hidden: ReadonlySet<number> = new Set()
-  /** Rows the scan didn't place, in row order (set by `end`); `left[leftAt]` is the next one. */
-  private left: Uint32Array | undefined
-  private leftAt = 0
-  /** Emitting rows stops once `effort` reaches it, and goes on in the next batch. */
-  budget = Infinity
-  /**
-   * Steps of its loops (cells, rows, queue steps), and of the caller's
-   * record loop, since the work meter was last told (see `takeSteps`).
-   */
-  steps = 0
-  /** The rows' sorting work already handed to the work meter. */
-  private sortedTold = 0
-  /** Whether a FORMULA waits for its text result in the next STRING record (see `handle`). */
-  wait: FormulaWait = IDLE
-  /** Pointed at each record whose fixed fields are read (see `handle`). */
-  readonly fields = new FixedReader()
-
-  constructor(context: SheetContext) {
-    this.rows = new HeldRows(context.limits)
-  }
-
-  /** Cells in rows not emitted yet (see `HELD_CELLS`). */
-  get held(): number {
-    return this.rows.held
-  }
-
-  /** Cells read, cells sorted (compacting a row) and rows emitted: the work that a batch spends, up to `budget`. */
-  get effort(): number {
-    return this.rows.work
-  }
-
-  /** The steps since the last call, sorting steps included: the work meter's units. */
-  takeSteps(): number {
-    const sorted = this.rows.sorted
-    const steps = this.steps + sorted - this.sortedTold
-    this.sortedTold = sorted
-    this.steps = 0
-    return steps
-  }
-
-  /** Whether row `index` waits for its formula's STRING. */
-  private waiting(index: number): boolean {
-    const wait = this.wait
-    return wait._tag === "AwaitingString" && wait.row === index
-  }
-
-  /** Where each row's cells end and the rows ROW records declare and hide, from the `RowScan`. */
-  start(lastAt: ReadonlyMap<number, number>, declared: ReadonlySet<number> = new Set(), hidden: ReadonlySet<number> = new Set()): void {
-    this.lastAt = lastAt
-    this.declared = declared
-    this.hidden = hidden
-    this.order = Uint32Array.from(lastAt.keys()).sort()
-    this.nextRow = 0
-    this.nextAt = this.order.length > 0 ? lastAt.get(this.order[0]!)! : Infinity
-  }
-
-  /** Emits row `index` with its cells, or without any if only ROW records declared it. */
-  private finishRow(index: number): SpreadsheetError | undefined {
-    const hidden = this.hidden.has(index)
-    const finished = this.rows.finishRow(index, hidden)
-    if (finished === true) return undefined
-    if (finished !== false) return finished
-    return this.declared.has(index) ? this.rows.finishEmptyRow(index, hidden) : undefined
-  }
-
-  /** Whether rows wait to be taken. */
-  queued(): boolean {
-    return this.outAt < this.out.length || this.rows.ready
-  }
-
-  /** The next chunk of rows: at least one, at most `BATCH_RECORDS` rows or until `BATCH_CELLS` cells are passed. */
-  take(): Arr.NonEmptyReadonlyArray<Row> {
-    if (this.outAt === this.out.length) {
-      this.out = this.rows.take()
-      this.outAt = 0
-    }
-    const from = this.outAt
-    let cells = 0
-    // progress: outAt increases up to out.length
-    do {
-      this.steps++
-      cells += this.out[this.outAt++]!.cells.length
-    } while (this.outAt < this.out.length && this.outAt - from < BATCH_RECORDS && cells < BATCH_CELLS)
-    const chunk = this.out.slice(from, this.outAt) as unknown as Arr.NonEmptyReadonlyArray<Row>
-    if (this.outAt === this.out.length) {
-      this.out = NO_ROWS
-      this.outAt = 0
-    }
-    return chunk
-  }
-
-  /**
-   * After the record at `offset`: emits, in row order, the rows whose last
-   * cell record is at or before it (not one still waiting for its STRING),
-   * until `effort` reaches `budget` (see `behind`).
-   */
-  complete(offset: number): SpreadsheetError | undefined {
-    // progress: nextRow increases, bounded by order.length (offset may be Infinity)
-    while (this.nextRow < this.order.length && this.nextAt <= offset && this.effort < this.budget) {
-      this.steps++
-      const index = this.order[this.nextRow]!
-      if (this.waiting(index)) return undefined
-      this.nextRow++
-      this.nextAt = this.nextRow < this.order.length ? this.lastAt.get(this.order[this.nextRow]!)! : Infinity
-      const error = this.finishRow(index)
-      if (error !== undefined) return error
-    }
-    return undefined
-  }
-
-  /** Whether rows complete at `offset` are left for `complete` (it stopped at the budget). */
-  behind(offset: number): boolean {
-    return this.nextRow < this.order.length && this.nextAt <= offset && !this.waiting(this.order[this.nextRow]!)
-  }
-
-  /** Adds `cell` to row `row`. */
-  cell(row: number, cell: Cell.Cell): SpreadsheetError | undefined {
-    this.steps++
-    return this.rows.addCell(row, cell)
-  }
-
-  /**
-   * After the EOF, once `complete(Infinity)` isn't `behind`: emits the
-   * rest, until `effort` reaches `budget`; `true` once all is out (else
-   * call it again in the next batch).
-   */
-  end(): SpreadsheetError | boolean {
-    // rows the scan didn't place (none when both passes agree), in row order
-    const left = this.left ??= this.rows.indexes()
-    // progress: leftAt increases up to left.length
-    while (this.leftAt < left.length) {
-      if (this.effort >= this.budget) return false
-      this.steps++
-      const failed = this.finishRow(left[this.leftAt++]!)
-      if (failed !== undefined) return failed
-    }
-    return true
-  }
-}
+const keepsWait = (type: number): boolean => type === STRING || type === SHRFMLA || type === ARRAY || type === TABLE || type === CONTINUE
 
 /** A number cell, a Date when its XF has a date format. */
 const xfNumber = (globals: Globals, column: number, xf: number, value: number): Cell.Cell =>
   numberCell(column, value, globals.styles.format(xf), globals.date1904)
 
-/**
- * Handles one record of the substream; `true` at its EOF. An embedded
- * substream (a chart object) is skipped; its BOF ends a formula's wait.
- */
-const handle = (record: BiffRecord | Embedded, rows: Rows, context: SheetContext): SpreadsheetError | boolean => {
-  const { globals, part } = context
-  // a formula's string result comes right after it, or after its SHRFMLA, ARRAY or TABLE
-  // (any of them maybe continued by CONTINUE records, which are part of it). Any other
-  // record ends the wait, an embedded substream's BOF too (no FORMULA is read inside one,
-  // so its other records come with no wait). FORMULA starts the wait and STRING takes it
-  // (see their cases)
-  const wait = rows.wait
-  switch (wait._tag) {
-    case "Idle":
-      break
-    case "AwaitingString": {
-      if (!(record instanceof Embedded)) {
-        const type = record.type
-        if (type === STRING || type === SHRFMLA || type === ARRAY || type === TABLE || type === CONTINUE) break
-      }
-      rows.wait = IDLE
-      const error = rows.cell(wait.row, Cell.text(wait.column, ""))
-      if (error !== undefined) return error
-      break
+/** Bits of `SheetIndex.flags`. */
+const DECLARED = 1
+const HIDDEN = 2
+/** The row has a range of cell records (`start` to `end`). */
+const RANGED = 4
+
+/** Where a failure stands when the sheet has no EOF: after every record. */
+const AFTER_ALL = Number.MAX_SAFE_INTEGER
+
+/** A growable array of u32s. */
+class U32List {
+  items = new Uint32Array(64)
+  length = 0
+
+  push(value: number): void {
+    if (this.length === this.items.length) {
+      const grown = new Uint32Array(this.items.length * 2)
+      grown.set(this.items)
+      this.items = grown
     }
-    default:
-      return absurd(wait)
-  }
-  if (record instanceof Embedded) return false
-  const { data } = record
-  const fields = rows.fields
-  switch (record.type) {
-    case EOF:
-      return true
-    case ROW:
-      // the `RowScan` already took the declared row and its hidden flag
-      return fields.fixed(data, ROW_MIN) === undefined ? truncated(part, record) : false
-    case LABELSST: {
-      const f = fields.fixed(data, LABELSST_MIN)
-      if (f === undefined) return truncated(part, record)
-      const isst = f.u32(6)
-      const value = globals.strings[isst]
-      if (value === undefined) return malformed(part, `shared string ${isst} doesn't exist`, record.offset)
-      return rows.cell(f.u16(0), Cell.text(f.u16(2), value)) ?? false
-    }
-    case LABEL:
-    case RSTRING: {
-      const f = fields.fixed(data, CELL_MIN)
-      if (f === undefined) return truncated(part, record)
-      const row = f.u16(0)
-      const column = f.u16(2)
-      const text = readString(data, CELL_MIN, globals.text, 2)
-      if (text._tag !== "Ok") return stringFailed(text, part, record, context.limits)
-      return rows.cell(row, Cell.text(column, text.value)) ?? false
-    }
-    case NUMBER: {
-      const f = fields.fixed(data, NUMBER_MIN)
-      if (f === undefined) return truncated(part, record)
-      return rows.cell(f.u16(0), xfNumber(globals, f.u16(2), f.u16(4), f.f64(6))) ?? false
-    }
-    case RK: {
-      const f = fields.fixed(data, RK_MIN)
-      if (f === undefined) return truncated(part, record)
-      return rows.cell(f.u16(0), xfNumber(globals, f.u16(2), f.u16(4), decodeRk(f.u32(6)))) ?? false
-    }
-    case MULRK:
-    case MULBLANK: {
-      const f = fields.fixed(data, MUL_MIN)
-      if (f === undefined) return truncated(part, record)
-      const row = f.u16(0)
-      const first = f.u16(2)
-      const last = f.u16(data.length - 2)
-      const width = record.type === MULRK ? 6 : 2
-      const count = (data.length - MUL_MIN) / width
-      if (!Number.isInteger(count) || last - first + 1 !== count) {
-        return malformed(part, `record 0x${record.type.toString(16)} doesn't match its column range`, record.offset)
-      }
-      // the cells fill the record between colFirst and colLast: cell k's
-      // ixfe at 4 + width * k (and its rk after it) ends by data.length - 2.
-      // progress: k up to count (bounded by the record length)
-      for (let k = 0; k < count; k++) {
-        const xf = f.u16(4 + width * k)
-        const cell = record.type === MULRK
-          ? xfNumber(globals, first + k, xf, decodeRk(f.u32(6 + width * k)))
-          : Cell.empty(first + k)
-        const error = rows.cell(row, cell)
-        if (error !== undefined) return error
-      }
-      return false
-    }
-    case BOOLERR: {
-      const f = fields.fixed(data, BOOLERR_MIN)
-      if (f === undefined) return truncated(part, record)
-      const row = f.u16(0)
-      const column = f.u16(2)
-      const value = f.u8(6)
-      if (f.u8(7) === 1) return rows.cell(row, Cell.error(column, errorCode(value))) ?? false
-      return rows.cell(row, Cell.boolean(column, value !== 0)) ?? false
-    }
-    case BLANK: {
-      const f = fields.fixed(data, CELL_MIN)
-      if (f === undefined) return truncated(part, record)
-      return rows.cell(f.u16(0), Cell.empty(f.u16(2))) ?? false
-    }
-    case FORMULA:
-    case FORMULA_BIFF4: {
-      const f = fields.fixed(data, FORMULA_MIN)
-      if (f === undefined) return truncated(part, record)
-      const row = f.u16(0)
-      const column = f.u16(2)
-      if (f.u16(12) === 0xFFFF) {
-        // a special result: string (in the next STRING record), boolean, error, empty string
-        const kind = f.u8(6)
-        const value = f.u8(8)
-        if (kind === 0) {
-          rows.wait = { _tag: "AwaitingString", row, column }
-          return false
-        }
-        if (kind === 1) return rows.cell(row, Cell.boolean(column, value !== 0)) ?? false
-        if (kind === 2) return rows.cell(row, Cell.error(column, errorCode(value))) ?? false
-        return rows.cell(row, Cell.text(column, "")) ?? false
-      }
-      return rows.cell(row, xfNumber(globals, column, f.u16(4), f.f64(6))) ?? false
-    }
-    case STRING: {
-      const pending = rows.wait
-      if (pending._tag === "Idle") return false // a STRING without a formula: ignored
-      rows.wait = IDLE
-      // BIFF8: an XLUnicodeString, maybe continued (each CONTINUE restarts
-      // with an option byte; the reader checked them and moved past them);
-      // its character count is checked before any character is read.
-      // BIFF5: a u16-count code-page string, never continued
-      const read = globals.biff8
-        ? readRichString(new RecordCursor(context.stream, record, context.end), context.limits.maxStringLength)
-        : readString(data, 0, globals.text, 2)
-      if (read._tag !== "Ok") return stringFailed(read, part, record, context.limits)
-      return rows.cell(pending.row, Cell.text(pending.column, read.value)) ?? false
-    }
-    default:
-      return false
+    this.items[this.length++] = value
   }
 }
 
 /**
- * Where a rows reader is: its substream didn't open; its record headers
- * are being scanned (`RowScan`); its records are being read (rows complete
- * up to `handledAt`, the offset of the last record handled, may wait for
- * budget); its EOF was handled and only rows are left to emit; or all is out.
+ * Where a sheet's rows are, by row: one slot per row with cell records or
+ * a ROW record (at most 65 536: rows are u16), in the order they are first
+ * seen. A slot holds its row, the range of its cell records that came
+ * together first (`start` to `end`, from the first record's header to the
+ * end of the last one), its flags, and `complete`: the offset after which
+ * the row was complete in stream order (its last cell record, or for a
+ * FORMULA waiting for its string result, the record that ends the wait;
+ * -1 for a row with ROW records only). Cell records of a row that come
+ * after another row's (out of place) are kept apart, by offset, with their
+ * slot.
  */
-type Phase =
-  | { readonly _tag: "Failed"; readonly error: SpreadsheetError }
-  | { readonly _tag: "Scanning"; readonly reader: SubstreamReader; readonly scan: RowScan }
-  | { readonly _tag: "Reading"; readonly reader: SubstreamReader; handledAt: number }
-  | { readonly _tag: "Draining" }
-  | { readonly _tag: "Done" }
+class SheetIndex {
+  slots = 0
+  row = new Uint32Array(64)
+  start = new Uint32Array(64)
+  end = new Uint32Array(64)
+  complete = new Float64Array(64)
+  flags = new Uint8Array(64)
+  private readonly bySlot = new Map<number, number>()
+  /** The last row looked up and its slot: a row's records mostly come together. */
+  private lastRow = -1
+  private lastSlot = -1
+  /** Out-of-place records: their slots and offsets, in stream order. */
+  readonly displacedSlot = new U32List()
+  readonly displacedAt = new U32List()
+  /**
+   * FORMULAs whose string result doesn't come in the record right after
+   * them (a SHRFMLA, ARRAY, TABLE or CONTINUE comes first): their offsets,
+   * in stream order, and the offset of their STRING (0 for none: the
+   * result is ""). See `stringOf`.
+   */
+  readonly formulaAt = new U32List()
+  readonly formulaString = new U32List()
 
-const DRAINING: Phase = { _tag: "Draining" }
-const DONE: Phase = { _tag: "Done" }
+  /** The slot of row `row`, made if new (its `complete` -1 until a cell record of it comes). */
+  slotOf(row: number): number {
+    if (row === this.lastRow) return this.lastSlot
+    let slot = this.bySlot.get(row)
+    if (slot === undefined) {
+      slot = this.slots++
+      if (slot === this.row.length) this.grow()
+      this.row[slot] = row
+      this.complete[slot] = -1
+      this.bySlot.set(row, slot)
+    }
+    this.lastRow = row
+    this.lastSlot = slot
+    return slot
+  }
 
-/** The rows of a worksheet substream. Re-runnable. */
+  private grow(): void {
+    const size = this.row.length * 2
+    const row = new Uint32Array(size)
+    row.set(this.row)
+    this.row = row
+    const start = new Uint32Array(size)
+    start.set(this.start)
+    this.start = start
+    const end = new Uint32Array(size)
+    end.set(this.end)
+    this.end = end
+    const complete = new Float64Array(size)
+    complete.set(this.complete)
+    this.complete = complete
+    const flags = new Uint8Array(size)
+    flags.set(this.flags)
+    this.flags = flags
+  }
+
+  /** The STRING of the FORMULA at `formula`, from `formulaAt` (0 for none). */
+  stringOf(formula: number): number {
+    const at = this.formulaAt.items
+    let low = 0
+    let high = this.formulaAt.length
+    // progress: high - low halves
+    while (low < high) {
+      const mid = (low + high) >>> 1
+      if (at[mid]! < formula) low = mid + 1
+      else high = mid
+    }
+    return low < this.formulaAt.length && at[low] === formula ? this.formulaString.items[low]! : 0
+  }
+
+  /** The slots in row order. */
+  ordered(): Uint32Array {
+    // a row is a u16 and a slot below 65 536: row x 65 536 + slot sorts by row
+    const keys = new Uint32Array(this.slots)
+    // progress: k up to slots
+    for (let k = 0; k < this.slots; k++) keys[k] = this.row[k]! * 0x10000 + k
+    keys.sort()
+    // progress: k up to slots
+    for (let k = 0; k < this.slots; k++) keys[k] = keys[k]! & 0xFFFF
+    return keys
+  }
+
+  /**
+   * The out-of-place records grouped by slot, each group in stream order:
+   * slot k's offsets are `offsets[from[k]]` to `offsets[from[k + 1]]`.
+   */
+  grouped(): { readonly offsets: Uint32Array; readonly from: Uint32Array } {
+    const count = this.displacedAt.length
+    const slots = this.displacedSlot.items
+    const at = this.displacedAt.items
+    const from = new Uint32Array(this.slots + 1)
+    // progress: k up to count, then up to slots
+    for (let k = 0; k < count; k++) from[slots[k]! + 1]!++
+    for (let k = 0; k < this.slots; k++) from[k + 1]! += from[k]!
+    const next = from.slice(0, this.slots)
+    const offsets = new Uint32Array(count)
+    // progress: k up to count
+    for (let k = 0; k < count; k++) offsets[next[slots[k]!]!++] = at[k]!
+    return { offsets, from }
+  }
+}
+
+/** Work done since the work meter was last told: steps of every loop (records, cells, sorting, rows). */
+interface Tally {
+  steps: number
+}
+
+/** What the rows walk yields at the end of a turn: rows ready to go out, or none yet. */
+type Pulled = Arr.NonEmptyReadonlyArray<Row> | undefined
+
+/** The index pass's outcome: the index, and the first failure in stream order with where it stands. */
+interface Indexed {
+  readonly index: SheetIndex
+  readonly failure: SpreadsheetError | undefined
+  /** Offset of the record that failed (`AFTER_ALL` for a missing EOF); Infinity without a failure. */
+  readonly failAt: number
+}
+
+/**
+ * The index pass (see the module's comment): reads the substream's records
+ * from `reader` in stream order up to its EOF, checking each as `emitRows`
+ * will read it, and builds the index. Yields when the turn is spent.
+ */
+function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Turn, tally: Tally): Generator<undefined, Indexed, void> {
+  const { globals, part, limits } = context
+  const { maxColumns, maxCellsPerSheet } = limits
+  const displacedCap = context.displacedRecords ?? DISPLACED_RECORDS
+  const index = new SheetIndex()
+  const fields = new FixedReader()
+  let failure: SpreadsheetError | undefined
+  let failAt = Infinity
+  /** Cells read so far in stream order, repeats included (for maxCellsPerSheet). */
+  let cells = 0
+  /** The slot of the FORMULA waiting for its string result (-1 for none), its column, its offset and the offset after it. */
+  let waitSlot = -1
+  let waitColumn = 0
+  let waitFormula = 0
+  let waitNext = 0
+  /** The slot whose cell records came last, and whether they are out of place (see `place`). */
+  let runSlot = -1
+  let runDisplaced = false
+
+  const fail = (error: SpreadsheetError, at: number): void => {
+    failure = error
+    failAt = at
+  }
+  /**
+   * Counts `count` cells in columns `first` on, as they are read: each one
+   * fails at or past `maxColumns`, then past `maxCellsPerSheet` cells (the
+   * column first, cell by cell). The error, if one of them fails.
+   */
+  const countCells = (first: number, count: number): SpreadsheetError | undefined => {
+    if (count <= 0) return undefined
+    // the first cell whose column is out, and the first one over the count
+    const outColumn = Math.max(0, maxColumns - first)
+    const overCount = Math.max(0, maxCellsPerSheet - cells)
+    if (outColumn < count || overCount < count) {
+      if (outColumn <= overCount) return new LimitExceeded({ limit: "maxColumns", max: maxColumns, actual: first + outColumn + 1 })
+      return new LimitExceeded({ limit: "maxCellsPerSheet", max: maxCellsPerSheet, actual: maxCellsPerSheet + 1 })
+    }
+    cells += count
+    return undefined
+  }
+  /**
+   * The wait for a formula's string result ends at the record at `at`,
+   * with its STRING (`string` true) or without one (the result is ""): the
+   * row is complete there, and the index notes the STRING when it doesn't
+   * come right after the FORMULA.
+   */
+  const waited = (at: number, string: boolean): void => {
+    index.complete[waitSlot] = at
+    waitSlot = -1
+    if (at !== waitNext) {
+      index.formulaAt.push(waitFormula)
+      index.formulaString.push(string ? at : 0)
+    }
+  }
+  /** Ends the wait for a formula's string result at the record at `at` without a STRING: its result is "" (one cell). */
+  const endWait = (at: number): void => {
+    waited(at, false)
+    const error = countCells(waitColumn, 1)
+    if (error !== undefined) fail(error, at)
+  }
+  /**
+   * Notes the cell record `record` of slot `slot`: in the slot's range if
+   * the slot's records come together so far, else out of place (a record
+   * of a row whose range another row's records ended). Fails past the cap
+   * on records out of place.
+   */
+  const place = (slot: number, record: BiffRecord): void => {
+    const end = record.offset + 4 + record.data.length
+    if (slot !== runSlot) {
+      runSlot = slot
+      runDisplaced = (index.flags[slot]! & RANGED) !== 0
+      if (!runDisplaced) {
+        index.flags[slot] = index.flags[slot]! | RANGED
+        index.start[slot] = record.offset
+        index.end[slot] = end
+        return
+      }
+    } else if (!runDisplaced) {
+      index.end[slot] = end
+      return
+    }
+    if (index.displacedAt.length >= displacedCap) {
+      fail(malformed(part, `rows split too far apart: over ${displacedCap} cell records out of their row's place`, record.offset), record.offset)
+      return
+    }
+    index.displacedSlot.push(slot)
+    index.displacedAt.push(record.offset)
+  }
+  /**
+   * Checks the cell record `record` of slot `slot` as `decode` reads it,
+   * counts its cells, and places it; or fails (see `fail`). A FORMULA with
+   * a string result waits for it instead (its cell is counted when the
+   * wait ends).
+   */
+  const cellRecord = (record: BiffRecord, slot: number): void => {
+    const { data } = record
+    let error: SpreadsheetError | undefined
+    switch (record.type) {
+      case LABELSST: {
+        const f = fields.fixed(data, LABELSST_MIN)
+        if (f === undefined) error = truncated(part, record)
+        else if (globals.strings[f.u32(6)] === undefined) error = malformed(part, `shared string ${f.u32(6)} doesn't exist`, record.offset)
+        else error = countCells(f.u16(2), 1)
+        break
+      }
+      case LABEL:
+      case RSTRING: {
+        const f = fields.fixed(data, CELL_MIN)
+        if (f === undefined) error = truncated(part, record)
+        else {
+          const column = f.u16(2)
+          const failed = stringFailure(data, CELL_MIN, globals.text, 2)
+          error = failed !== undefined ? stringFailed(failed, part, record, limits) : countCells(column, 1)
+        }
+        break
+      }
+      case NUMBER:
+      case RK:
+      case BOOLERR:
+      case BLANK: {
+        const min = record.type === NUMBER ? NUMBER_MIN : record.type === RK ? RK_MIN : record.type === BOOLERR ? BOOLERR_MIN : CELL_MIN
+        const f = fields.fixed(data, min)
+        error = f === undefined ? truncated(part, record) : countCells(f.u16(2), 1)
+        break
+      }
+      case MULRK:
+      case MULBLANK: {
+        const f = fields.fixed(data, MUL_MIN)
+        if (f === undefined) error = truncated(part, record)
+        else {
+          const first = f.u16(2)
+          const last = f.u16(data.length - 2)
+          const count = (data.length - MUL_MIN) / (record.type === MULRK ? 6 : 2)
+          error = !Number.isInteger(count) || last - first + 1 !== count
+            ? malformed(part, `record 0x${record.type.toString(16)} doesn't match its column range`, record.offset)
+            : countCells(first, count)
+        }
+        break
+      }
+      default: {
+        // FORMULA, FORMULA_BIFF4
+        const f = fields.fixed(data, FORMULA_MIN)
+        if (f === undefined) error = truncated(part, record)
+        else if (f.u16(12) === 0xFFFF && f.u8(6) === 0) {
+          // a string result, in the STRING record that comes next
+          waitSlot = slot
+          waitColumn = f.u16(2)
+          waitFormula = record.offset
+          waitNext = record.offset + 4 + data.length
+          index.complete[slot] = Infinity
+        } else error = countCells(f.u16(2), 1)
+      }
+    }
+    if (error !== undefined) fail(error, record.offset)
+    else place(slot, record)
+  }
+
+  // progress: every read() advances the reader; the loop ends at the EOF or
+  // where the records stop
+  for (;;) {
+    const record = reader.read()
+    tally.steps++
+    if (record === undefined) {
+      if (failure === undefined) fail(malformed(part, "the sheet has no EOF"), AFTER_ALL)
+      break
+    }
+    if (record instanceof MalformedFile) {
+      if (failure === undefined) fail(record, record.offset ?? AFTER_ALL)
+      break
+    }
+    if (record instanceof Embedded) {
+      if (failure === undefined && waitSlot !== -1) endWait(record.offset)
+    } else {
+      const { type, data } = record
+      if (failure === undefined && waitSlot !== -1 && !keepsWait(type)) endWait(record.offset)
+      if (type === EOF) break
+      if (isCell(type)) {
+        // the row of every cell record long enough for it, as read in
+        // stream order, also after a failure: rows not complete before it
+        // don't go out
+        const f = fields.fixed(data, ROW_FIELD_MIN)
+        if (f !== undefined) {
+          const slot = index.slotOf(f.u16(0))
+          if (index.complete[slot]! < record.offset) index.complete[slot] = record.offset
+          if (failure === undefined) cellRecord(record, slot)
+        } else if (failure === undefined) fail(truncated(part, record), record.offset)
+      } else if (type === ROW) {
+        // the declared row and its hidden flag, wherever the ROW record is
+        // (the flags byte if the record reaches it); a ROW cut before
+        // ROW_MIN fails where it is
+        const f = fields.fixed(data, ROW_FIELD_MIN)
+        if (f !== undefined) {
+          const slot = index.slotOf(f.u16(0))
+          index.flags[slot] = index.flags[slot]! | DECLARED | (data.length > 12 && (f.u8(12) & 0x20) !== 0 ? HIDDEN : 0)
+        }
+        if (failure === undefined && data.length < ROW_MIN) fail(truncated(part, record), record.offset)
+      } else if (type === STRING && failure === undefined && waitSlot !== -1) {
+        // the formula's string result: BIFF8, an XLUnicodeString maybe
+        // continued (the reader moved past its CONTINUEs), its character
+        // count checked before any character; BIFF5, a u16-count code-page
+        // string, never continued
+        waited(record.offset, true)
+        const read = globals.biff8
+          ? readRichString(new RecordCursor(context.stream, record, context.end), limits.maxStringLength, false)
+          : undefined
+        const failed = read === undefined ? stringFailure(data, 0, globals.text, 2) : read._tag === "Ok" ? undefined : read
+        const error = failed !== undefined ? stringFailed(failed, part, record, limits) : countCells(waitColumn, 1)
+        if (error !== undefined) fail(error, record.offset)
+      }
+    }
+    if (turn.spend(RECORD_COST)) yield undefined
+  }
+  return { index, failure, failAt }
+}
+
+/**
+ * The rows (see the module's comment): each row of the index in row order,
+ * its records decoded into its cells, until a row wasn't complete before
+ * the index pass's failure (then the failure). Rows go out in chunks of at
+ * most `BATCH_RECORDS` rows, one at the end of each turn.
+ */
+function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: Tally): Generator<Pulled, SpreadsheetError | undefined, void> {
+  const { stream, globals, part, limits } = context
+  const { index, failure, failAt } = indexed
+  const { maxColumns, maxRows } = limits
+  const order = index.ordered()
+  const displaced = index.grouped()
+  const fields = new FixedReader()
+  const row = new RowCells([])
+  let chunk: Array<Row> = []
+  /** The rows taken so far are complete after this offset: the most of theirs. */
+  let completeAt = -1
+  /** Cells added to the current row, and cells sorted compacting it: the work since the last count. */
+  let work = 0
+
+  /** The chunk of rows so far, to go out at the end of the turn (undefined if none), and a new one started. */
+  const flush = (): Pulled => {
+    if (chunk.length === 0) return undefined
+    const out = chunk as unknown as Arr.NonEmptyReadonlyArray<Row>
+    chunk = []
+    return out
+  }
+  const add = (cell: Cell.Cell): void => {
+    work += 1 + row.add(cell, maxColumns)
+  }
+  /** The text of the STRING record at `at`, as the index pass checked it. */
+  const stringAt = (at: number): string | SpreadsheetError => {
+    const record = { type: STRING, offset: at, data: stream.subarray(at + 4, at + 4 + (stream[at + 2]! | (stream[at + 3]! << 8))) }
+    const read = globals.biff8
+      ? readRichString(new RecordCursor(stream, record, context.end), limits.maxStringLength)
+      : readString(record.data, 0, globals.text, 2)
+    return read._tag === "Ok" ? read.value : stringFailed(read, part, record, limits)
+  }
+  /** The string result of the FORMULA `record`: the STRING right after it, or the one the index noted, or "". */
+  const formulaString = (record: BiffRecord): string | SpreadsheetError => {
+    const next = record.offset + 4 + record.data.length
+    if (next + 4 > context.end) return ""
+    const type = stream[next]! | (stream[next + 1]! << 8)
+    if (type === STRING) return stringAt(next)
+    if (!keepsWait(type)) return ""
+    const at = index.stringOf(record.offset)
+    return at === 0 ? "" : stringAt(at)
+  }
+  /**
+   * Decodes the cell record `record` of the current row into its cells.
+   * The index pass checked it: a failure here is defensive.
+   */
+  const decode = (record: BiffRecord): SpreadsheetError | undefined => {
+    const { data } = record
+    switch (record.type) {
+      case LABELSST: {
+        const f = fields.fixed(data, LABELSST_MIN)
+        if (f === undefined) return truncated(part, record)
+        const value = globals.strings[f.u32(6)]
+        if (value === undefined) return malformed(part, `shared string ${f.u32(6)} doesn't exist`, record.offset)
+        add(Cell.text(f.u16(2), value))
+        return undefined
+      }
+      case LABEL:
+      case RSTRING: {
+        const f = fields.fixed(data, CELL_MIN)
+        if (f === undefined) return truncated(part, record)
+        const column = f.u16(2)
+        const text = readString(data, CELL_MIN, globals.text, 2)
+        if (text._tag !== "Ok") return stringFailed(text, part, record, limits)
+        add(Cell.text(column, text.value))
+        return undefined
+      }
+      case NUMBER: {
+        const f = fields.fixed(data, NUMBER_MIN)
+        if (f === undefined) return truncated(part, record)
+        add(xfNumber(globals, f.u16(2), f.u16(4), f.f64(6)))
+        return undefined
+      }
+      case RK: {
+        const f = fields.fixed(data, RK_MIN)
+        if (f === undefined) return truncated(part, record)
+        add(xfNumber(globals, f.u16(2), f.u16(4), decodeRk(f.u32(6))))
+        return undefined
+      }
+      case MULRK:
+      case MULBLANK: {
+        const f = fields.fixed(data, MUL_MIN)
+        if (f === undefined) return truncated(part, record)
+        const first = f.u16(2)
+        const mulrk = record.type === MULRK
+        const width = mulrk ? 6 : 2
+        const count = (data.length - MUL_MIN) / width
+        // the cells fill the record between colFirst and colLast (checked by
+        // the index pass): cell k's ixfe at 4 + width * k (and its rk after
+        // it) ends by data.length - 2. progress: k up to count
+        for (let k = 0; k < count; k++) {
+          const xf = f.u16(4 + width * k)
+          add(mulrk ? xfNumber(globals, first + k, xf, decodeRk(f.u32(6 + width * k))) : Cell.empty(first + k))
+        }
+        return undefined
+      }
+      case BOOLERR: {
+        const f = fields.fixed(data, BOOLERR_MIN)
+        if (f === undefined) return truncated(part, record)
+        const column = f.u16(2)
+        const value = f.u8(6)
+        add(f.u8(7) === 1 ? Cell.error(column, errorCode(value)) : Cell.boolean(column, value !== 0))
+        return undefined
+      }
+      case BLANK: {
+        const f = fields.fixed(data, CELL_MIN)
+        if (f === undefined) return truncated(part, record)
+        add(Cell.empty(f.u16(2)))
+        return undefined
+      }
+      default: {
+        // FORMULA, FORMULA_BIFF4
+        const f = fields.fixed(data, FORMULA_MIN)
+        if (f === undefined) return truncated(part, record)
+        const column = f.u16(2)
+        if (f.u16(12) !== 0xFFFF) {
+          add(xfNumber(globals, column, f.u16(4), f.f64(6)))
+          return undefined
+        }
+        // a special result: string (in a STRING record), boolean, error, empty string
+        const kind = f.u8(6)
+        const value = f.u8(8)
+        if (kind === 0) {
+          const text = formulaString(record)
+          if (typeof text !== "string") return text
+          add(Cell.text(column, text))
+        } else if (kind === 1) add(Cell.boolean(column, value !== 0))
+        else if (kind === 2) add(Cell.error(column, errorCode(value)))
+        else add(Cell.text(column, ""))
+        return undefined
+      }
+    }
+  }
+
+  // progress: k up to order.length; within a row, the reader's offset grows
+  // up to the range's end, and j up to the row's out-of-place records
+  for (let k = 0; k < order.length; k++) {
+    const slot = order[k]!
+    const complete = index.complete[slot]!
+    if (complete > completeAt) completeAt = complete
+    // this row, or one before it, wasn't complete before the failure
+    if (failure !== undefined && completeAt >= failAt) break
+    const flags = index.flags[slot]!
+    row.reset([])
+    if ((flags & RANGED) !== 0) {
+      // the row's records that came together: cell records of other rows
+      // don't come between them, other records may (embedded substreams too)
+      const reader = new SubstreamReader(stream, part, index.start[slot]!, index.end[slot]!)
+      for (let record = reader.read(); record !== undefined; record = reader.read()) {
+        if (record instanceof MalformedFile) return record
+        tally.steps++
+        let cost = RECORD_COST
+        if (!(record instanceof Embedded) && isCell(record.type)) {
+          const error = decode(record)
+          if (error !== undefined) return error
+          tally.steps += work
+          cost += work
+          work = 0
+        }
+        if (turn.spend(cost)) yield flush()
+      }
+    }
+    // progress: j up to the slot's group end
+    for (let j = displaced.from[slot]!; j < displaced.from[slot + 1]!; j++) {
+      const at = displaced.offsets[j]!
+      const record = { type: stream[at]! | (stream[at + 1]! << 8), offset: at, data: stream.subarray(at + 4, at + 4 + (stream[at + 2]! | (stream[at + 3]! << 8))) }
+      tally.steps++
+      const error = decode(record)
+      if (error !== undefined) return error
+      tally.steps += work
+      const cost = RECORD_COST + work
+      work = 0
+      if (turn.spend(cost)) yield flush()
+    }
+    const sorting = row.sorted ? 0 : row.cells.length
+    const cells = row.done()
+    if (cells.length > 0 || (flags & DECLARED) !== 0) {
+      const index_ = index.row[slot]!
+      if (index_ >= maxRows) {
+        const out = flush()
+        if (out !== undefined) yield out
+        return new LimitExceeded({ limit: "maxRows", max: maxRows, actual: index_ + 1 })
+      }
+      chunk.push({ index: index_, hidden: (flags & HIDDEN) !== 0, cells })
+    }
+    tally.steps += 1 + sorting
+    if (turn.spend(1 + sorting) || chunk.length >= BATCH_RECORDS) yield flush()
+  }
+  const out = flush()
+  if (out !== undefined) yield out
+  return failure
+}
+
+/** The rows walk: open the substream, the index pass, then the rows. */
+function* rowsWalk(context: SheetContext, turn: Turn, tally: Tally): Generator<Pulled, SpreadsheetError | undefined, void> {
+  // a BIFF8 STRING comes with its CONTINUEs (a BIFF5 one has none)
+  const opened = openSubstream(context, context.globals.biff8 ? STRING : undefined)
+  if (!(opened instanceof SubstreamReader)) return opened
+  const indexed = yield* indexRecords(context, opened, turn, tally)
+  return yield* emitRows(context, indexed, turn, tally)
+}
+
+/**
+ * The rows of a worksheet substream (see the module's comment), in turns of
+ * at most `BATCH_RECORDS` records or about `BATCH_CELLS` cells, with a
+ * yield to the event loop before each. Re-runnable.
+ */
 export const sheetRows = (context: SheetContext): Stream.Stream<Row, SpreadsheetError> =>
   Stream.fromPull(Effect.map(WorkMeter, (meter) => {
-    // a BIFF8 STRING comes with its CONTINUEs (a BIFF5 one has none)
-    const opened = openSubstream(context, context.globals.biff8 ? STRING : undefined)
-    let phase: Phase = opened instanceof SubstreamReader
-      ? { _tag: "Scanning", reader: opened, scan: new RowScan(context, opened.offset) }
-      : { _tag: "Failed", error: opened }
-    const rows = new Rows(context)
-    const heldCells = context.heldCells ?? HELD_CELLS
-    /** Hands the steps of the last batch to the meter. */
+    const turn = new Turn(BATCH_CELLS)
+    const tally: Tally = { steps: 0 }
+    const walk = rowsWalk(context, turn, tally)
+    /** Hands the steps of the last turn to the meter. */
     const report = Effect.sync(() => {
-      meter.add("steps", rows.takeSteps())
+      meter.add("steps", tally.steps)
+      tally.steps = 0
     })
+    let ended = false
     const pull: Pull.Pull<Arr.NonEmptyReadonlyArray<Row>, SpreadsheetError> = Effect.gen(function*() {
-      // progress: each iteration takes queued rows, or scans up to
-      // BATCH_RECORDS record headers, or reads up to BATCH_RECORDS records
-      // (the scan's or the reader's offset grows with each), or emits rows
-      // (at least one, or the phase moves on), or ends the stream
+      // progress: each iteration runs the walk for one turn (each turn
+      // advances it), or ends the stream
       while (true) {
         yield* report
         yield* yieldNow
-        if (rows.queued()) return rows.take()
-        const current: Phase = phase
-        switch (current._tag) {
-          case "Failed":
-            return yield* Effect.fail(current.error)
-          case "Scanning": {
-            const { scan } = current
-            rows.steps += scan.step(BATCH_RECORDS)
-            if (scan.done) {
-              rows.start(scan.lastAt, scan.declared, scan.hidden)
-              phase = { _tag: "Reading", reader: current.reader, handledAt: -1 }
-            }
-            continue
-          }
-          case "Reading": {
-            const { reader } = current
-            rows.budget = rows.effort + BATCH_CELLS
-            // rows a budget left complete but not emitted come first: each
-            // call emits at least one, or none is left
-            const caught = rows.complete(current.handledAt)
-            if (caught !== undefined) return yield* Effect.fail(caught)
-            // progress: k up to BATCH_RECORDS; every read() advances the reader
-            for (let k = 0; k < BATCH_RECORDS && rows.effort < rows.budget && !rows.behind(current.handledAt); k++) {
-              rows.steps++
-              const record = reader.read()
-              if (record === undefined) return yield* Effect.fail(malformed(context.part, "the sheet has no EOF"))
-              if (record instanceof MalformedFile) return yield* Effect.fail(record)
-              const result = handle(record, rows, context)
-              if (result === true) {
-                phase = DRAINING
-                break
-              }
-              if (result !== false) return yield* Effect.fail(result)
-              if (rows.held > heldCells) {
-                return yield* Effect.fail(malformed(context.part, `rows split too far apart: over ${heldCells} cells held for rows not complete`, record.offset))
-              }
-              current.handledAt = record.offset
-              const error = rows.complete(record.offset)
-              if (error !== undefined) return yield* Effect.fail(error)
-            }
-            if (rows.queued()) return rows.take()
-            continue
-          }
-          case "Draining": {
-            rows.budget = rows.effort + BATCH_CELLS
-            // rows a budget left complete but not emitted, then the rest: each
-            // call emits at least one, or none is left
-            const caught = rows.complete(Infinity)
-            if (caught !== undefined) return yield* Effect.fail(caught)
-            if (!rows.behind(Infinity)) {
-              const result = rows.end()
-              if (result === true) phase = DONE
-              else if (result !== false) return yield* Effect.fail(result)
-            }
-            if (rows.queued()) return rows.take()
-            continue
-          }
-          case "Done":
-            return yield* Cause.done()
-          default:
-            return absurd(current)
+        if (ended) return yield* Cause.done()
+        turn.left = turn.size
+        const step = walk.next()
+        if (step.done === true) {
+          ended = true
+          if (step.value !== undefined) return yield* Effect.fail(step.value)
+          return yield* Cause.done()
         }
+        if (step.value !== undefined) return step.value
       }
     })
-    // the steps of the last batch count also when the pull fails
+    // the steps of the last turn count also when the pull fails
     return Effect.ensuring(pull, report)
   }))
 
