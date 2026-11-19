@@ -128,18 +128,29 @@ export const rulesHandler = (rules: XmlRules): XmlHandler => {
     }
     steps[before]!.ends |= 1 << path
   }
+  // the steps as columns: their names, their next steps and ended paths, and the `//` ones as a mask
+  const names = steps.map((step) => step.name)
+  // a cheap first test before the names are compared: length and first character
+  const keys = steps.map((step) => step.name.length * 0x10000 + step.name.charCodeAt(0))
+  const nexts = steps.map((step) => step.next)
+  const ends = steps.map((step) => step.ends)
+  let anyDepth = 0
+  // progress: k increases up to steps.length
+  for (let k = 0; k < steps.length; k++) if (steps[k]!.anyDepth) anyDepth |= 1 << k
   const forbidden = (1 << forbid.length) - 1
   const skipped = ((1 << skip.length) - 1) << forbid.length
   /** The bit of the first `on` path: `on` path k is bit `first + k`. */
   const first = forbid.length + skip.length
-  // per depth d (0: the document, whose child is the root element):
-  // states[d], the steps the children of the open element at depth d can
-  // match; matched[d], the `on` paths that element matched (bit k: the k-th);
-  // lastFrom[d], lastName[d], lastState[d], lastMatched[d]: the last
-  // transition from depth d - 1, from that state with that name
+  // per depth d (0: the document, whose child is the root element), one
+  // entry each, added when the document first goes that deep:
+  // - states[d]: the steps the children of the open element at depth d can match;
+  // - matched[d]: the `on` paths that element matched (bit k: the k-th);
+  // - lastFrom[d], lastKey[d], lastName[d] -> lastState[d], lastMatched[d]:
+  //   the last transition into depth d (from that state, with that name)
   const states: Array<number> = [start]
   const matched: Array<number> = [0]
   const lastFrom: Array<number> = [-1]
+  const lastKey: Array<number> = [0]
   const lastName: Array<string> = [""]
   const lastState: Array<number> = [0]
   const lastMatched: Array<number> = [0]
@@ -148,25 +159,35 @@ export const rulesHandler = (rules: XmlRules): XmlHandler => {
     open: (name, attributes, element) => {
       const from = states[depth]!
       const at = depth + 1
+      if (at === states.length) {
+        states.push(0)
+        matched.push(0)
+        lastFrom.push(-1)
+        lastKey.push(0)
+        lastName.push("")
+        lastState.push(0)
+        lastMatched.push(0)
+      }
       let state: number
       let hit: number
-      if (lastFrom[at] === from && lastName[at] === name) {
+      const key = name.length * 0x10000 + name.charCodeAt(0)
+      if (lastFrom[at] === from && lastKey[at] === key && lastName[at] === name) {
         state = lastState[at]!
         hit = lastMatched[at]!
       } else {
-        state = 0
+        // the `//` steps stay for the element's children
+        state = from & anyDepth
         hit = 0
         // progress: each iteration clears the lowest bit left
         for (let rest = from; rest !== 0; rest &= rest - 1) {
-          const bit = rest & -rest
-          const step = steps[31 - Math.clz32(bit)]!
-          if (step.anyDepth) state |= bit
-          if (step.name === name) {
-            state |= step.next
-            hit |= step.ends
+          const k = 31 - Math.clz32(rest & -rest)
+          if (keys[k] === key && names[k] === name) {
+            state |= nexts[k]!
+            hit |= ends[k]!
           }
         }
         lastFrom[at] = from
+        lastKey[at] = key
         lastName[at] = name
         lastState[at] = state
         lastMatched[at] = hit

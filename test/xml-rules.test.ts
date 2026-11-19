@@ -116,6 +116,12 @@ describe("xml path rules: matching", () => {
     expect(run(xml, ["/a/l/i"]).log.filter((l) => l.startsWith("open"))).toEqual(["open /a/l/i n=3", "open /a/l/i n=4"])
   })
 
+  it("names of the same length and first character are told apart, in a run of siblings too", () => {
+    const xml = `<a><ab n="1"/><ab n="2"/><ac n="3"/><ab n="4"/></a>`
+    expect(run(xml, ["/a/ab"]).log.filter((l) => l.startsWith("open"))).toEqual(["open /a/ab n=1", "open /a/ab n=2", "open /a/ab n=4"])
+    expect(run(xml, ["/a/ac"]).log.filter((l) => l.startsWith("open"))).toEqual(["open /a/ac n=3"])
+  })
+
   it("a rule without open or close is fine", () => {
     expect(run(`<a><b/></a>`, ["//b"], { rule: () => ({}) })).toEqual({ log: [], error: undefined })
   })
