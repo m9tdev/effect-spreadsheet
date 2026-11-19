@@ -731,7 +731,7 @@ describe("xls sheet: the rows' work", () => {
     ])
   })
 
-  it("many noted STRINGs are grouped by row over several turns", async () => {
+  it("many noted STRINGs, over rows alternating, are taken over several turns", async () => {
     // 200 000 FORMULAs, each with a CONTINUE before its STRING, over 2 rows
     const pair = [...X.formula(0, 0, 0, { kind: 0 }), ...X.record(CONTINUE, []), ...X.string("s")]
     const blob = new Uint8Array(200_000 * pair.length)
@@ -742,7 +742,7 @@ describe("xls sheet: the rows' work", () => {
       blob[k * pair.length + 6] = k % 200
     }
     const { maxPerTurn } = await drain(one([blob]))
-    // a turn: about BATCH_CELLS steps of grouping, or BATCH_RECORDS records; not 400 000 grouping steps at once
+    // a turn: about BATCH_RECORDS records, read or decoded
     expect(maxPerTurn).toBeLessThan(100_000)
   }, 60_000)
 
@@ -775,6 +775,22 @@ describe("xls sheet: the rows' work", () => {
     expect(turns.slice(1).map(([rows, steps]) => steps - rows * (4 + 16_384 + 1))).toEqual(turns.slice(1).map(() => 0))
     expect(turns.length).toBeGreaterThan(10)
   }, 60_000)
+
+  it("records out of place and noted STRINGs cost a step per record, cell and row, nothing more", async () => {
+    // rows 0 and 1 alternating, 1 000 BLANKs over columns k % 7 (998 out of place): the index pass reads 1 001
+    // records (the EOF too); the rows read the 1 000 records and add their cells (2 000), sort each row's 500
+    // cells (out of column order) and emit 2 rows
+    const alternating = Array.from({ length: 1000 }, (_, k) => X.blank(k % 2, k % 7, 0))
+    expect((await drain(one(alternating))).total).toBe(1001 + 2000 + 1000 + 2)
+    // two FORMULAs of row 0 with their STRINGs after a SHRFMLA (two notes): the index pass reads 8 records; row 0's
+    // range runs from its first FORMULA to its second (4 records, 2 cells); row 1: a record and a cell; 2 rows
+    const notes = [X.formula(0, 0, 0, { kind: 0 }), companion(SHRFMLA), X.string("a"), X.formula(0, 1, 0, { kind: 0 }), companion(SHRFMLA), X.string("b"), X.number(1, 0, 0, 1)]
+    expect((await drain(one(notes))).total).toBe(8 + 4 + 2 + 1 + 1 + 2)
+    // the same with row 1's FORMULA between them: row 0's second FORMULA is out of place (a record and a cell)
+    const between = [X.formula(0, 0, 0, { kind: 0 }), companion(SHRFMLA), X.string("a"), X.formula(1, 0, 0, { kind: 0 }), companion(SHRFMLA), X.string("r"), X.formula(0, 1, 0, { kind: 0 }), companion(SHRFMLA), X.string("b")]
+    expect((await drain(one(between))).total).toBe(10 + (1 + 1) + (1 + 1) + (1 + 1) + 2)
+    expect(await cellsOf(between)).toEqual([[0, 0, "Text", "a"], [0, 1, "Text", "b"], [1, 0, "Text", "r"]])
+  })
 
   it("sorting a row out of column order counts its cells", async () => {
     // 1 000 NUMBERs in columns 999..0, one row: the index pass reads 1 001 records (the EOF too);

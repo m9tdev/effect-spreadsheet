@@ -12,7 +12,7 @@
  *    order), and notes where each row's cell records are: one range per row
  *    for the common case, where a row's cells come together, and the
  *    offsets of the records that come later, out of place (a row whose
- *    cells some writers put in several places), grouped by row. ROW records
+ *    cells some writers put in several places), chained by row. ROW records
  *    give hidden rows (fDyZero) and rows without cells, wherever they come.
  *    It holds a few numbers per row and one per out-of-place record, never
  *    a cell. The first failure is kept with the offset where it happens;
@@ -230,6 +230,41 @@ class U32List {
 }
 
 /**
+ * Numbers noted per slot, each slot's in the order noted: one chain per
+ * slot through `next` (entries are numbered from 1; 0 ends a chain), so a
+ * slot's numbers are read in order without grouping them first.
+ */
+class Chains {
+  /** The numbers, and each one's next in its slot's chain (0 for none). */
+  readonly values = new U32List()
+  readonly next = new U32List()
+  /** Each slot's first and last entry (0 for none). */
+  head = new Uint32Array(64)
+  private tail = new Uint32Array(64)
+
+  /** Notes `value` for `slot`, after the slot's earlier ones. */
+  push(slot: number, value: number): void {
+    this.values.push(value)
+    this.next.push(0)
+    const entry = this.values.length
+    const last = this.tail[slot]!
+    if (last === 0) this.head[slot] = entry
+    else this.next.items[last - 1] = entry
+    this.tail[slot] = entry
+  }
+
+  /** Room for `size` slots. */
+  grow(size: number): void {
+    const head = new Uint32Array(size)
+    head.set(this.head)
+    this.head = head
+    const tail = new Uint32Array(size)
+    tail.set(this.tail)
+    this.tail = tail
+  }
+}
+
+/**
  * Where a sheet's rows are, by row: one slot per row with cell records or
  * a ROW record (at most 65 536: rows are u16), in the order they are first
  * seen. A slot holds its row, the range of its cell records that came
@@ -238,8 +273,8 @@ class U32List {
  * the row was complete in stream order (its last cell record, or for a
  * FORMULA waiting for its string result, the record that ends the wait;
  * -1 for a row with ROW records only). Cell records of a row that come
- * after another row's (out of place) are kept apart, by offset, with their
- * slot.
+ * after another row's (out of place) are kept apart, by offset, in the
+ * slot's chain.
  */
 class SheetIndex {
   slots = 0
@@ -252,21 +287,15 @@ class SheetIndex {
   /** The last row looked up and its slot: a row's records mostly come together. */
   private lastRow = -1
   private lastSlot = -1
-  /** Out-of-place records: their slots and offsets, in stream order. */
-  readonly displacedSlot = new U32List()
-  readonly displacedAt = new U32List()
+  /** Out-of-place records: their offsets, by slot, in stream order. */
+  readonly displaced = new Chains()
   /**
    * FORMULAs whose string result doesn't come in the record right after
-   * them (a SHRFMLA, ARRAY, TABLE or CONTINUE comes first): their slots and
-   * the offset of their STRING (0 for none: the result is ""), in stream
-   * order. The rows take a row's notes in its own stream order.
+   * them (a SHRFMLA, ARRAY, TABLE or CONTINUE comes first): the offset of
+   * their STRING (0 for none: the result is ""), by slot, in stream order.
+   * A row's FORMULAs are decoded in that order, and take them in turn.
    */
-  readonly notedSlot = new U32List()
-  readonly notedString = new U32List()
-  /** Whether the notes come in row order (rows' FORMULAs in order, the common case): then they need no grouping. */
-  notesInRowOrder = true
-  /** The row of the last note. */
-  lastNotedRow = 0
+  readonly noted = new Chains()
 
   /** The slot of row `row`, made if new (its `complete` -1 until a cell record of it comes). */
   slotOf(row: number): number {
@@ -301,6 +330,8 @@ class SheetIndex {
     const flags = new Uint8Array(size)
     flags.set(this.flags)
     this.flags = flags
+    this.displaced.grow(size)
+    this.noted.grow(size)
   }
 
   /** The slots in row order. */
@@ -315,40 +346,6 @@ class SheetIndex {
     return keys
   }
 
-}
-
-/**
- * Offsets noted with their slots (`slotList`, `atList`, in stream order),
- * grouped by slot, each group in stream order: slot k's offsets are
- * `offsets[from[k]]` to `offsets[from[k + 1]]`. A counting sort with two
- * passes over the notes, which may be millions (one per FORMULA whose
- * STRING comes later): each note is a step in each pass, counted a block
- * at a time, and the walk yields when the turn is spent.
- */
-function* grouped(slotList: U32List, atList: U32List, slotCount: number, turn: Turn, tally: Tally): Generator<void, { readonly offsets: Uint32Array; readonly from: Uint32Array }, void> {
-  const count = atList.length
-  const slots = slotList.items
-  const at = atList.items
-  const from = new Uint32Array(slotCount + 1)
-  // in blocks of BATCH_RECORDS notes, each counted at once. progress: k up to count
-  for (let block = 0; block < count; block += BATCH_RECORDS) {
-    const end = Math.min(count, block + BATCH_RECORDS)
-    for (let k = block; k < end; k++) from[slots[k]! + 1]!++
-    tally.steps += end - block
-    if (turn.spend(end - block)) yield
-  }
-  // progress: k up to slotCount (at most 65 536)
-  for (let k = 0; k < slotCount; k++) from[k + 1]! += from[k]!
-  const next = from.slice(0, slotCount)
-  const offsets = new Uint32Array(count)
-  // progress: k up to count
-  for (let block = 0; block < count; block += BATCH_RECORDS) {
-    const end = Math.min(count, block + BATCH_RECORDS)
-    for (let k = block; k < end; k++) offsets[next[slots[k]!]!++] = at[k]!
-    tally.steps += end - block
-    if (turn.spend(end - block)) yield
-  }
-  return { offsets, from }
 }
 
 /**
@@ -420,11 +417,7 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
   const waited = (at: number, string: boolean): void => {
     index.complete[waitSlot] = at
     if (at !== waitNext) {
-      const row = index.row[waitSlot]!
-      if (row < index.lastNotedRow) index.notesInRowOrder = false
-      index.lastNotedRow = row
-      index.notedSlot.push(waitSlot)
-      index.notedString.push(string ? at : 0)
+      index.noted.push(waitSlot, string ? at : 0)
     }
     waitSlot = -1
   }
@@ -455,12 +448,11 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
       index.end[slot] = end
       return
     }
-    if (index.displacedAt.length >= displacedCap) {
+    if (index.displaced.values.length >= displacedCap) {
       fail(malformed(part, `rows split too far apart: over ${displacedCap} cell records out of their row's place`, record.offset), record.offset)
       return
     }
-    index.displacedSlot.push(slot)
-    index.displacedAt.push(record.offset)
+    index.displaced.push(slot, record.offset)
   }
   /**
    * Checks the cell record `record` of slot `slot` as `decode` reads it,
@@ -601,13 +593,10 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
   const { index, failure, failAt } = indexed
   const { maxColumns, maxRows } = limits
   const order = index.ordered()
-  const displaced = yield* grouped(index.displacedSlot, index.displacedAt, index.slots, turn, tally)
-  // notes in row order are taken in that order by the rows, through one cursor
-  const noted = index.notesInRowOrder ? undefined : yield* grouped(index.notedSlot, index.notedString, index.slots, turn, tally)
-  const notes = noted === undefined ? index.notedString.items : noted.offsets
-  /** The current row's next noted STRING, and the end of its notes (see `formulaString`). */
+  const displaced = index.displaced
+  const noted = index.noted
+  /** The current row's next noted STRING (0 for none; see `formulaString`). */
   let note = 0
-  let notesEnd = noted === undefined ? index.notedString.length : 0
   const fields = new FixedReader()
   const row = new RowCells([])
   /** The rows taken so far are complete after this offset: the most of theirs. */
@@ -637,8 +626,9 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
     if (next + 4 > context.end) return ""
     const type = stream[next]! | (stream[next + 1]! << 8)
     if (type === STRING) return stringAt(next)
-    if (!keepsWait(type) || note >= notesEnd) return ""
-    const at = notes[note++]!
+    if (!keepsWait(type) || note === 0) return ""
+    const at = noted.values.items[note - 1]!
+    note = noted.next.items[note - 1]!
     return at === 0 ? "" : stringAt(at)
   }
   /**
@@ -745,10 +735,7 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
     if (failure !== undefined && completeAt >= failAt) break
     const flags = index.flags[slot]!
     row.reset([])
-    if (noted !== undefined) {
-      note = noted.from[slot]!
-      notesEnd = noted.from[slot + 1]!
-    }
+    note = noted.head[slot]!
     if ((flags & RANGED) !== 0) {
       // the row's records that came together: cell records of other rows
       // don't come between them, other records may (embedded substreams too)
@@ -767,9 +754,9 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
         if (turn.spend(cost) && turn.left <= -ROW_SLACK) yield
       }
     }
-    // progress: j up to the slot's group end
-    for (let j = displaced.from[slot]!; j < displaced.from[slot + 1]!; j++) {
-      const at = displaced.offsets[j]!
+    // progress: each entry is later in the chain than the last (entries numbered in order), up to the slot's last
+    for (let entry = displaced.head[slot]!; entry !== 0; entry = displaced.next.items[entry - 1]!) {
+      const at = displaced.values.items[entry - 1]!
       const record = { type: stream[at]! | (stream[at + 1]! << 8), offset: at, data: stream.subarray(at + 4, at + 4 + (stream[at + 2]! | (stream[at + 3]! << 8))) }
       tally.steps++
       const error = decode(record)
