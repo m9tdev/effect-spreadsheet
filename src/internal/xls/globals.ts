@@ -445,8 +445,9 @@ class GlobalsWalk {
    */
   private *continues(record: BiffRecord): Steps<RecordCursor | SpreadsheetError> {
     const { reader, limits, turn } = this
-    // progress: a run that isn't the last moves past at least one CONTINUE
-    // (as many as asked, at least 1)
+    // progress: every run moves past at least one CONTINUE (one is next
+    // when the walk comes here, and after a run that says "more"), or is
+    // the last
     for (;;) {
       const before = reader.records
       const at = reader.offset
@@ -454,7 +455,7 @@ class GlobalsWalk {
       const run = reader.continues(record, room, limits.maxDecompressedBytes, "maxDecompressedBytes")
       if (run !== "more" && run !== "done") return run
       const read = reader.records - before
-      if (read > 0 && turn.spend(read * UNIT + reader.offset - at)) yield
+      if (turn.spend(read * UNIT + reader.offset - at)) yield
       // the CONTINUEs end where the reader is: the cursor reads up to there
       if (run === "done") return new RecordCursor(this.stream, record, reader.offset)
     }
@@ -536,7 +537,6 @@ class GlobalsWalk {
     const ctab = segments.has(SUPBOOK_CTAB) ? segments.u16() : 0
     const path = readRichString(segments, limits.maxStringLength) // the path's character count is the marker's place
     if (path._tag === "TooLong") return tooLong(limits, path.count)
-    if (this.turn.spend(UNIT)) yield
     const sheets: Array<string> = []
     // without a path, no sheet names follow
     const failed = yield* this.readStrings(segments, path._tag === "Truncated" ? 0 : ctab, sheets)
