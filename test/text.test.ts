@@ -261,5 +261,8 @@ describe("text: TextInput", () => {
     expect(run(fatal(), [bytes(0xEF, 0xBB, 0xBF, 0x41, 0xFF)])).toEqual({ invalid: 4 })
     expect(run(fatal(), [bytes(0xEF, 0xBB, 0xBF), bytes(0xFF)])).toEqual({ invalid: 3 })
     expect(run(fatal(), [bytes(0xEF, 0xBB, 0xBF, 0xC3)])).toEqual({ invalid: 3 })
+    // auto detection holds the whole short input back, so it is decoded when the input ends
+    const auto = new TextInput<number | undefined>({ detect: "bom-utf16-utf8-1252", fatal: true, invalid: (offset) => offset })
+    expect(run(auto, [bytes(0xEF, 0xBB, 0xBF, 0x41, 0xFF)])).toEqual({ invalid: 4 })
   })
 })
