@@ -367,6 +367,13 @@ describe("cfb: reading", () => {
     expect(twoDifat.difatSectors.length).toBe(2)
     expect(twoDifat.directorySectors.length).toBe(1)
     expect(Result.merge(open(twoDifat.bytes, { ...limits, maxSectorChain: 1 }))).toMatchObject({ _tag: "LimitExceeded", limit: "maxSectorChain", max: 1, actual: 2 })
+    // the header's DIFAT count is checked before maxSectorChain: with both
+    // at 1, the second DIFAT sector is past the declared count first
+    const declaredOne = twoDifat.bytes.slice()
+    patch32(declaredOne, 72, 1)
+    const result = open(declaredOne, { ...limits, maxSectorChain: 1 })
+    expect(Result.merge(result)).toBeInstanceOf(MalformedFile)
+    expect(reasonOf(result)).toBe("DIFAT chain is longer than the header says")
   })
 
   it("opens every committed .xls in a CFB, and its workbook stream is a BIFF record stream from BOF to EOF", () => {
@@ -451,6 +458,15 @@ describe("cfb: hostile and broken files", () => {
     patch32(huge, sectorOffset(layout.directorySectors[0]!) + layout.streams.get("Workbook")!.id * 128 + 120, 0x7FFFFFFF)
     const a = openOk(huge)
     expect(reasonOf(a.read(a.find("Workbook")!))).toMatch(/larger than the file/)
+    // a size of exactly the file's sectors fits (the chain then runs out);
+    // one byte more is larger than the file
+    const fileBytes = layout.bytes.length - 512
+    for (const [size, reason] of [[fileBytes, "stream chain is shorter than its size"], [fileBytes + 1, "stream Workbook is larger than the file"]] as const) {
+      const sized = layout.bytes.slice()
+      patch32(sized, sectorOffset(layout.directorySectors[0]!) + layout.streams.get("Workbook")!.id * 128 + 120, size)
+      const c = openOk(sized)
+      expect(reasonOf(c.read(c.find("Workbook")!)), String(size)).toBe(reason)
+    }
     const b = openOk(layout.bytes, { ...limits, maxSectorChain: 5 })
     expect(Result.merge(b.read(b.find("Workbook")!))).toMatchObject({ _tag: "LimitExceeded", limit: "maxSectorChain", max: 5 })
   })

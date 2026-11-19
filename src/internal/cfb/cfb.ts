@@ -74,7 +74,11 @@ export interface Cfb {
   /**
    * A stream's bytes: a view of the file when the stream is in consecutive
    * sectors of it, else a copy gathered from its sectors (mini streams are
-   * always copies).
+   * always copies). Either way they come from the caller's buffer when
+   * read: the mini stream, loaded on the first read of a mini stream, is a
+   * view of it too when its sectors are consecutive. So changing the
+   * buffer between reads changes what later reads give, for mini streams
+   * as for big ones.
    */
   readonly read: (entry: CfbEntry) => Result.Result<Uint8Array, CfbError>
 }
@@ -512,6 +516,8 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
     })
     const rootExtent = extent("mini stream", root.size, root.start, file, streamOwner(0))
     if (Result.isFailure(rootExtent)) return (mini = Result.fail(rootExtent.failure))
+    // a view of the caller's buffer when consecutive: mini streams are
+    // copied out of it when read (see `Cfb.read`)
     const data = bytesOf(rootExtent.success)
     if (Result.isFailure(data)) return (mini = Result.fail(data.failure))
     // a last, partial mini sector counts (its stream reads only what it has)
