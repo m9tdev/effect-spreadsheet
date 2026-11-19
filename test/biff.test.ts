@@ -486,6 +486,9 @@ describe("biff record cursor", () => {
     expect(textOf(readRichString(cursorOf([new Uint8Array([200, 0, 0, ...new Uint8Array(200)])]), 100))).toEqual({ _tag: "TooLong", count: 200 })
     expect(textOf(readRichString(cursorOf([new Uint8Array([5, 0, 0, 0x41])]), 100))).toEqual({ _tag: "Truncated" })
     expect(textOf(readRichString(cursorOf([new Uint8Array([2, 0, 1, 0x41])]), 100))).toEqual({ _tag: "Truncated" })
+    // a 16-bit character split across a CONTINUE boundary: its first byte ends a segment
+    expect(textOf(readRichString(cursorOf([new Uint8Array([2, 0, 1, 0x41, 0x00, 0x42]), new Uint8Array([1, 0x00, 0x43, 0x00])]), 100)))
+      .toEqual({ _tag: "Truncated" })
     // a huge phonetic block size can't skip past the end
     const huge = cursorOf([new Uint8Array([1, 0, 4, 0xFF, 0xFF, 0xFF, 0x7F, 0x41])])
     expect(textOf(readRichString(huge, 100))).toEqual({ _tag: "Truncated" })
