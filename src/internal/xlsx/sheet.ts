@@ -38,7 +38,6 @@
  * @internal
  */
 import type { Stream } from "effect"
-import { absurd } from "effect/Function"
 import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
@@ -49,7 +48,7 @@ import { parseCellRef } from "../refs.ts"
 import { RowBuilder } from "../sheet/rows.ts"
 import { xmlDecoder } from "../xml/parse.ts"
 import * as Attr from "../xml/attributes.ts"
-import type { XmlAttributes, XmlHandler } from "../xml/tokenizer.ts"
+import type { XmlAttributes, XmlElement, XmlHandler } from "../xml/tokenizer.ts"
 import { malformed, NINE_DIGITS, RichText } from "./parts.ts"
 
 export interface SheetContext {
@@ -73,22 +72,21 @@ interface PendingCell {
   type: string | undefined
   style: number | undefined
   /** The text of the cell's first `<v>` (a repeated one is ignored). */
-  value: Array<string> | undefined
-  valueLength: number
+  value: string | undefined
   /** The text of the first `<f>`. */
-  formula: Array<string> | undefined
-  formulaLength: number
+  formula: string | undefined
   /** The first `<is>`'s text, unescaped. Used only by an inline string (or a cell without `t` and `<v>`). */
   inlineValue: string | undefined
-  /** The direct child the tokenizer is in, which says where text goes. */
+  /** The direct child that is open, which says what its end tag completes. */
   child: CellChild
 }
 
 /**
- * Which direct child of a cell is open: none (between its children, or in
- * one that doesn't count: a repeated `<v>`/`<f>`/`<is>`, or another element),
- * its first `<v>` (text goes to the value), its first `<f>` (to the formula),
- * or its first `<is>` (to the inline string).
+ * Which direct child of a cell is open: none (between its children), its
+ * first `<v>` (its text is the value), its first `<f>` (the formula), or its
+ * first `<is>` (the inline string). The other children (a repeated
+ * `<v>`/`<f>`/`<is>`, an `<extLst>`) are skipped, and so is everything
+ * nested in a `<v>` or `<f>`: only their direct text counts.
  */
 type CellChild = "none" | "value" | "formula" | "inline"
 
@@ -113,22 +111,18 @@ export class SheetRows implements XmlHandler {
 
   private inSheetData = false
 
-  /** The open cell, if any (only inside a row). */
-  private cell: PendingCell | undefined
   /**
-   * Elements open inside the cell: 0 between its own children. Only its
-   * direct children give its value, and only its own end tag closes it, so
-   * elements nested in an extension (`<extLst>`) are skipped, whatever
-   * their names (the tokenizer checks that end tags match).
+   * The open cell, if any (only inside a row). Only its direct children
+   * give its value, and only its own end tag closes it: the elements it
+   * doesn't read are skipped whole, whatever their names.
    */
-  private depth = 0
-  private readonly rich: RichText
+  private cell: PendingCell | undefined
+  private readonly rich = new RichText()
 
   private readonly context: SheetContext
 
   constructor(context: SheetContext) {
     this.context = context
-    this.rich = new RichText(context.limits.maxStringLength)
     const part = context.part
     this.rows = new RowBuilder<At>(context.limits, {
       cellOutsideRow: "ignore",
@@ -137,16 +131,14 @@ export class SheetRows implements XmlHandler {
     })
   }
 
-  open = (name: string, attributes: XmlAttributes): SpreadsheetError | undefined => {
+  open = (name: string, attributes: XmlAttributes, element: XmlElement): SpreadsheetError | undefined => {
     const cell = this.cell
     if (cell !== undefined) {
-      const depth = this.depth++
-      if (cell.child === "inline") {
-        this.rich.open(name)
-        return undefined
-      }
-      // a direct child (between children, no child is open)
-      if (depth === 0) cell.child = this.openChild(cell, name)
+      if (cell.child === "inline") this.rich.open(name, element)
+      // a direct child (between children, no child is open), or an element
+      // nested in a <v> or <f>, which is skipped
+      else if (cell.child === "none") this.openChild(cell, name, element)
+      else element.skip()
       return undefined
     }
     if (name === "sheetData") {
@@ -169,18 +161,25 @@ export class SheetRows implements XmlHandler {
     return undefined
   }
 
-  close = (name: string): SpreadsheetError | undefined => {
+  close = (name: string, text: string | undefined): SpreadsheetError | undefined => {
     const cell = this.cell
     if (cell !== undefined) {
-      const depth = --this.depth
-      // below 0: the cell's own </c>
-      if (depth < 0) return this.closeCell(cell)
-      if (depth > 0) {
-        if (cell.child === "inline") this.rich.close(name)
-        return undefined
+      // the end of a direct child (the others are skipped), or of the cell
+      switch (cell.child) {
+        case "none":
+          return this.closeCell(cell)
+        case "value":
+          cell.value = text ?? ""
+          break
+        case "formula":
+          cell.formula = text ?? ""
+          break
+        case "inline":
+          // an end tag inside the <is>, or its own
+          if (!this.rich.close(name, text)) return undefined
+          cell.inlineValue = this.rich.take()
+          break
       }
-      // the end of a direct child: <v>, <f>, <is> or another
-      if (cell.child === "inline") cell.inlineValue = this.rich.take()
       cell.child = "none"
       return undefined
     }
@@ -189,57 +188,21 @@ export class SheetRows implements XmlHandler {
     return undefined
   }
 
-  text = (value: string): SpreadsheetError | undefined => {
-    const cell = this.cell
-    if (cell === undefined) return undefined
-    switch (cell.child) {
-      case "none":
-        return undefined
-      case "inline":
-        return this.rich.text(value)
-      case "value": {
-        // text directly in the <v>, not in an element nested in it
-        if (this.depth !== 1) return undefined
-        cell.value!.push(value)
-        cell.valueLength += value.length
-        const max = this.context.limits.maxStringLength
-        if (cell.valueLength > max) return new LimitExceeded({ limit: "maxStringLength", max, actual: cell.valueLength })
-        return undefined
-      }
-      case "formula": {
-        // text directly in the <f>, not in an element nested in it
-        if (this.depth !== 1) return undefined
-        cell.formula!.push(value)
-        cell.formulaLength += value.length
-        const max = this.context.limits.maxStringLength
-        if (cell.formulaLength > max) return new LimitExceeded({ limit: "maxStringLength", max, actual: cell.formulaLength })
-        return undefined
-      }
-      default:
-        return absurd(cell.child)
-    }
-  }
-
   /**
-   * The child a direct child element of the cell opens. Only the first
-   * `<v>`, `<f>` and `<is>` count; a repeated one is skipped, not appended.
+   * A direct child element of the cell. Only the first `<v>`, `<f>` and
+   * `<is>` count; the tokenizer collects the text of a `<v>` or `<f>`. A
+   * repeated one is skipped, not appended, like any other child.
    */
-  private openChild(cell: PendingCell, name: string): CellChild {
-    if (name === "v") {
-      if (cell.value !== undefined) return "none"
-      cell.value = []
-      return "value"
-    }
-    if (name === "f") {
-      if (cell.formula !== undefined) return "none"
-      cell.formula = []
-      return "formula"
-    }
-    if (name === "is" && cell.inlineValue === undefined) {
-      this.rich.take()
-      return "inline"
-    }
-    return "none"
+  private openChild(cell: PendingCell, name: string, element: XmlElement): void {
+    if (name === "v" && cell.value === undefined) {
+      cell.child = "value"
+      element.collect()
+    } else if (name === "f" && cell.formula === undefined) {
+      cell.child = "formula"
+      element.collect()
+    } else if (name === "is" && cell.inlineValue === undefined) {
+      cell.child = "inline"
+    } else element.skip()
   }
 
   /** A `<row>`: its `r` gives the index; without one, its first cell or the previous row decides. */
@@ -281,19 +244,15 @@ export class SheetRows implements XmlHandler {
       type: Attr.string(attributes, "t"),
       style: style === "bad" ? undefined : style,
       value: undefined,
-      valueLength: 0,
       formula: undefined,
-      formulaLength: 0,
       inlineValue: undefined,
       child: "none"
     }
-    this.depth = 0
     return undefined
   }
 
   private closeCell(pending: PendingCell): SpreadsheetError | undefined {
     this.cell = undefined
-    this.depth = 0
     const cell = this.toCell(pending)
     if (cell instanceof MalformedFile) return cell
     return this.rows.addCell(cell)
@@ -302,7 +261,7 @@ export class SheetRows implements XmlHandler {
   private toCell(pending: PendingCell): Cell.Cell | MalformedFile {
     const { column } = pending
     const part = this.context.part
-    const formulaText = pending.formula === undefined ? "" : pending.formula.join("")
+    const formulaText = pending.formula ?? ""
     const meta: Cell.Meta | undefined = formulaText === "" ? undefined : { formula: Attr.unescapeXstring(formulaText) }
     // the type decides where the value is: <is> for an inline string (else
     // its <v>), <v> for every other type; a cell without `t` or `<v>` takes <is>
@@ -310,7 +269,7 @@ export class SheetRows implements XmlHandler {
       return Cell.text(column, pending.inlineValue, meta)
     }
     if (pending.value === undefined) return Cell.empty(column, meta)
-    const raw = pending.value.length === 1 ? pending.value[0]! : pending.value.join("")
+    const raw = pending.value
     switch (pending.type) {
       case "s": {
         if (raw === "") return Cell.empty(column, meta)

@@ -30,18 +30,8 @@ export const sheetDetails = (
     const layout = new LayoutBuilder(limits)
     let inSheetData = false
     let inRow = false
-    /**
-     * Elements open in the open cell, the cell itself included: 0 outside a
-     * cell. As in the rows reader, a cell's content is skipped whatever its
-     * names, and only the cell's own end tag closes it.
-     */
-    let cellDepth = 0
     const handler: XmlHandler = {
-      open: (name, attributes) => {
-        if (cellDepth > 0) {
-          cellDepth++
-          return undefined
-        }
+      open: (name, attributes, element) => {
         if (name === "sheetData") {
           // a nested one would end the sheet data at its end tag, reading what follows as layout
           if (inSheetData) return malformed("<sheetData> inside a <sheetData>", part)
@@ -50,7 +40,9 @@ export const sheetDetails = (
         }
         if (inSheetData) {
           if (name === "row") inRow = true
-          else if (name === "c" && inRow) cellDepth = 1
+          // as in the rows reader, a cell's content is skipped whatever its
+          // names, and only the cell's own end tag closes it
+          else if (name === "c" && inRow) element.skip()
           return undefined
         }
         if (name === "dimension") {
@@ -76,12 +68,10 @@ export const sheetDetails = (
         return undefined
       },
       close: (name) => {
-        if (cellDepth > 0) cellDepth--
-        else if (name === "row") inRow = false
+        if (name === "row") inRow = false
         else if (name === "sheetData") inSheetData = false
         return undefined
-      },
-      text: () => undefined
+      }
     }
     return Effect.map(parse(bytes, handler, limits, part), () => layout.result())
   })
