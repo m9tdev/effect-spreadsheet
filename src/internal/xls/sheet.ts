@@ -43,6 +43,7 @@ import { WorkMeter } from "../meter.ts"
 import { numberCell } from "../numFmt.ts"
 import { LayoutBuilder } from "../sheet/layout.ts"
 import { HeldRows, NO_ROWS } from "../sheet/rows.ts"
+import { yieldNow } from "../yield.ts"
 import { readString } from "./fields.ts"
 import type { Globals } from "./globals.ts"
 
@@ -600,7 +601,7 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
       // (at least one, or the phase moves on), or ends the stream
       while (true) {
         yield* report
-        yield* Effect.yieldNow
+        yield* yieldNow
         if (rows.queued()) return rows.take()
         const current: Phase = phase
         switch (current._tag) {
@@ -709,7 +710,7 @@ const walkDetails = (context: SheetContext, walked: Walked, report: Effect.Effec
       walked.steps++
       if (k % BATCH_RECORDS === 0) {
         yield* report
-        yield* Effect.yieldNow
+        yield* yieldNow
       }
       const record = opened.next()
       if (record === undefined) return yield* Effect.fail(malformed(part, "the sheet has no EOF"))

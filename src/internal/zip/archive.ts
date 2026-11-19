@@ -38,6 +38,7 @@ import type * as Pull from "effect/Pull"
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import { SLICE_BYTES } from "../bytes.ts"
+import { yieldNow } from "../yield.ts"
 import { WorkMeter } from "../meter.ts"
 import { CRC32_START, crc32Final, crc32Update } from "./crc32.ts"
 import { type Directory, normalizeName, readDirectory, type ZipEntry } from "./directory.ts"
@@ -337,7 +338,7 @@ const archive = (
           // consumes input)
           while (true) {
             if (pieceAt < piece.length) {
-              yield* Effect.yieldNow
+              yield* yieldNow
               const slice = piece.subarray(pieceAt, Math.min(piece.length, pieceAt + SLICE_BYTES))
               pieceAt += slice.length
               return [slice] as const

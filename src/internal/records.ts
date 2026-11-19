@@ -13,6 +13,7 @@ import type { Row } from "../Workbook.ts"
 import { type Meter, WorkMeter } from "./meter.ts"
 import * as RecordKeys from "./recordKeys.ts"
 import { compact } from "./sheet/rows.ts"
+import { yieldNow } from "./yield.ts"
 
 export interface RecordsOptions<D = never> {
   /**
@@ -355,7 +356,7 @@ export const recordsStream = <E, R>(
               }
               continue
             }
-            yield* Effect.yieldNow
+            yield* yieldNow
             const out: Array<Record<string, unknown>> = []
             let keys = 0
             // progress: i grows by one per iteration, bounded by chunk.length.
