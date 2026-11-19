@@ -255,6 +255,18 @@ class SheetIndex {
   /** Out-of-place records: their slots and offsets, in stream order. */
   readonly displacedSlot = new U32List()
   readonly displacedAt = new U32List()
+  /**
+   * FORMULAs whose string result doesn't come in the record right after
+   * them (a SHRFMLA, ARRAY, TABLE or CONTINUE comes first): their slots and
+   * the offset of their STRING (0 for none: the result is ""), in stream
+   * order. The rows take a row's notes in its own stream order.
+   */
+  readonly notedSlot = new U32List()
+  readonly notedString = new U32List()
+  /** Whether the notes come in row order (rows' FORMULAs in order, the common case): then they need no grouping. */
+  notesInRowOrder = true
+  /** The row of the last note. */
+  lastNotedRow = 0
 
   /** The slot of row `row`, made if new (its `complete` -1 until a cell record of it comes). */
   slotOf(row: number): number {
@@ -303,24 +315,40 @@ class SheetIndex {
     return keys
   }
 
-  /**
-   * The out-of-place records grouped by slot, each group in stream order:
-   * slot k's offsets are `offsets[from[k]]` to `offsets[from[k + 1]]`.
-   */
-  grouped(): { readonly offsets: Uint32Array; readonly from: Uint32Array } {
-    const count = this.displacedAt.length
-    const slots = this.displacedSlot.items
-    const at = this.displacedAt.items
-    const from = new Uint32Array(this.slots + 1)
-    // progress: k up to count, then up to slots
-    for (let k = 0; k < count; k++) from[slots[k]! + 1]!++
-    for (let k = 0; k < this.slots; k++) from[k + 1]! += from[k]!
-    const next = from.slice(0, this.slots)
-    const offsets = new Uint32Array(count)
-    // progress: k up to count
-    for (let k = 0; k < count; k++) offsets[next[slots[k]!]!++] = at[k]!
-    return { offsets, from }
+}
+
+/**
+ * Offsets noted with their slots (`slotList`, `atList`, in stream order),
+ * grouped by slot, each group in stream order: slot k's offsets are
+ * `offsets[from[k]]` to `offsets[from[k + 1]]`. A counting sort with two
+ * passes over the notes, which may be millions (one per FORMULA whose
+ * STRING comes later): each note is a step in each pass, counted a block
+ * at a time, and the walk yields when the turn is spent.
+ */
+function* grouped(slotList: U32List, atList: U32List, slotCount: number, turn: Turn, tally: Tally): Generator<void, { readonly offsets: Uint32Array; readonly from: Uint32Array }, void> {
+  const count = atList.length
+  const slots = slotList.items
+  const at = atList.items
+  const from = new Uint32Array(slotCount + 1)
+  // in blocks of BATCH_RECORDS notes, each counted at once. progress: k up to count
+  for (let block = 0; block < count; block += BATCH_RECORDS) {
+    const end = Math.min(count, block + BATCH_RECORDS)
+    for (let k = block; k < end; k++) from[slots[k]! + 1]!++
+    tally.steps += end - block
+    if (turn.spend(end - block)) yield
   }
+  // progress: k up to slotCount (at most 65 536)
+  for (let k = 0; k < slotCount; k++) from[k + 1]! += from[k]!
+  const next = from.slice(0, slotCount)
+  const offsets = new Uint32Array(count)
+  // progress: k up to count
+  for (let block = 0; block < count; block += BATCH_RECORDS) {
+    const end = Math.min(count, block + BATCH_RECORDS)
+    for (let k = block; k < end; k++) offsets[next[slots[k]!]!++] = at[k]!
+    tally.steps += end - block
+    if (turn.spend(end - block)) yield
+  }
+  return { offsets, from }
 }
 
 /**
@@ -359,9 +387,10 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
   let failAt = Infinity
   /** Cells read so far in stream order, repeats included (for maxCellsPerSheet). */
   let cells = 0
-  /** The slot of the FORMULA waiting for its string result (-1 for none), and its column. */
+  /** The slot of the FORMULA waiting for its string result (-1 for none), its column, and the offset after it. */
   let waitSlot = -1
   let waitColumn = 0
+  let waitNext = 0
   /** The slot whose cell records came last, and whether they are out of place (see `place`). */
   let runSlot = -1
   let runDisplaced = false
@@ -388,13 +417,20 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
     return undefined
   }
   /** The wait for a formula's string result ends at the record at `at`: the row is complete there. */
-  const waited = (at: number): void => {
+  const waited = (at: number, string: boolean): void => {
     index.complete[waitSlot] = at
+    if (at !== waitNext) {
+      const row = index.row[waitSlot]!
+      if (row < index.lastNotedRow) index.notesInRowOrder = false
+      index.lastNotedRow = row
+      index.notedSlot.push(waitSlot)
+      index.notedString.push(string ? at : 0)
+    }
     waitSlot = -1
   }
   /** Ends the wait for a formula's string result at the record at `at` without a STRING: its result is "" (one cell). */
   const endWait = (at: number): void => {
-    waited(at)
+    waited(at, false)
     const error = countCells(waitColumn, 1)
     if (error !== undefined) fail(error, at)
   }
@@ -485,6 +521,7 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
           // a string result, in the STRING record that comes next
           waitSlot = slot
           waitColumn = f.u16(2)
+          waitNext = record.offset + 4 + data.length
           index.complete[slot] = Infinity
         } else error = countCells(f.u16(2), 1)
       }
@@ -537,7 +574,7 @@ function* indexRecords(context: SheetContext, reader: SubstreamReader, turn: Tur
         // continued (the reader moved past its CONTINUEs), its character
         // count checked before any character; BIFF5, a u16-count code-page
         // string, never continued
-        waited(record.offset)
+        waited(record.offset, true)
         const read = globals.biff8
           ? readRichString(new RecordCursor(context.stream, record, context.end), limits.maxStringLength, false)
           : undefined
@@ -564,7 +601,13 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
   const { index, failure, failAt } = indexed
   const { maxColumns, maxRows } = limits
   const order = index.ordered()
-  const displaced = index.grouped()
+  const displaced = yield* grouped(index.displacedSlot, index.displacedAt, index.slots, turn, tally)
+  // notes in row order are taken in that order by the rows, through one cursor
+  const noted = index.notesInRowOrder ? undefined : yield* grouped(index.notedSlot, index.notedString, index.slots, turn, tally)
+  const notes = noted === undefined ? index.notedString.items : noted.offsets
+  /** The current row's next noted STRING, and the end of its notes (see `formulaString`). */
+  let note = 0
+  let notesEnd = noted === undefined ? index.notedString.length : 0
   const fields = new FixedReader()
   const row = new RowCells([])
   /** The rows taken so far are complete after this offset: the most of theirs. */
@@ -584,21 +627,19 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
     return read._tag === "Ok" ? read.value : stringFailed(read, part, record, limits)
   }
   /**
-   * The string result of the FORMULA `record`: the STRING after it, past
-   * any SHRFMLA, ARRAY, TABLE or CONTINUE records; "" if another record
-   * comes first. Each record passed over counts as work.
+   * The string result of the FORMULA `record`: the STRING right after it,
+   * "" if another record ends the wait there, or, when a SHRFMLA, ARRAY,
+   * TABLE or CONTINUE comes first, the row's next STRING the index pass
+   * noted (the row's FORMULAs are decoded in stream order, as noted).
    */
   const formulaString = (record: BiffRecord): string | SpreadsheetError => {
-    let at = record.offset + 4 + record.data.length
-    // progress: at grows by 4 + length >= 4 per record passed over, up to the substream's end
-    while (at + 4 <= context.end) {
-      const type = stream[at]! | (stream[at + 1]! << 8)
-      if (type === STRING) return stringAt(at)
-      if (!keepsWait(type)) return ""
-      work += RECORD_COST
-      at += 4 + (stream[at + 2]! | (stream[at + 3]! << 8))
-    }
-    return ""
+    const next = record.offset + 4 + record.data.length
+    if (next + 4 > context.end) return ""
+    const type = stream[next]! | (stream[next + 1]! << 8)
+    if (type === STRING) return stringAt(next)
+    if (!keepsWait(type) || note >= notesEnd) return ""
+    const at = notes[note++]!
+    return at === 0 ? "" : stringAt(at)
   }
   /**
    * Decodes the cell record `record` of the current row into its cells.
@@ -704,6 +745,10 @@ function* emitRows(context: SheetContext, indexed: Indexed, turn: Turn, tally: T
     if (failure !== undefined && completeAt >= failAt) break
     const flags = index.flags[slot]!
     row.reset([])
+    if (noted !== undefined) {
+      note = noted.from[slot]!
+      notesEnd = noted.from[slot + 1]!
+    }
     if ((flags & RANGED) !== 0) {
       // the row's records that came together: cell records of other rows
       // don't come between them, other records may (embedded substreams too)

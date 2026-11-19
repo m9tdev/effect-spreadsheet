@@ -695,6 +695,87 @@ describe("xls sheet: the rows' work", () => {
     expect(maxPerTurn).toBeLessThan(20_000)
   }, 60_000)
 
+  it("a FORMULA whose STRING comes after a long run of CONTINUEs: the run is read by the index pass in bounded turns, never again", async () => {
+    const run = new Uint8Array(400_000 * 4)
+    // progress: k up to 400 000
+    for (let k = 0; k < 400_000; k++) run.set(X.record(CONTINUE, []), k * 4)
+    const book = one([X.formula(0, 0, 0, { kind: 0 }), run, X.string("x"), X.number(1, 0, 0, 1)])
+    const { maxPerTurn, total } = await drain(book)
+    // a turn holds about BATCH_RECORDS records: the index pass's 400 004 records over about 100 turns
+    expect(maxPerTurn).toBeLessThan(2 * BATCH_RECORDS)
+    // the index pass reads 400 004 records (the EOF too); the rows read 2 records, add 2 cells and emit 2 rows:
+    // the run isn't scanned again
+    expect(total).toBe(400_004 + 2 + 2 + 2)
+    expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), run.subarray(0, 4000), X.string("x")])).toEqual([[0, 0, "Text", "x"]])
+  }, 60_000)
+
+  it("a row's FORMULAs take their noted STRINGs in stream order, out-of-place ones too", async () => {
+    expect(await cellsOf([
+      X.formula(0, 0, 0, { kind: 0 }), companion(SHRFMLA), X.string("a"),
+      X.formula(1, 0, 0, { kind: 0 }), companion(TABLE), X.string("r1"),
+      X.formula(0, 1, 0, { kind: 0 }), companion(ARRAY), X.record(CONTINUE, [0]), X.string("b"),
+      X.formula(0, 2, 0, { kind: 0 }), X.record(CONTINUE, [1]), X.number(2, 0, 0, 1),
+      X.formula(0, 3, 0, { kind: 0 }), X.string("d")
+    ])).toEqual([
+      [0, 0, "Text", "a"],
+      [0, 1, "Text", "b"],
+      [0, 2, "Text", ""],
+      [0, 3, "Text", "d"],
+      [1, 0, "Text", "r1"],
+      [2, 0, "Number", 1]
+    ])
+    // rows first seen in reverse order: each row starts at its own notes
+    expect(await cellsOf([X.formula(1, 0, 0, { kind: 0 }), companion(SHRFMLA), X.string("r1"), X.formula(0, 0, 0, { kind: 0 }), companion(SHRFMLA), X.string("r0")])).toEqual([
+      [0, 0, "Text", "r0"],
+      [1, 0, "Text", "r1"]
+    ])
+  })
+
+  it("many noted STRINGs are grouped by row over several turns", async () => {
+    // 200 000 FORMULAs, each with a CONTINUE before its STRING, over 2 rows
+    const pair = [...X.formula(0, 0, 0, { kind: 0 }), ...X.record(CONTINUE, []), ...X.string("s")]
+    const blob = new Uint8Array(200_000 * pair.length)
+    // progress: k up to 200 000
+    for (let k = 0; k < 200_000; k++) {
+      blob.set(pair, k * pair.length)
+      blob[k * pair.length + 4] = k % 2
+      blob[k * pair.length + 6] = k % 200
+    }
+    const { maxPerTurn } = await drain(one([blob]))
+    // a turn: about BATCH_CELLS steps of grouping, or BATCH_RECORDS records; not 400 000 grouping steps at once
+    expect(maxPerTurn).toBeLessThan(100_000)
+  }, 60_000)
+
+  it("a row's records out of place are read over several turns", async () => {
+    // rows 0 and 1 alternating: 400 000 BLANKs, all but two out of place
+    const size = X.blank(0, 0, 0).length
+    const blob = new Uint8Array(400_000 * size)
+    // progress: k up to 400 000
+    for (let k = 0; k < 400_000; k++) blob.set(X.blank(k % 2, 0, 0), k * size)
+    const { maxPerTurn } = await drain(one([blob]))
+    // a turn: about 3 800 records of 2 steps each, and a compaction of the row (32 769 cells); not 400 000 records at once
+    expect(maxPerTurn).toBeLessThan(100_000)
+  }, 60_000)
+
+  it("a turn finishes the wide row it is in: each chunk's turn did exactly its rows' work", async () => {
+    // 64 rows of 16 384 cells (4 MULBLANKs each): a row costs about a quarter turn, so a turn's budget runs out inside a row
+    const xfs = new Array<number>(4096).fill(0)
+    const wb = await Effect.runPromise(Xls.read(X.xls(one(Array.from({ length: 64 }, (_, r) => [0, 1, 2, 3].map((k) => X.mulBlank(r, 4096 * k, xfs))).flat()))))
+    // the work meter is told each turn's steps as its pull ends, right before the turn's chunk goes out
+    const events: Array<readonly ["steps" | "rows", number]> = []
+    const meter: Meter = { add: (unit, count) => void (unit === "steps" && events.push(["steps", count])) }
+    await Effect.runPromise(metered(meter, Stream.runForEachArray(Workbook.rows(wb, 0), (chunk) => Effect.sync(() => void events.push(["rows", chunk.length])))))
+    const turns: Array<readonly [number, number]> = []
+    // progress: k up to events.length
+    for (let k = 0; k + 1 < events.length; k++) {
+      if (events[k]![0] === "steps" && events[k + 1]![0] === "rows") turns.push([events[k + 1]![1], events[k]![1]])
+    }
+    expect(turns.reduce((n, [rows]) => n + rows, 0)).toBe(64)
+    // every turn after the first (which also did the index pass): 4 records, 16 384 cells and the row, per row
+    expect(turns.slice(1).map(([rows, steps]) => steps - rows * (4 + 16_384 + 1))).toEqual(turns.slice(1).map(() => 0))
+    expect(turns.length).toBeGreaterThan(10)
+  }, 60_000)
+
   it("sorting a row out of column order counts its cells", async () => {
     // 1 000 NUMBERs in columns 999..0, one row: the index pass reads 1 001 records (the EOF too);
     // the rows read 1 000 records and add 1 000 cells, then sort them and emit the row
