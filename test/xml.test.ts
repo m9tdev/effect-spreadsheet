@@ -685,6 +685,11 @@ describe("xml decoder: encoding sniff", () => {
     expect(decoder.end()).toEqual(Result.succeed(""))
   })
 
+  it("a U+FEFF after a 4-byte first character is text when the first 3 bytes come alone", () => {
+    const input = [...new TextEncoder().encode("\u{1F600}\uFEFF<a/>")]
+    expect(decodeAll([input.slice(0, 3), input.slice(3)])).toBe("\u{1F600}\uFEFF<a/>")
+  })
+
   it("a UTF-8 byte-order mark split across pieces is dropped once: a second one is text, however the input is split", () => {
     const input = [0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF, 0x3C, 0x61, 0x2F, 0x3E]
     for (let cut = 0; cut <= input.length; cut++) {

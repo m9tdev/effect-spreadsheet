@@ -145,9 +145,10 @@ const NOTHING: Result.Result<string, never> = Result.succeed("")
  * Feeds bytes in, gets text out, incrementally. The first bytes are held
  * back until the encoding is decided: {@link DETECT_BYTES} of them (or the
  * whole input, if shorter) when detecting, else 3, the longest byte-order
- * mark. So the decoder's first call always sees a whole mark: `TextDecoder`
- * implementations differ on a mark split across calls (some drop a second
- * mark after it too).
+ * mark. A leading mark is dropped here, not by `TextDecoder`: decoders
+ * differ on what they drop when their first call ends inside a character
+ * (some also drop a U+FEFF right after it), so the text would depend on
+ * how the input is split.
  */
 export class TextInput<E = never> {
   private phase: Phase<E> = { _tag: "Detecting", head: [], bytes: 0 }
@@ -175,8 +176,8 @@ export class TextInput<E = never> {
         phase.head.push(bytes)
         phase.bytes += bytes.length
         if (phase.bytes < this.hold) return NOTHING
-        const head = concat(phase.head, phase.bytes)
-        return this.decode(this.begin(head, false), head, false)
+        const { phase: decoding, rest } = this.begin(concat(phase.head, phase.bytes), false)
+        return this.decode(decoding, rest, false)
       }
       case "Decoding":
         return this.decode(phase, bytes, false)
@@ -190,8 +191,8 @@ export class TextInput<E = never> {
     const phase = this.phase
     switch (phase._tag) {
       case "Detecting": {
-        const head = concat(phase.head, phase.bytes)
-        return this.decode(this.begin(head, true), head, true)
+        const { phase: decoding, rest } = this.begin(concat(phase.head, phase.bytes), true)
+        return this.decode(decoding, rest, true)
       }
       case "Decoding":
         return this.decode(phase, new Uint8Array(0), true)
@@ -202,11 +203,13 @@ export class TextInput<E = never> {
 
   /**
    * Leaves detection: picks the decoder for the held-back bytes `head`
-   * (`complete` says it is the whole input).
+   * (`complete` says it is the whole input). `rest` is `head` without its
+   * byte-order mark, the bytes left to decode.
    */
-  private begin(head: Uint8Array, complete: boolean): Decoding<E> {
+  private begin(head: Uint8Array, complete: boolean): { readonly phase: Decoding<E>; readonly rest: Uint8Array } {
     const detect = this.detect
-    const encoding = bomEncoding(head) ?? (
+    const bom = bomEncoding(head)
+    const encoding = bom ?? (
       detect.detect === "bom-only"
         ? detect.encoding
         // detect on exactly the first DETECT_BYTES, so the choice doesn't
@@ -219,11 +222,14 @@ export class TextInput<E = never> {
     const check: Check<E> = !onInvalid.fatal
       ? { _tag: "None" }
       : { _tag: encoding === "utf-8" ? "Utf8" : "Platform", invalid: onInvalid.invalid }
-    // ignoreBOM: false drops a byte-order mark of the decoder's own encoding
-    const decoder = new TextDecoder(encoding, { fatal: check._tag !== "None", ignoreBOM: false })
+    // ignoreBOM: true keeps every U+FEFF; the leading mark is dropped below
+    const decoder = new TextDecoder(encoding, { fatal: check._tag !== "None", ignoreBOM: true })
     const phase: Decoding<E> = { _tag: "Decoding", decoder, check }
     this.phase = phase
-    return phase
+    // the mark's bytes count as read, so offsets stay offsets into the input
+    const skip = bom === undefined ? 0 : bom === "utf-8" ? 3 : 2
+    this.advance(head.subarray(0, skip))
+    return { phase, rest: head.subarray(skip) }
   }
 
   /** Decodes `bytes` (and flushes, if `last`), checked as the phase says. */

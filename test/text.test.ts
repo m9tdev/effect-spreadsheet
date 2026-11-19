@@ -203,4 +203,42 @@ describe("text: TextInput", () => {
     expect(input.push(new Uint8Array(DETECT_BYTES - 1).fill(0x61))).toEqual(Result.succeed(""))
     expect(Result.merge(input.push(bytes(0x62))).length).toBe(DETECT_BYTES)
   })
+
+  it("a U+FEFF after the first character is text, and only a leading byte-order mark is dropped, however the first bytes are split", () => {
+    const encode = (s: string) => new TextEncoder().encode(s)
+    // the first character in 1 to 4 bytes, then U+FEFF; with and without a leading mark
+    for (const first of ["A", "é", "€", "😀"]) {
+      for (const mark of ["", "\uFEFF"]) {
+        const input = encode(`${mark}${first}\uFEFFb\uFEFF`)
+        const text = `${first}\uFEFFb\uFEFF`
+        // every split into up to three pieces: the first ones may end inside the first character
+        for (let c1 = 0; c1 <= input.length; c1++) {
+          for (let c2 = c1; c2 <= input.length; c2++) {
+            const pieces = [input.subarray(0, c1), input.subarray(c1, c2), input.subarray(c2)]
+            const where = `${first} ${mark.length} ${c1}/${c2}`
+            expect(run(fatal(), pieces), where).toEqual({ text })
+            expect(run(fatal("windows-1252"), pieces), where).toEqual(mark === "" ? { text: new TextDecoder("windows-1252").decode(input) } : { text })
+            const lenient = new TextInput<number | undefined>({ detect: "bom-utf16-utf8-1252", fatal: false })
+            expect(run(lenient, pieces), where).toEqual({ text })
+          }
+        }
+      }
+    }
+  })
+
+  it("a UTF-16 byte-order mark is dropped, and a U+FEFF after the first character kept, however the first bytes are split", () => {
+    const le = bytes(0xFF, 0xFE, 0x3D, 0xD8, 0x00, 0xDE, 0xFF, 0xFE, 0x41, 0x00) // mark, U+1F600, U+FEFF, A
+    for (let c1 = 0; c1 <= le.length; c1++) {
+      for (let c2 = c1; c2 <= le.length; c2++) {
+        const pieces = [le.subarray(0, c1), le.subarray(c1, c2), le.subarray(c2)]
+        expect(run(fatal(), pieces), `${c1}/${c2}`).toEqual({ text: "\u{1F600}\uFEFFA" })
+      }
+    }
+  })
+
+  it("an invalid byte after a UTF-8 byte-order mark has its offset in the input, the mark counted", () => {
+    expect(run(fatal(), [bytes(0xEF, 0xBB, 0xBF, 0x41, 0xFF)])).toEqual({ invalid: 4 })
+    expect(run(fatal(), [bytes(0xEF, 0xBB, 0xBF), bytes(0xFF)])).toEqual({ invalid: 3 })
+    expect(run(fatal(), [bytes(0xEF, 0xBB, 0xBF, 0xC3)])).toEqual({ invalid: 3 })
+  })
 })

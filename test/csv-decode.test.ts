@@ -69,6 +69,15 @@ describe("csv: byte decoder", () => {
     expect(decoding("latin1")).toEqual({ encoding: "windows-1252" })
   })
 
+  it("a U+FEFF after a 4-byte first character stays in the cell when the first 3 bytes come alone", async () => {
+    const input = enc("😀\uFEFF,b\n")
+    for (const encoding of ["utf-8", "auto"]) {
+      const { error, rows } = await csvUntilError(Stream.fromIterable([input.subarray(0, 3), input.subarray(3)]), { encoding })
+      expect(error).toBeUndefined()
+      expect(rows).toEqual([["😀\uFEFF", "b"]])
+    }
+  })
+
   it("an unknown encoding through rows on a multi-chunk stream fails with InvalidOption and no rows", async () => {
     const input = Stream.fromIterable(chunksOf(enc("a\nb\nc\n"), 1))
     const { error, rows } = await csvUntilError(input, { encoding: "klingon" })
