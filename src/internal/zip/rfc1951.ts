@@ -572,9 +572,16 @@ class Inflater implements Inflate {
 }
 
 /**
+ * Output per `next` of `inflateRawSync`: the size of the chunks the
+ * platform's `DecompressionStream` hands out in Node, so the work done
+ * downstream per pull (and so the longest event-loop pause) matches it.
+ */
+const CHUNK_BYTES = 16 * 1024
+
+/**
  * This inflater behind the archive's `InflateRaw` interface, so it can be
  * swapped in for the default one and compared with it. Each `next` decodes
- * up to `SLICE_BYTES` from up to `SLICE_BYTES` of input; a call that only
+ * up to `CHUNK_BYTES` from up to `SLICE_BYTES` of input; a call that only
  * consumed input gives an empty chunk. Errors reject with the reason and
  * the compressed offset, after the bytes decoded before them were given.
  */
@@ -584,7 +591,7 @@ export const inflateRawSync: InflateRaw = (compressed) => {
   return {
     next: () => {
       if (stopped) return Promise.resolve(undefined)
-      const out = new Uint8Array(SLICE_BYTES)
+      const out = new Uint8Array(CHUNK_BYTES)
       const step = decoder.next(out, SLICE_BYTES)
       switch (step._tag) {
         case "Output":
