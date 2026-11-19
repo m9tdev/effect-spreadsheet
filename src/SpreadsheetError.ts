@@ -151,7 +151,7 @@ export const SpreadsheetError = Schema.Union([
  * @since 0.1.0
  * @category errors
  */
-export type SpreadsheetError = typeof SpreadsheetError.Type
+export type SpreadsheetError = InstanceType<(typeof SpreadsheetError.members)[number]>
 
 /**
  * True for an instance of one of the {@link SpreadsheetError} classes

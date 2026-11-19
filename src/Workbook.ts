@@ -29,7 +29,7 @@ export const Row = Schema.Struct({
  * @since 0.1.0
  * @category models
  */
-export type Row = typeof Row.Type
+export interface Row extends Schema.Schema.Type<typeof Row> {}
 
 /**
  * A cell range, 0-based and inclusive.

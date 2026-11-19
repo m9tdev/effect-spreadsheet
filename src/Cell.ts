@@ -86,7 +86,7 @@ export const Cell = Schema.Union([EmptyCell, TextCell, NumberCell, BooleanCell, 
  * @since 0.1.0
  * @category models
  */
-export type Cell = typeof Cell.Type
+export type Cell = Schema.Schema.Type<(typeof Cell.members)[number]>
 
 /**
  * Optional cell metadata for the constructors.
@@ -99,11 +99,13 @@ export interface Meta {
   readonly numFmt?: string | undefined
 }
 
-const withMeta = <C extends Cell>(cell: C, meta: Meta | undefined): C => {
+/** A cell under construction: its metadata keys can still be set. */
+type Building<C extends Cell> = { -readonly [K in keyof C]: C[K] }
+
+const withMeta = <C extends Cell>(cell: Building<C>, meta: Meta | undefined): C => {
   if (meta !== undefined) {
-    const out = cell as { formula?: string; numFmt?: string }
-    if (meta.formula !== undefined) out.formula = meta.formula
-    if (meta.numFmt !== undefined) out.numFmt = meta.numFmt
+    if (meta.formula !== undefined) cell.formula = meta.formula
+    if (meta.numFmt !== undefined) cell.numFmt = meta.numFmt
   }
   return cell
 }

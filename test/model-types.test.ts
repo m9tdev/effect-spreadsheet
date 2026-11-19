@@ -64,6 +64,9 @@ describe("isSpreadsheetError", () => {
       reason: Schema.String
     }) {}
     assert.isFalse(SpreadsheetError.isSpreadsheetError(new InvalidOption({ option: "a", reason: "b" })))
+    // nor one with the same tag and other fields
+    class MalformedFile extends Schema.TaggedError<MalformedFile>()("MalformedFile", { code: Schema.Number }) {}
+    assert.isFalse(SpreadsheetError.isSpreadsheetError(new MalformedFile({ code: 1 })))
     assert.isFalse(SpreadsheetError.isSpreadsheetError({ _tag: "InvalidOption", option: "a", reason: "b" }))
     assert.isFalse(SpreadsheetError.isSpreadsheetError(null))
   })
