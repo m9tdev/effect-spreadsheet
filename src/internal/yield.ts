@@ -9,8 +9,10 @@
  * so in a browser it would spend most of its time waiting on the clamp. So
  * when the fiber runs on that default scheduler with no `setImmediate`, the
  * yield resumes on a `MessageChannel` message instead: still a macrotask
- * (input, rendering and other tasks get their turn), but not clamped. A
- * scheduler the application provided itself is always used as is.
+ * (timers, input and other tasks get their turn), but not clamped. Firefox
+ * redraws the page less often during such a loop (about 20 fps, where
+ * Chromium and WebKit keep 60). A scheduler the application provided itself
+ * is always used as is.
  *
  * @internal
  */
@@ -20,22 +22,34 @@ import * as Scheduler from "effect/Scheduler"
 /** Runs a function on a later macrotask. */
 export type PostTask = (task: () => void) => void
 
+/** A port as Node, Deno and Bun have them: while referenced, it keeps the process alive. */
+type ReceivingPort = MessagePort & { readonly ref?: () => void; readonly unref?: () => void }
+
 /**
  * Posts tasks as `MessageChannel` messages, in order. The channel is made
- * on the first post.
+ * on the first post. Where ports keep a process alive (Node, Deno, Bun),
+ * the receiving port is referenced only while tasks are queued, so a
+ * pending task keeps the process up and an idle channel doesn't. Browsers
+ * have no `ref`/`unref`.
  */
 export const messageChannelTask = (): PostTask => {
-  let port: MessagePort | undefined
+  let channel: { readonly receive: ReceivingPort; readonly send: MessagePort } | undefined
   const queue: Array<() => void> = []
   return (task) => {
-    if (port === undefined) {
-      const channel = new MessageChannel()
+    if (channel === undefined) {
+      const made = new MessageChannel()
+      const receive: ReceivingPort = made.port1
       // one message per queued task, so each message runs exactly one
-      channel.port1.onmessage = () => queue.shift()?.()
-      port = channel.port2
+      receive.onmessage = () => {
+        const next = queue.shift()
+        if (queue.length === 0) receive.unref?.()
+        next?.()
+      }
+      channel = { receive, send: made.port2 }
     }
+    channel.receive.ref?.()
     queue.push(task)
-    port.postMessage(undefined)
+    channel.send.postMessage(undefined)
   }
 }
 

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process"
 import { Effect, Exit, Fiber, Stream } from "effect"
 import * as Scheduler from "effect/Scheduler"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -117,6 +118,29 @@ describe("reader yields", () => {
     })
     expect(ran).toEqual([1, 2, 3, 4])
     expect(channels).toBe(1)
+  })
+
+  it("keep a Node process alive while MessageChannel tasks are queued, and let it exit once they ran", () => {
+    // in a child process: three tasks, each posted by the one before, then,
+    // once the channel is idle, one more posted from a timer; nothing else
+    // keeps the process up
+    const module = new URL("../src/internal/yield.ts", import.meta.url).href
+    const script = `
+      import { messageChannelTask } from ${JSON.stringify(module)}
+      const post = messageChannelTask()
+      const ran = []
+      const step = (n) => () => {
+        ran.push(n)
+        if (n < 3) post(step(n + 1))
+        else if (n === 3) setTimeout(() => post(step(4)), 20)
+        else console.log(ran.join(","))
+      }
+      post(step(1))
+    `
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 20_000 })
+    expect(child.error).toBeUndefined()
+    expect(child.status).toBe(0)
+    expect(child.stdout.trim()).toBe("1,2,3,4")
   })
 
   it("take MessageChannel messages in a runtime without setImmediate, and read the same rows", async () => {

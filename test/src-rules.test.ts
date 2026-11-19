@@ -30,10 +30,23 @@ describe("src rules (AGENTS.md)", () => {
     }
   })
 
+  // Effect's own yield however it is reached: a namespace (`Effect.`, an alias),
+  // yieldNowWith, or a named import from effect
+  const EFFECT_YIELD = /\.\s*yieldNow|\byieldNowWith\b|import\s*\{[^}]*\byieldNow\b[^}]*\}\s*from\s*["']effect/
+
+  it("the Effect yield pattern catches its forms, and allows the readers' own yield", () => {
+    expect("yield* Effect.yieldNow").toMatch(EFFECT_YIELD)
+    expect("yield* E.yieldNow").toMatch(EFFECT_YIELD)
+    expect("Effect.yieldNowWith(1)").toMatch(EFFECT_YIELD)
+    expect('import { Stream, yieldNow } from "effect/Effect"').toMatch(EFFECT_YIELD)
+    expect("yield* yieldNow").not.toMatch(EFFECT_YIELD)
+    expect('import { yieldNow } from "../yield.ts"').not.toMatch(EFFECT_YIELD)
+  })
+
   it("readers yield through internal/yield.ts, not Effect.yieldNow (clamped to 4 ms in browsers)", () => {
     for (const file of files(srcDir)) {
       if (file.endsWith(join("internal", "yield.ts"))) continue
-      expect(readFileSync(file, "utf8"), file).not.toMatch(/\bEffect\.yieldNow/)
+      expect(readFileSync(file, "utf8"), file).not.toMatch(EFFECT_YIELD)
     }
   })
 
