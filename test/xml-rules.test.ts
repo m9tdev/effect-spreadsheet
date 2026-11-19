@@ -10,7 +10,12 @@ const malformed = (reason: string) => new MalformedFile({ format: "xml", reason 
 const run = (
   xml: string,
   paths: ReadonlyArray<string>,
-  options: { forbid?: Record<string, string>; skip?: ReadonlyArray<string>; rule?: (path: string, log: Array<string>) => XmlRule } = {}
+  options: {
+    forbid?: Record<string, string>
+    skip?: ReadonlyArray<string>
+    opaque?: ReadonlyArray<string>
+    rule?: (path: string, log: Array<string>) => XmlRule
+  } = {}
 ): { log: Array<string>; error: SpreadsheetError | undefined } => {
   const log: Array<string> = []
   const on: Record<string, XmlRule> = {}
@@ -28,7 +33,8 @@ const run = (
     on,
     malformed,
     ...(options.forbid === undefined ? {} : { forbid: options.forbid }),
-    ...(options.skip === undefined ? {} : { skip: options.skip })
+    ...(options.skip === undefined ? {} : { skip: options.skip }),
+    ...(options.opaque === undefined ? {} : { opaque: options.opaque })
   }
   const tokenizer = new XmlTokenizer(rulesHandler(rules), SpreadsheetLimits.defaults)
   const error = tokenizer.feed(xml) ?? tokenizer.end()
@@ -52,6 +58,7 @@ describe("xml path rules: paths", () => {
     // forbid and skip paths count too
     expect(() => rulesHandler({ on: on(MAX_STEPS), forbid: { "//x": "x" }, malformed })).toThrow(/more than 30 path steps/)
     expect(() => rulesHandler({ on: on(MAX_STEPS), skip: ["//x"], malformed })).toThrow(/more than 30 path steps/)
+    expect(() => rulesHandler({ on: on(MAX_STEPS), opaque: ["//x"], malformed })).toThrow(/more than 30 path steps/)
     // paths that start alike share their steps
     expect(() => rulesHandler({ on: { ...on(MAX_STEPS), "/e0": {}, "/e0/e1": {} }, malformed })).not.toThrow()
   })
@@ -62,6 +69,8 @@ describe("xml path rules: paths", () => {
     const forbid = Object.fromEntries(paths.map((p) => [p, "x"]))
     expect(() => rulesHandler({ on, forbid, skip: paths, malformed })).not.toThrow()
     expect(() => rulesHandler({ on: { ...on, "//p10": {} }, forbid, skip: paths, malformed })).toThrow(/more than 30 paths/)
+    expect(() => rulesHandler({ on, forbid, skip: paths.slice(1), opaque: ["//p0"], malformed })).not.toThrow()
+    expect(() => rulesHandler({ on, forbid, skip: paths, opaque: ["//p0"], malformed })).toThrow(/more than 30 paths/)
   })
 })
 
@@ -199,5 +208,75 @@ describe("xml path rules: what the rules ask of the tokenizer", () => {
         ? { open: (_, element) => element.omitText() }
         : { open: (_, element) => element.collect(), close: (text) => void log.push(`t ${String(text)}`) }
     expect(run(`<a><t>1</t><o><t>2</t></o></a>`, ["//o", "//t"], { rule }).log).toEqual(["t 1", "t undefined"])
+  })
+})
+
+describe("xml path rules: an open that skips", () => {
+  it(`"skip": no later opens, nothing inside it, no closes; the rules go on after it`, () => {
+    const rule = (path: string, log: Array<string>): XmlRule => ({
+      open: (attributes) => {
+        log.push(`open ${path} ${attributes.map(([k, v]) => `${k}=${v}`).join(",")}`.trimEnd())
+        return path === "//b" && attributes.length > 0 ? "skip" : undefined
+      },
+      close: () => void log.push(`close ${path}`)
+    })
+    const { error, log } = run(`<a><b n="1"><b/><i/></b><b><i/></b></a>`, ["//b", "/a/b", "//i"], { rule, forbid: { "//b//b": "b in b" } })
+    expect(error).toBeUndefined()
+    expect(log).toEqual(["open //b n=1", "open //b", "open /a/b", "open //i", "close //i", "close //b", "close /a/b"])
+  })
+
+  it("a skipped element's text is left out of an enclosing element's collected text", () => {
+    const rule = (path: string, log: Array<string>): XmlRule =>
+      path === "//t"
+        ? { open: (_, element) => element.collect(), close: (text) => void log.push(`t "${String(text)}"`) }
+        : { open: () => "skip" }
+    expect(run(`<a><t>x<s>y</s>z</t></a>`, ["//t", "//s"], { rule }).log).toEqual([`t "xz"`])
+  })
+})
+
+describe("xml path rules: opaque elements", () => {
+  it("the // steps from above don't reach inside an opaque element, its own paths do", () => {
+    const xml = `<r><x n="1"/><o><x n="2"/><v><x n="3"/></v><w><v n="4"/></w></o><x n="5"/></r>`
+    const opens = (paths: ReadonlyArray<string>, opaque: ReadonlyArray<string>) =>
+      run(xml, paths, { opaque }).log.filter((l) => l.startsWith("open"))
+    expect(opens(["//x", "//o/v", "//o//v"], ["//o"])).toEqual(["open //x n=1", "open //o/v", "open //o//v", "open //o//v n=4", "open //x n=5"])
+    // not opaque: the same elements are reached from above
+    expect(opens(["//x"], [])).toEqual(["open //x n=1", "open //x n=2", "open //x n=3", "open //x n=5"])
+    // a path that ends at the opaque element and one through it
+    expect(opens(["//o", "//o/x"], ["//o"])).toEqual(["open //o", "open //o/x n=2"])
+  })
+
+  it("a forbidden path from above doesn't reach inside it; one through it does", () => {
+    expect(run(`<r><o><r/></o></r>`, [], { opaque: ["//o"], forbid: { "//r//r": "r in r" } }).error).toBeUndefined()
+    expect(run(`<r><r/></r>`, [], { opaque: ["//o"], forbid: { "//r//r": "r in r" } }).error).toMatchObject({ reason: "r in r" })
+    expect(run(`<r><o><x><r/></x></o></r>`, [], { opaque: ["//o"], forbid: { "//o//r": "r in o" } }).error).toMatchObject({ reason: "r in o" })
+  })
+
+  it("what can match nothing inside it is skipped whole, its text left out; what still can is not", () => {
+    const rule = (path: string, log: Array<string>): XmlRule =>
+      path === "//o"
+        ? { open: (_, element) => element.collect(), close: (text) => void log.push(`o "${String(text)}"`) }
+        : { open: () => void log.push(`open ${path}`) }
+    // <x> is skipped (its text too), <w> is kept: a path through the opaque element goes on below it
+    expect(run(`<r><o>a<x>b<t/></x>c<w>d<t/></w>e</o></r>`, ["//o", "//o/w/t"], { opaque: ["//o"], rule }).log)
+      .toEqual(["open //o/w/t", `o "acde"`])
+    // an opaque element inside an opaque one
+    expect(run(`<r><o>a<o>b<x>c</x></o>d</o></r>`, ["//o", "//o/o"], { opaque: ["//o", "//o/o"], rule }).log)
+      .toEqual(["open //o/o", `o "abd"`])
+    // a forbidden element in a skipped subtree isn't seen
+    expect(run(`<r><o><x><f/></x></o></r>`, [], { opaque: ["//o"], forbid: { "//o/f": "f" } }).error).toBeUndefined()
+  })
+
+  it("the same element name in and out of an opaque element at one depth: each matches by its own parent", () => {
+    const xml = `<r><o><x n="1"/><x n="2"/></o><p><x n="3"/><x n="4"/></p><o><x n="5"/></o><p><x n="6"/></p></r>`
+    expect(run(xml, ["//x"], { opaque: ["//o"] }).log.filter((l) => l.startsWith("open"))).toEqual(["open //x n=3", "open //x n=4", "open //x n=6"])
+  })
+
+  it("outside any opaque element, what can match nothing is still read", () => {
+    const rule = (path: string, log: Array<string>): XmlRule => ({
+      open: (_, element) => element.collect(),
+      close: (text) => void log.push(`${path} "${String(text)}"`)
+    })
+    expect(run(`<a><b>x<y>z</y></b></a>`, ["/a/b"], { rule }).log).toEqual([`/a/b "xz"`])
   })
 })
