@@ -133,18 +133,6 @@ export class InvalidOption extends Schema.TaggedError<InvalidOption>()("InvalidO
 }
 
 /**
- * @since 0.1.0
- * @category errors
- */
-export type SpreadsheetError =
-  | UnsupportedFormat
-  | MalformedFile
-  | LimitExceeded
-  | Encrypted
-  | SheetNotFound
-  | InvalidOption
-
-/**
  * Schema of the whole union, e.g. to send errors across a worker boundary.
  *
  * @since 0.1.0
@@ -161,8 +149,16 @@ export const SpreadsheetError = Schema.Union([
 
 /**
  * @since 0.1.0
+ * @category errors
+ */
+export type SpreadsheetError = InstanceType<(typeof SpreadsheetError.members)[number]>
+
+/**
+ * True for an instance of one of the {@link SpreadsheetError} classes
+ * (`instanceof`, so another class with the same `_tag` doesn't pass).
+ *
+ * @since 0.1.0
  * @category guards
  */
 export const isSpreadsheetError = (u: unknown): u is SpreadsheetError =>
-  u instanceof UnsupportedFormat || u instanceof MalformedFile || u instanceof LimitExceeded ||
-  u instanceof Encrypted || u instanceof SheetNotFound || u instanceof InvalidOption
+  SpreadsheetError.members.some((error) => u instanceof error)

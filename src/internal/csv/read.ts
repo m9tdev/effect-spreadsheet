@@ -12,7 +12,7 @@ import { csvOptions } from "./options.ts"
 import { rowsFromByteStream } from "./reader.ts"
 
 export const toStream = <E, R>(input: Uint8Array | Stream.Stream<Uint8Array, E, R>): Stream.Stream<Uint8Array, E, R> =>
-  input instanceof Uint8Array ? Stream.succeed(input) as Stream.Stream<Uint8Array, E, R> : input
+  input instanceof Uint8Array ? Stream.succeed(input) : input
 
 /**
  * A one-sheet workbook over `input`, after checking the options (the

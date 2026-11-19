@@ -186,23 +186,40 @@ export const readCsv: (
  * @since 0.1.0
  * @category records
  */
-export const toRecords: {
-  <E, R, D = never>(
-    rows: Stream.Stream<Row, E, R>,
-    options: RecordsOptions<D>
-  ): Stream.Stream<Record<string, Cell.Value | D>, E | LimitExceeded | InvalidOption, R>
-  <D = never>(
-    rows: Iterable<Row>,
-    options: RecordsOptions<D>
-  ): Effect.Effect<Array<Record<string, Cell.Value | D>>, LimitExceeded | InvalidOption>
-} = (<E, R>(rows: Stream.Stream<Row, E, R> | Iterable<Row>, options: RecordsOptions<unknown>) => {
-  const stream = Stream.unwrap(
-    Effect.map(SpreadsheetLimits.resolve(options.limits), (limits) =>
-      recordsStream(
-        Stream.isStream(rows) ? rows as Stream.Stream<Row, E, R> : Stream.fromIterable(rows as Iterable<Row>),
-        options,
-        limits
-      ))
+export function toRecords<E, R, D = never>(
+  rows: Stream.Stream<Row, E, R>,
+  options: RecordsOptions<D>
+): Stream.Stream<Record<string, Cell.Value | D>, E | LimitExceeded | InvalidOption, R>
+/**
+ * Turns an iterable of rows into an Effect of the records array; see the
+ * stream overload above for the header, keys, limits and values.
+ *
+ * @since 0.1.0
+ * @category records
+ */
+export function toRecords<D = never>(
+  rows: Iterable<Row>,
+  options: RecordsOptions<D>
+): Effect.Effect<Array<Record<string, Cell.Value | D>>, LimitExceeded | InvalidOption>
+export function toRecords<E, R, D>(
+  rows: Stream.Stream<Row, E, R> | Iterable<Row>,
+  options: RecordsOptions<D>
+):
+  | Stream.Stream<Record<string, unknown>, E | LimitExceeded | InvalidOption, R>
+  | Effect.Effect<Array<Record<string, unknown>>, LimitExceeded | InvalidOption> {
+  if (Stream.isStream(rows)) return records(() => rows, options)
+  // the iterable becomes a stream when the Effect runs, each time it runs
+  return Effect.map(
+    Stream.runCollect(records(() => Stream.fromIterable(rows), options)),
+    (chunk) => Array.from(chunk)
   )
-  return Stream.isStream(rows) ? stream : Effect.map(Stream.runCollect(stream), (chunk) => Array.from(chunk))
-}) as never
+}
+
+/** The records of `rows()`, with the limits of the context where the stream runs. */
+const records = <E, R>(
+  rows: () => Stream.Stream<Row, E, R>,
+  options: RecordsOptions<unknown>
+): Stream.Stream<Record<string, unknown>, E | LimitExceeded | InvalidOption, R> =>
+  Stream.unwrap(
+    Effect.map(SpreadsheetLimits.resolve(options.limits), (limits) => recordsStream(rows(), options, limits))
+  )
