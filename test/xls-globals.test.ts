@@ -644,6 +644,14 @@ describe("xls globals: long work yields", () => {
   })
 })
 
+describe("xls globals: shared strings", () => {
+  it("of two SST records, the last one wins (the first one's strings are dropped)", async () => {
+    const stream = X.workbookStream({ globals: [X.sst(["a", "b"]), X.sst(["c"])], sheets: [{ name: "S", records: [] }] })
+    const globals = await Effect.runPromise(readGlobals(stream, SpreadsheetLimits.defaults))
+    expect(globals.strings).toEqual(["c"])
+  })
+})
+
 describe("xls globals: VB module BOUNDSHEETs", () => {
   const module = (k: number) => ({ name: `Module${k}`, dt: 6, kind: 0x0006, records: [] })
   const sheet = (k: number) => ({ name: `Sheet${k}`, records: [] })

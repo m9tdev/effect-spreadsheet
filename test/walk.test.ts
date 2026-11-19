@@ -56,6 +56,21 @@ describe("drive", () => {
     expect(seen.slice(0, 12)).toEqual([30, 27, 24, 21, 18, 15, 12, 9, 6, 3, 30, 27])
   })
 
+  it("starts each turn with the whole budget, even after a step that overspent the last one", async () => {
+    const seen: Array<number> = []
+    const costs = [25, 1, 1]
+    const walk = function*(turn: Turn): Walk<number, never> {
+      // progress: one cost per iteration
+      for (const cost of costs) {
+        seen.push(turn.left)
+        if (turn.spend(cost)) yield
+      }
+      return Result.succeed(costs.length)
+    }
+    expect(await Effect.runPromise(drive(walk, 10, "batches"))).toBe(3)
+    expect(seen).toEqual([10, 10, 9])
+  })
+
   it("counts the work on the meter it finds, in the unit it is given, one per turn", async () => {
     const added: Array<[string, number]> = []
     await Effect.runPromise(metered({ add: (unit, count) => added.push([unit, count]) }, drive(stepping(25, 1, []), 10, "steps")))
