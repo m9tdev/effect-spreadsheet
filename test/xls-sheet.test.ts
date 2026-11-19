@@ -724,6 +724,16 @@ describe("xls sheet: the rows' work", () => {
       [1, 0, "Text", "r1"],
       [2, 0, "Number", 1]
     ])
+    // a FORMULA whose STRING comes right after it takes no note: the row's later FORMULA takes the first note
+    expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), X.string("a"), X.formula(0, 1, 0, { kind: 0 }), companion(SHRFMLA), X.string("b")])).toEqual([
+      [0, 0, "Text", "a"],
+      [0, 1, "Text", "b"]
+    ])
+    // rows first seen after the 64th (past the index's first allocation): their notes and out-of-place records are
+    // kept (row 69's FORMULA comes right after its NUMBER, in its range; row 68's and row 69's last NUMBERs are out of place)
+    const many = Array.from({ length: 70 }, (_, r) => X.number(r, 0, 0, r))
+    const late = await cellsOf([...many, X.formula(69, 1, 0, { kind: 0 }), companion(SHRFMLA), X.string("late"), X.number(68, 1, 0, -1), X.number(69, 2, 0, -2)])
+    expect(late.slice(-5)).toEqual([[68, 0, "Number", 68], [68, 1, "Number", -1], [69, 0, "Number", 69], [69, 1, "Text", "late"], [69, 2, "Number", -2]])
     // rows first seen in reverse order: each row starts at its own notes
     expect(await cellsOf([X.formula(1, 0, 0, { kind: 0 }), companion(SHRFMLA), X.string("r1"), X.formula(0, 0, 0, { kind: 0 }), companion(SHRFMLA), X.string("r0")])).toEqual([
       [0, 0, "Text", "r0"],
