@@ -21,9 +21,9 @@ export interface TestWorkbook {
   readonly sharedStrings?: ReadonlyArray<string>
   /** Raw sst XML, instead of `sharedStrings`. */
   readonly sharedStringsXml?: string
-  /** numFmtId per cellXfs entry, and custom codes. */
-  readonly xfs?: ReadonlyArray<number>
-  readonly numFmts?: Readonly<Record<number, string>>
+  /** numFmtId per cellXfs entry, and custom codes by id (a string id or numFmtId is written as is). */
+  readonly xfs?: ReadonlyArray<number | string>
+  readonly numFmts?: Readonly<Record<string, string>>
   /** Extra styles XML after <cellXfs> (e.g. <dxfs>). */
   readonly stylesExtra?: string
   readonly date1904?: boolean

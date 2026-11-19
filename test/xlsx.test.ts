@@ -548,6 +548,51 @@ describe("xlsx: where a cell's value comes from", () => {
   })
 })
 
+describe("xlsx: integer attributes, each with its own rule for a missing or bad value", () => {
+  it("a defined name's localSheetId: up to nine digits; a bad one is workbook-wide", async () => {
+    const { wb } = await readOk({
+      sheets: [{ name: "A" }, { name: "B" }],
+      definedNames: ["000000001", "0000000001", "x", "-1", " 1", ""].map((s, k) => `<definedName name="N${k}" localSheetId="${s}">A!$A$1</definedName>`).join("")
+    })
+    expect(wb.definedNames.map((n) => n.scope)).toEqual([1, undefined, undefined, undefined, undefined, undefined])
+  })
+
+  it("numFmtId: up to nine digits; a bad one skips a custom code, and is General in a cell style", async () => {
+    const { sheets } = await readOk({
+      // custom 164 written with leading zeros; a bad id's code is not added under any id
+      numFmts: { "000000164": "yyyy-mm-dd", "x": "0.00", "1000000000": "0.0" },
+      xfs: ["000000164", "x", "0000000014", "-1", "1"],
+      sheets: [{ name: "S", data: `<row r="1">${[0, 1, 2, 3, 4].map((s) => `<c s="${s}"><v>45000</v></c>`).join("")}</row>` }]
+    })
+    expect(sheets[0]![0]!.cells.map((c) => [c._tag, c.numFmt])).toEqual([
+      ["Date", "yyyy-mm-dd"],
+      ["Number", undefined],
+      ["Number", undefined],
+      ["Number", undefined],
+      ["Number", "0"]
+    ])
+  })
+
+  it("a cell's style index: up to nine digits; a missing or bad one is no style", async () => {
+    const { sheets } = await readOk({
+      xfs: [14, 14],
+      sheets: [{ name: "S", data: `<row r="1">${["000000001", "x", "-1", "", "0000000001"].map((s) => `<c s="${s}"><v>45000</v></c>`).join("")}<c><v>45000</v></c></row>` }]
+    })
+    expect(sheets[0]![0]!.cells.map((c) => c._tag)).toEqual(["Date", "Number", "Number", "Number", "Number", "Number"])
+  })
+
+  it("a row number: up to ten digits; more digits are past the row limit, anything else is MalformedFile", async () => {
+    const sheet = (data: string): TestWorkbook => ({ sheets: [{ name: "S", data }] })
+    expect(values((await readOk(sheet(`<row r="0000000001"><c><v>1</v></c></row>`))).sheets[0]!)).toEqual([[0, false, [[0, "Number", 1]]]])
+    expect(await errorOf(sheet(`<row r="9999999999"/>`))).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows", actual: 9999999999 })
+    expect(await errorOf(sheet(`<row r="00000000001"/>`))).toMatchObject({ _tag: "LimitExceeded", limit: "maxRows", actual: Infinity })
+    for (const r of ["", "x", "-1", "+1", " 1", "1.0", "\u0663"]) {
+      expect(await errorOf(sheet(`<row r="${r}"/>`)), r).toMatchObject({ _tag: "MalformedFile", reason: `bad row number ${JSON.stringify(r)}` })
+    }
+    expect(await errorOf(sheet(`<row r="000"/>`))).toMatchObject({ _tag: "MalformedFile", reason: "row number 0" })
+  })
+})
+
 describe("xlsx: sheet details", () => {
   const withLayout = (layout: string, data = `<row><c><v>1</v></c></row>`) =>
     xlsx({ sheets: [{ name: "S", raw: `<worksheet xmlns="x"><dimension ref="B2:D9"/><cols>${layout}</cols><sheetData>${data}</sheetData><mergeCells><mergeCell ref="A1:C1"/><mergeCell ref="B3:B4"/></mergeCells></worksheet>` }] })
@@ -580,6 +625,14 @@ describe("xlsx: sheet details", () => {
   it("bad ranges are MalformedFile; spans and merges have limits", async () => {
     expect(failureOf(await details(await withLayout(`<col min="0" max="2" hidden="1"/>`)))).toMatchObject({ _tag: "MalformedFile" })
     expect(failureOf(await details(await withLayout(`<col min="x" max="2" hidden="1"/>`)))).toMatchObject({ _tag: "MalformedFile" })
+    // both ends are needed, with up to nine digits each
+    for (const range of [`min="1"`, `max="1"`, `min="1" max="1000000000"`, `min="0000000001" max="1"`, `min="1" max=""`]) {
+      expect(failureOf(await details(await withLayout(`<col ${range} hidden="1"/>`))), range).toMatchObject({ _tag: "MalformedFile" })
+    }
+    const nineDigits = await details(await withLayout(`<col min="000000002" max="000000003" hidden="1"/>`))
+    expect(Exit.isSuccess(nineDigits) && nineDigits.value.hiddenColumns).toEqual([{ first: 1, last: 2 }])
+    // a span that isn't hidden isn't read
+    expect(Exit.isSuccess(await details(await withLayout(`<col min="x"/>`)))).toBe(true)
     const badMerge = await xlsx({ sheets: [{ name: "S", raw: `<worksheet xmlns="x"><sheetData/><mergeCells><mergeCell ref="A1:"/></mergeCells></worksheet>` }] })
     expect(failureOf(await details(badMerge))).toMatchObject({ _tag: "MalformedFile" })
     expect(failureOf(await details(await withLayout(`<col min="1" max="1"/>`.repeat(5)), { maxColumns: 4 }))).toMatchObject({ limit: "maxColumns" })
