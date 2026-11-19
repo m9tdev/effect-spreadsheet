@@ -17,10 +17,10 @@
  * Limits: element depth (`maxXmlDepth`), attribute values in one tag
  * (`maxXmlAttributes`), and, each on its own, by `maxStringLength`: a text
  * run (and collected text), an attribute value, the markup before, between
- * and after a tag's values (its names, `=` and whitespace), and the content
- * of a comment, processing instruction or CDATA section. A tag is checked
- * as it is scanned, part by part, so a tag split across pieces holds at
- * most these.
+ * and after a tag's values (its names, `=`, whitespace and a `/`), and the
+ * content of a comment, processing instruction or CDATA section. A tag is
+ * checked as it is scanned, part by part, so a tag split across pieces
+ * holds at most these.
  *
  * Normalized as XML 1.0 says: line ends in text and CDATA (§2.11: CRLF and
  * a lone CR become LF), and literal whitespace in attribute values (§3.3.3:
@@ -156,8 +156,10 @@ const TAG: Tag = { _tag: "Tag" }
  * - `start`: a start tag, where quotes matter (in an end tag they don't).
  * - `quote`: the quote character of the attribute value the scan is inside
  *   of, or 0.
- * - `part`: the characters of the current part (an attribute value, or the
- *   markup before, between or after the values) in earlier pieces.
+ * - `part`: the characters of the current part in earlier pieces. The
+ *   parts of a tag are its attribute values (inside the quotes) and the
+ *   markup before, between and after them (every other character between
+ *   `<` and `>` but the quotes).
  * - `values`: the attribute values begun so far.
  * - `parts`: the tag's characters from earlier pieces; empty while the tag
  *   lies within the current piece, which is then read in place.
