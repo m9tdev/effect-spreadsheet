@@ -14,9 +14,13 @@
  *
  * Checked: one root element, matching end tags, nothing but whitespace
  * outside the root, unique attribute names, valid character references.
- * Limits: element depth (`maxXmlDepth`), attributes per element
- * (`maxXmlAttributes`), text, attribute values and the length of one tag,
- * comment or CDATA section (`maxStringLength`).
+ * Limits: element depth (`maxXmlDepth`), attribute values in one tag
+ * (`maxXmlAttributes`), and, each on its own, by `maxStringLength`: a text
+ * run (and collected text), an attribute value, the markup before, between
+ * and after a tag's values (its names, `=` and whitespace), and the content
+ * of a comment, processing instruction or CDATA section. A tag is checked
+ * as it is scanned, part by part, so a tag split across pieces holds at
+ * most these.
  *
  * Normalized as XML 1.0 says: line ends in text and CDATA (§2.11: CRLF and
  * a lone CR become LF), and literal whitespace in attribute values (§3.3.3:
@@ -118,21 +122,19 @@ const OPENER: Record<Delimiter, number> = { Pi: 1, Comment: 3, Cdata: 8 }
 const TERMINATOR: Record<Delimiter, string> = { Pi: "?>", Comment: "-->", Cdata: "]]>" }
 
 /**
- * Markup (anything that begins with `<`) other than a start or end tag
- * complete within one piece, which the fast path handles directly. `parts`
- * collects everything after the `<` (`length` characters in all), across
- * pieces.
+ * Markup (anything that begins with `<`) that continues past the end of a
+ * piece. `parts` collects everything after the `<` (`length` characters in
+ * all), across pieces.
  * - `Undecided`: the first characters don't tell the construct yet (`<!-`
  *   could become a comment or a DTD).
- * - `Tag`: a start or end tag; `quote` is the quote character of the
- *   attribute value a start tag is inside of, or 0.
+ * - `Tag`: a start or end tag; its state is the tokenizer's `TagScan`.
  * - `Delimited`: a processing instruction, comment or CDATA section; `tail`
  *   holds its last characters past the opener, for a terminator split
  *   across pieces.
  */
 type Markup = Undecided | Tag | Delimited
 type Undecided = { readonly _tag: "Undecided"; readonly parts: Array<string>; length: number }
-type Tag = { readonly _tag: "Tag"; readonly start: boolean; readonly parts: Array<string>; length: number; quote: number }
+type Tag = { readonly _tag: "Tag" }
 type Delimited = {
   readonly _tag: "Delimited"
   readonly kind: Delimiter
@@ -144,8 +146,29 @@ type Delimited = {
 /** Where the tokenizer is between pieces: in text, or inside markup. */
 type Mode = { readonly _tag: "Text" } | Markup
 
-/** Shared, so that text costs no allocation. */
+/** Shared, so that text and tags cost no allocation. */
 const TEXT: Mode = { _tag: "Text" }
+const TAG: Tag = { _tag: "Tag" }
+
+/**
+ * The scan of a start or end tag, carried across pieces (one per
+ * tokenizer, reset at each tag).
+ * - `start`: a start tag, where quotes matter (in an end tag they don't).
+ * - `quote`: the quote character of the attribute value the scan is inside
+ *   of, or 0.
+ * - `part`: the characters of the current part (an attribute value, or the
+ *   markup before, between or after the values) in earlier pieces.
+ * - `values`: the attribute values begun so far.
+ * - `parts`: the tag's characters from earlier pieces; empty while the tag
+ *   lies within the current piece, which is then read in place.
+ */
+interface TagScan {
+  start: boolean
+  quote: number
+  part: number
+  values: number
+  readonly parts: Array<string>
+}
 
 /**
  * What a step of the scan returns: undefined to go on, or the error that
@@ -158,9 +181,6 @@ type Scanned = number | SpreadsheetError
 
 /** Prolog: before the root element; Root: inside it; Epilog: after it closed. */
 type Phase = "Prolog" | "Root" | "Epilog"
-
-/** Extra room for markup beyond `maxStringLength` (tag name, attribute names, quotes). */
-const MARKUP_SLACK = 64 * 1024
 
 /** XML 1.0 §2.11: CRLF and a lone CR become LF. */
 const normalizeLineEnds = (s: string): string => (s.indexOf("\r") < 0 ? s : s.replace(/\r\n?/g, "\n"))
@@ -210,6 +230,7 @@ export class XmlTokenizer implements XmlElement {
   private readonly part: string | undefined
 
   private mode: Mode = TEXT
+  private readonly tag: TagScan = { start: false, quote: 0, part: 0, values: 0, parts: [] }
 
   private text: Array<string> = []
   private textLength = 0
@@ -299,13 +320,15 @@ export class XmlTokenizer implements XmlElement {
           error = this.flushText()
           if (error !== undefined) break
           this.markupStart = this.consumed + lt
-          const whole = this.wholeTag(chunk, lt)
-          if (typeof whole !== "number") {
-            error = whole
-            break
-          }
-          if (whole > lt) {
-            i = whole // the tag was complete in this piece and is handled
+          // NaN when the piece ends after '<'
+          const first = chunk.charCodeAt(lt + 1)
+          if (lt + 1 < n && first !== 0x21 && first !== 0x3F) {
+            const next = this.scanTag(this.beginTag(first !== 0x2F), chunk, lt + 1)
+            if (typeof next !== "number") {
+              error = next
+              break
+            }
+            i = next
           } else {
             this.mode = { _tag: "Undecided", parts: [], length: 0 }
             i = lt + 1
@@ -382,46 +405,14 @@ export class XmlTokenizer implements XmlElement {
     return this.handler.text === undefined ? undefined : this.handler.text(value)
   }
 
-  private addMarkup(mode: Markup, s: string): Status {
+  /** Collects characters of an undecided construct or of a comment, PI or CDATA section (bounded by their scans). */
+  private addMarkup(mode: Undecided | Delimited, s: string): void {
     mode.parts.push(s)
     mode.length += s.length
-    if (mode.length > this.limits.maxStringLength + MARKUP_SLACK) {
-      return new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: mode.length })
-    }
-    return undefined
   }
 
-  /**
-   * Fast path for the common case: a start or end tag that ends within this
-   * piece. Handles it exactly as the general path would (same markup, same
-   * checks, same work count) and returns the position after its `>`; or -1
-   * (nothing done) when the tag is something else or continues in the next
-   * piece; or the error that stops tokenizing.
-   */
-  private wholeTag(chunk: string, lt: number): Scanned {
-    const n = chunk.length
-    const first = chunk.charCodeAt(lt + 1)
-    if (lt + 1 >= n || first === 0x21 || first === 0x3F) return -1
-    const start = first !== 0x2F
-    let quote = 0
-    let j = lt + 1
-    // progress: j increases up to n
-    for (; j < n; j++) {
-      const c = chunk.charCodeAt(j)
-      if (quote !== 0) {
-        if (c === quote) quote = 0
-      } else if (c === 0x3E) break
-      else if (start && (c === 0x22 || c === 0x27)) quote = c
-    }
-    if (j >= n) return -1
-    const length = j - lt - 1
-    this.work += 2 * length + 1
-    if (length > this.limits.maxStringLength + MARKUP_SLACK) {
-      return new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: length })
-    }
-    const markup = chunk.slice(lt + 1, j)
-    const error = start ? this.startTag(markup) : this.endTag(markup)
-    return error ?? j + 1
+  private tooLong(actual: number): LimitExceeded {
+    return new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual })
   }
 
   /** Scans markup from `chunk[i]`; returns the next position (> i), or the error that stops tokenizing. */
@@ -430,7 +421,7 @@ export class XmlTokenizer implements XmlElement {
       case "Undecided":
         return this.scanUndecided(mode, chunk, i)
       case "Tag":
-        return this.scanTag(mode, chunk, i)
+        return this.scanTag(this.tag, chunk, i)
       case "Delimited":
         return this.scanDelimited(mode, chunk, i)
       default:
@@ -446,9 +437,10 @@ export class XmlTokenizer implements XmlElement {
     const n = chunk.length
     const head = (mode.parts.join("") + chunk.slice(i, i + 9))
     const c = head.charCodeAt(0)
-    if (c === 0x2F) return this.scanTag(this.decide(mode, "End"), chunk, i)
+    // only "<!" waits for more characters, so a tag decided here starts at i
+    if (c === 0x2F) return this.scanTag(this.beginTag(false), chunk, i)
     if (c === 0x3F) return this.scanDelimited(this.decide(mode, "Pi"), chunk, i)
-    if (c !== 0x21) return this.scanTag(this.decide(mode, "Start"), chunk, i)
+    if (c !== 0x21) return this.scanTag(this.beginTag(true), chunk, i)
     if (head.startsWith("!--")) return this.scanDelimited(this.decide(mode, "Comment"), chunk, i)
     if (head.startsWith("![CDATA[")) return this.scanDelimited(this.decide(mode, "Cdata"), chunk, i)
     if (head.startsWith("!DOCTYPE")) return this.malformed("DTDs (<!DOCTYPE>) are not supported", this.markupStart)
@@ -458,40 +450,88 @@ export class XmlTokenizer implements XmlElement {
     // not decidable yet: take the rest of this piece (it's short) and wait
     const take = Math.min(n, i + Math.max(1, head.length + 1 - mode.length))
     this.work += take - i
-    return this.addMarkup(mode, chunk.slice(i, take)) ?? take
+    this.addMarkup(mode, chunk.slice(i, take))
+    return take
   }
 
-  /** The transition out of `Undecided`: the decided mode takes over the characters collected so far. */
-  private decide(mode: Undecided, kind: "Start" | "End"): Tag
-  private decide(mode: Undecided, kind: Delimiter): Delimited
-  private decide(mode: Undecided, kind: "Start" | "End" | Delimiter): Tag | Delimited {
-    const next: Tag | Delimited = kind === "Start" || kind === "End"
-      ? { _tag: "Tag", start: kind === "Start", parts: mode.parts, length: mode.length, quote: 0 }
-      : { _tag: "Delimited", kind, parts: mode.parts, length: mode.length, tail: "" }
+  /** The transition out of `Undecided` to a comment, PI or CDATA section: it takes over the characters collected so far. */
+  private decide(mode: Undecided, kind: Delimiter): Delimited {
+    const next: Delimited = { _tag: "Delimited", kind, parts: mode.parts, length: mode.length, tail: "" }
     this.mode = next
     return next
   }
 
-  /** A start or end tag: finds '>' outside quotes (quotes only matter in start tags). */
-  private scanTag(mode: Tag, chunk: string, i: number): Scanned {
+  /** Starts the scan of a tag whose first character (after '<') is the next one scanned. */
+  private beginTag(start: boolean): TagScan {
+    const tag = this.tag
+    tag.start = start
+    tag.quote = 0
+    tag.part = 0
+    tag.values = 0
+    tag.parts.length = 0
+    return tag
+  }
+
+  /**
+   * The one scan of a start or end tag, from `chunk[i]`: finds the '>' that
+   * ends it, outside quotes (quotes only matter in start tags), and bounds
+   * its parts as it goes (see `TagScan`): each attribute value and each
+   * stretch of markup around them by `maxStringLength`, the values by
+   * `maxXmlAttributes`. A part's length is checked where it ends, or at the
+   * end of the piece. A tag that ends in this piece and began in it is
+   * handled in place, on its range of the piece; one that continues is
+   * collected, and joined when it ends. Returns the position after its '>',
+   * or the piece's end (`n`).
+   */
+  private scanTag(tag: TagScan, chunk: string, i: number): Scanned {
     const n = chunk.length
-    const start = mode.start
-    let quote = mode.quote
+    const start = tag.start
+    const max = this.limits.maxStringLength
+    let quote = tag.quote
+    // where the current part began: before i if it began in an earlier piece
+    let from = i - tag.part
     let j = i
     // progress: j increases up to n
     for (; j < n; j++) {
       const c = chunk.charCodeAt(j)
       if (quote !== 0) {
-        if (c === quote) quote = 0
+        if (c === quote) {
+          if (j - from > max) return this.tooLong(j - from)
+          quote = 0
+          from = j + 1
+        }
       } else if (c === 0x3E) break
-      else if (start && (c === 0x22 || c === 0x27)) quote = c
+      else if (start && (c === 0x22 || c === 0x27)) {
+        if (j - from > max) return this.tooLong(j - from)
+        if (++tag.values > this.limits.maxXmlAttributes) {
+          return new LimitExceeded({ limit: "maxXmlAttributes", max: this.limits.maxXmlAttributes, actual: tag.values })
+        }
+        quote = c
+        from = j + 1
+      }
     }
-    mode.quote = quote
+    if (j - from > max) return this.tooLong(j - from)
     this.work += j - i + 1
-    const error = this.addMarkup(mode, chunk.slice(i, j))
-    if (error !== undefined) return error
-    if (j === n) return n
-    return this.finishMarkup(mode) ?? j + 1
+    if (j === n) {
+      tag.quote = quote
+      tag.part = n - from
+      tag.parts.push(chunk.slice(i))
+      this.mode = TAG
+      return n
+    }
+    this.mode = TEXT
+    let error: Status
+    if (tag.parts.length === 0) {
+      this.work += j - i
+      error = start ? this.startTag(chunk, i, j) : this.endTag(chunk, i, j)
+    } else {
+      tag.parts.push(chunk.slice(i, j))
+      const markup = tag.parts.join("")
+      tag.parts.length = 0
+      this.work += markup.length
+      error = start ? this.startTag(markup, 0, markup.length) : this.endTag(markup, 0, markup.length)
+    }
+    return error ?? j + 1
   }
 
   /**
@@ -504,6 +544,7 @@ export class XmlTokenizer implements XmlElement {
     const n = chunk.length
     const terminator = TERMINATOR[mode.kind]
     const opener = OPENER[mode.kind]
+    const max = this.limits.maxStringLength
     let endInChunk = -1
     if (mode.tail.length > 0) {
       // a terminator that starts in the tail ends within the next few characters
@@ -517,8 +558,11 @@ export class XmlTokenizer implements XmlElement {
       const at = from <= n ? chunk.indexOf(terminator, from) : -1
       if (at < 0) {
         this.work += n - i
-        const error = this.addMarkup(mode, chunk.slice(i))
-        if (error !== undefined) return error
+        this.addMarkup(mode, chunk.slice(i))
+        // what is past the opener is content, but for the start of a
+        // terminator that may end in the next piece
+        const least = mode.length - opener - (terminator.length - 1)
+        if (least > max) return this.tooLong(least)
         // keep the last characters past the opener, for a terminator split
         // across pieces
         const keep = Math.min(terminator.length - 1, Math.max(0, mode.length - opener))
@@ -529,36 +573,26 @@ export class XmlTokenizer implements XmlElement {
       endInChunk = at + terminator.length
       this.work += endInChunk - i
     }
-    return this.addMarkup(mode, chunk.slice(i, endInChunk)) ?? this.finishMarkup(mode) ?? endInChunk
+    this.addMarkup(mode, chunk.slice(i, endInChunk))
+    const content = mode.length - opener - terminator.length
+    if (content > max) return this.tooLong(content)
+    return this.finishDelimited(mode) ?? endInChunk
   }
 
-  /** The transition back to `Text`: handles the completed construct. */
-  private finishMarkup(mode: Tag | Delimited): Status {
+  /** The transition back to `Text`: handles the completed comment, PI or CDATA section. */
+  private finishDelimited(mode: Delimited): Status {
     this.mode = TEXT
     const markup = mode.parts.length === 1 ? mode.parts[0]! : mode.parts.join("")
     this.work += markup.length
-    switch (mode._tag) {
-      case "Tag":
-        return mode.start ? this.startTag(markup) : this.endTag(markup)
-      case "Delimited":
-        return this.finishDelimited(mode.kind, markup)
-      default:
-        return absurd(mode)
-    }
-  }
-
-  private finishDelimited(kind: Delimiter, markup: string): Status {
+    const kind = mode.kind
     switch (kind) {
       case "Pi":
       case "Comment":
         return undefined
       case "Cdata": {
         if (this.stack.length === 0) return this.malformed("CDATA outside the root element", this.markupStart)
-        // markup is "![CDATA[" + content + "]]>"
+        // markup is "![CDATA[" + content + "]]>" (its length bounded by the scan)
         const content = markup.slice(8, markup.length - 3)
-        if (content.length > this.limits.maxStringLength) {
-          return new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: content.length })
-        }
         return content.length > 0 ? this.deliverText(normalizeLineEnds(content)) : undefined
       }
       default:
@@ -566,19 +600,23 @@ export class XmlTokenizer implements XmlElement {
     }
   }
 
-  private startTag(markup: string): Status {
-    // markup is everything between '<' and '>'
-    let body = markup
+  /**
+   * A start tag: `src[from, to)` is everything between its '<' and '>'
+   * (a range of a piece, or the whole of a tag joined from several). Its
+   * values and the markup around them are within bounds (`scanTag`).
+   */
+  private startTag(src: string, from: number, to: number): Status {
+    let n = to
     let selfClosing = false
-    if (body.charCodeAt(body.length - 1) === 0x2F) {
+    // (before `from` is the '<' or nothing, so an empty tag is not self-closing)
+    if (src.charCodeAt(n - 1) === 0x2F) {
       selfClosing = true
-      body = body.slice(0, -1)
+      n--
     }
-    let p = 0
-    const n = body.length
+    let p = from
     // progress: p increases up to the end of the name
-    while (p < n && !isSpace(body.charCodeAt(p))) p++
-    const qname = body.slice(0, p)
+    while (p < n && !isSpace(src.charCodeAt(p))) p++
+    const qname = src.slice(from, p)
     if (!isName(qname)) return this.malformed(`bad element name ${JSON.stringify(qname.slice(0, 40))}`, this.markupStart)
     if (this.phase === "Epilog") return this.malformed("more than one root element", this.markupStart)
     const attributes: Array<readonly [string, string]> = []
@@ -587,17 +625,18 @@ export class XmlTokenizer implements XmlElement {
     // progress: each iteration consumes one attribute (p moves past its
     // closing quote) or ends the loop
     while (p < n) {
-      while (p < n && isSpace(body.charCodeAt(p))) p++
+      while (p < n && isSpace(src.charCodeAt(p))) p++
       if (p >= n) break
-      const eq = body.indexOf("=", p)
-      if (eq < 0) return this.malformed(`attribute without a value in <${qname}>`, this.markupStart)
-      const name = body.slice(p, eq).trim()
+      const eq = src.indexOf("=", p)
+      if (eq < 0 || eq >= n) return this.malformed(`attribute without a value in <${qname}>`, this.markupStart)
+      const name = src.slice(p, eq).trim()
       let q = eq + 1
-      while (q < n && isSpace(body.charCodeAt(q))) q++
-      const quote = body.charCodeAt(q)
+      while (q < n && isSpace(src.charCodeAt(q))) q++
+      // (src[n] is '/', '>' or past the end: never a quote)
+      const quote = src.charCodeAt(q)
       if (quote !== 0x22 && quote !== 0x27) return this.malformed(`unquoted attribute value in <${qname}>`, this.markupStart)
-      const close = body.indexOf(String.fromCharCode(quote), q + 1)
-      if (close < 0 || !isName(name)) return this.malformed(`bad attribute in <${qname}>`, this.markupStart)
+      const close = src.indexOf(String.fromCharCode(quote), q + 1)
+      if (close < 0 || close >= n || !isName(name)) return this.malformed(`bad attribute in <${qname}>`, this.markupStart)
       let duplicate = false
       if (seen !== undefined) duplicate = seen.has(name)
       else {
@@ -610,17 +649,9 @@ export class XmlTokenizer implements XmlElement {
         seen = new Set(attributes.map((a) => a[0]))
         seen.add(name)
       }
-      if (attributes.length >= this.limits.maxXmlAttributes) {
-        return new LimitExceeded({
-          limit: "maxXmlAttributes",
-          max: this.limits.maxXmlAttributes,
-          actual: attributes.length + 1
-        })
-      }
-      const raw = body.slice(q + 1, close)
-      if (raw.length > this.limits.maxStringLength) {
-        return new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: raw.length })
-      }
+      // (the number of attributes and the length of the value are within
+      // bounds: each attribute's value is one the scan counted and measured)
+      const raw = src.slice(q + 1, close)
       // literal whitespace becomes a space (XML 1.0 §3.3.3) before references
       // are decoded, so &#10; and &#9; survive
       const value = this.decode(normalizeAttribute(raw), this.markupStart)
@@ -647,8 +678,9 @@ export class XmlTokenizer implements XmlElement {
     return selfClosing ? this.closeElement(qname) : undefined
   }
 
-  private endTag(markup: string): Status {
-    const qname = markup.slice(1).trim()
+  /** An end tag: `src[from, to)` is everything between its '<' and '>', starting with '/'. */
+  private endTag(src: string, from: number, to: number): Status {
+    const qname = src.slice(from + 1, to).trim()
     const top = this.stack[this.stack.length - 1]
     if (top === undefined) return this.malformed(`end tag </${qname}> without a start tag`, this.markupStart)
     if (top !== qname) return this.malformed(`end tag </${qname}> does not match <${top}>`, this.markupStart)
