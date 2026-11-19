@@ -54,6 +54,10 @@ describe("typed XML attributes", () => {
     expect(Attr.parseUint("0255", 255)).toBe("bad")
     expect(Attr.parseUint("9", 9)).toBe(9)
     expect(Attr.parseUint("10", 9)).toBe("bad")
+    // a power of ten has one more digit than the nines below it
+    expect(Attr.parseUint("10", 10)).toBe(10)
+    expect(Attr.parseUint("010", 10)).toBe("bad")
+    expect(Attr.parseUint("100", 100)).toBe(100)
     expect(Attr.parseUint("0", 0)).toBe(0)
     expect(Attr.parseUint("1", 0)).toBe("bad")
     expect(Attr.parseUint("9999999999", 9_999_999_999)).toBe(9_999_999_999)

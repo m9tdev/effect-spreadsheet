@@ -165,6 +165,9 @@ describe("xlsx: cells and rows", () => {
     expect(wb.sheets.map((s) => s.name)).toEqual(["ABC", "_x0044_"])
     expect(wb.definedNames).toEqual([{ name: "NB", formula: "'ABC'!$A$1", hidden: false, scope: 0 }])
     expect(sheets[0]![0]!.cells[0]!.numFmt).toBe("0.0_x0042_")
+    // in a formula too
+    const formulas = await readOk({ sheets: [{ name: "S", data: `<row><c><f>A_x0031_+_x005F_x0031_</f><v>1</v></c></row>` }] })
+    expect(formulas.sheets[0]![0]!.cells[0]!.formula).toBe("A1+_x0031_")
     expect(values(Array.from(await Effect.runPromise(Stream.runCollect(Workbook.rows(wb, "ABC"))))))
       .toEqual([[0, false, [[0, "Number", 1]]]])
   })
@@ -209,6 +212,14 @@ describe("xlsx: cells and rows", () => {
   it("the 1904 date system", async () => {
     const { sheets } = await readOk({ date1904: true, xfs: [0, 14], sheets: [{ name: "S", data: `<row><c s="1"><v>0</v></c><c s="1"><v>60</v></c></row>` }] })
     expect(values(sheets[0]!)[0]![2]).toEqual([[0, "Date", "1904-01-01T00:00:00.000Z"], [1, "Date", "1904-03-01T00:00:00.000Z"]])
+    // xsd:boolean: "true" too, but not "TRUE"
+    const book = (value: string): TestWorkbook => ({
+      xfs: [0, 14],
+      workbookXml: `<workbookPr date1904="${value}"/><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets>`,
+      sheets: [{ name: "S", data: `<row><c s="1"><v>0</v></c></row>` }]
+    })
+    expect(values((await readOk(book("true"))).sheets[0]!)[0]![2]).toEqual([[0, "Date", "1904-01-01T00:00:00.000Z"]])
+    expect(values((await readOk(book("TRUE"))).sheets[0]!)[0]![2]).toEqual([[0, "Date", "1899-12-31T00:00:00.000Z"]])
   })
 
   it("sheet visibility, defined names, chart sheets, rows re-runnable", async () => {
@@ -573,6 +584,26 @@ describe("xlsx: integer attributes, each with its own rule for a missing or bad 
     ])
   })
 
+  it("a <numFmt> without a code is skipped: it doesn't replace an earlier one with its id", async () => {
+    const { sheets } = await readOk({
+      numFmts: { 164: "yyyy-mm-dd" },
+      // a second <numFmts>: its entries count like the first one's
+      stylesExtra: `<numFmts><numFmt numFmtId="164"/></numFmts>`,
+      xfs: [164],
+      sheets: [{ name: "S", data: `<row r="1"><c s="0"><v>45000</v></c></row>` }]
+    })
+    expect(sheets[0]![0]!.cells.map((c) => [c._tag, c.numFmt])).toEqual([["Date", "yyyy-mm-dd"]])
+  })
+
+  it("a sheet's relationship id: any prefix counts, whatever namespace it is bound to", async () => {
+    const { wb, sheets } = await readOk({
+      workbookXml: `<sheets><sheet name="A" sheetId="1" xmlns:x="urn:not-relationships" x:id="rId2"/><sheet name="B" sheetId="2" r:id="rId1"/></sheets>`,
+      sheets: [{ name: "S1", data: `<row r="1"><c><v>1</v></c></row>` }, { name: "S2", data: `<row r="1"><c><v>2</v></c></row>` }]
+    })
+    expect(wb.sheets.map((s) => s.name)).toEqual(["A", "B"])
+    expect(sheets.map((rows) => values(rows))).toEqual([[[0, false, [[0, "Number", 2]]]], [[0, false, [[0, "Number", 1]]]]])
+  })
+
   it("a cell's style index: up to nine digits; a missing or bad one is no style", async () => {
     const { sheets } = await readOk({
       xfs: [14, 14],
@@ -632,7 +663,10 @@ describe("xlsx: sheet details", () => {
     const nineDigits = await details(await withLayout(`<col min="000000002" max="000000003" hidden="1"/>`))
     expect(Exit.isSuccess(nineDigits) && nineDigits.value.hiddenColumns).toEqual([{ first: 1, last: 2 }])
     // a span that isn't hidden isn't read
-    expect(Exit.isSuccess(await details(await withLayout(`<col min="x"/>`)))).toBe(true)
+    for (const hidden of ["", ` hidden="0"`, ` hidden="false"`, ` hidden="TRUE"`]) {
+      const exit = await details(await withLayout(`<col min="x"${hidden}/>`))
+      expect(Exit.isSuccess(exit) && exit.value.hiddenColumns, hidden).toEqual([])
+    }
     const badMerge = await xlsx({ sheets: [{ name: "S", raw: `<worksheet xmlns="x"><sheetData/><mergeCells><mergeCell ref="A1:"/></mergeCells></worksheet>` }] })
     expect(failureOf(await details(badMerge))).toMatchObject({ _tag: "MalformedFile" })
     expect(failureOf(await details(await withLayout(`<col min="1" max="1"/>`.repeat(5)), { maxColumns: 4 }))).toMatchObject({ limit: "maxColumns" })
