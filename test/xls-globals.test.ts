@@ -487,6 +487,8 @@ describe("xls globals: long work yields", () => {
     const run = await turns(Array.from({ length: records }, () => X.xf(14)))
     expect(run.value.sheets).toHaveLength(1)
     expect(run.batches).toBeGreaterThanOrEqual(records / BATCH_RECORDS)
+    // and not far fewer records per batch: an XF's 24 bytes add under a tenth to its cost
+    expect(run.batches).toBeLessThanOrEqual(1.2 * (records / BATCH_RECORDS) + 1)
     expect(run.yields).toBeGreaterThanOrEqual(records / BATCH_RECORDS / 2)
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
   })
@@ -531,6 +533,34 @@ describe("xls globals: long work yields", () => {
     const run = await turns([sstHead(0), ...Array.from({ length: records }, () => X.record(CONTINUE, []))])
     expect(run.batches).toBeGreaterThanOrEqual(records / BATCH_RECORDS)
     expect(run.yields).toBeGreaterThanOrEqual(records / BATCH_RECORDS / 2)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+
+  it("a record's CONTINUEs count by their bytes too, even where the record doesn't read them", async () => {
+    // each block: a NAME with more than BATCH_BYTES of CONTINUEs (which end the batch), then half a batch of XFs
+    const blocks = 8
+    const continues = Math.ceil(BATCH_BYTES / 8000) + 1
+    const block = [
+      X.name("N", X.ref3d(0, 0, 0)),
+      ...Array.from({ length: continues }, () => X.record(CONTINUE, new Array(8000).fill(0))),
+      ...Array.from({ length: BATCH_RECORDS / 2 }, () => X.xf(14))
+    ]
+    const run = await turns(Array.from({ length: blocks }, () => block).flat())
+    expect(run.batches).toBeGreaterThanOrEqual(blocks)
+    expect(run.maxPerTurn).toBeLessThanOrEqual(2)
+  })
+
+  it("a run of CONTINUEs takes only what is left of a batch: small records and CONTINUEs share it", async () => {
+    // each block: half a batch of XFs, then a whole batch of empty CONTINUEs (after an SST of no strings)
+    const blocks = 8
+    const block = [
+      ...Array.from({ length: BATCH_RECORDS / 2 }, () => X.xf(14)),
+      sstHead(0),
+      ...Array.from({ length: BATCH_RECORDS }, () => X.record(CONTINUE, []))
+    ]
+    const run = await turns(Array.from({ length: blocks }, () => block).flat())
+    // one and a half batches of records per block
+    expect(run.batches).toBeGreaterThanOrEqual(1.5 * blocks)
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
   })
 
@@ -607,6 +637,8 @@ describe("xls globals: long work yields", () => {
     const run = await turns([X.externSheet([0]), ...Array.from({ length: records }, (_, k) => X.name(`N${k}`, X.ref3d(0, k % 65536, 0)))])
     expect(run.value.definedNames).toHaveLength(records)
     expect(run.value.definedNames[5]).toEqual({ name: "N5", formula: "S!$A$6", hidden: false })
+    // a batch reads BATCH_RECORDS NAMEs, and another one resolves their formulas
+    expect(run.batches).toBeGreaterThanOrEqual(2 * (records / BATCH_RECORDS))
     expect(run.yields).toBeGreaterThanOrEqual(records / BATCH_RECORDS)
     expect(run.maxPerTurn).toBeLessThanOrEqual(2)
   })
