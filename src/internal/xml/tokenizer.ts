@@ -162,7 +162,8 @@ const TAG: Tag = { _tag: "Tag" }
  *   `<` and `>` but the quotes).
  * - `values`: the attribute values begun so far.
  * - `parts`: the tag's characters from earlier pieces; empty while the tag
- *   lies within the current piece, which is then read in place.
+ *   lies within the current piece, which is then read in place, and
+ *   emptied when a joined tag is handled.
  */
 interface TagScan {
   start: boolean
@@ -470,7 +471,6 @@ export class XmlTokenizer implements XmlElement {
     tag.quote = 0
     tag.part = 0
     tag.values = 0
-    tag.parts.length = 0
     return tag
   }
 
@@ -637,8 +637,11 @@ export class XmlTokenizer implements XmlElement {
       // (src[n] is '/', '>' or past the end: never a quote)
       const quote = src.charCodeAt(q)
       if (quote !== 0x22 && quote !== 0x27) return this.malformed(`unquoted attribute value in <${qname}>`, this.markupStart)
+      // (a value whose closing quote is past the tag has a name with a quote
+      // in it: the quotes were paired differently by the scan, so the name
+      // fails)
       const close = src.indexOf(String.fromCharCode(quote), q + 1)
-      if (close < 0 || close >= n || !isName(name)) return this.malformed(`bad attribute in <${qname}>`, this.markupStart)
+      if (close < 0 || !isName(name)) return this.malformed(`bad attribute in <${qname}>`, this.markupStart)
       let duplicate = false
       if (seen !== undefined) duplicate = seen.has(name)
       else {

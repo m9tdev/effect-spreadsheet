@@ -763,6 +763,13 @@ describe("xml tokenizer: rejected input", () => {
       }
     })
 
+    it("a part carried across pieces counts for its own tag only", () => {
+      // nine characters of a value end the first piece; the next tag's first part is ten
+      const doc = `<r><a b="${"x".repeat(9)}"/><${"d".repeat(7)} e="1"/></r>`
+      const cut = doc.indexOf("x") + 9
+      expect(tokenize([doc.slice(0, cut), doc.slice(cut)], small).error).toBeUndefined()
+    })
+
     it("a tag past maxStringLength in all is read when each part is within its bound", () => {
       // 10 000 attributes, about 120 000 characters, with a maxStringLength of 10
       const attributes = Array.from({ length: 10_000 }, (_, i) => `a${i}="${i % 1000}"`)
@@ -811,6 +818,17 @@ describe("xml tokenizer: rejected input", () => {
       // CDATA outside the root that is too long stops on its length
       expect(one(`<![CDATA[${"d".repeat(11)}]]><a/>`, small).error).toMatchObject(over(11))
     })
+  })
+
+  it("a tag's characters are examined twice (scan and parse) and its '>' once, plus one per extra piece the scan runs over", () => {
+    // '<' (1), then the 8 characters of `a b="1"/` and '>' (9), then the 8 again
+    expect(one(`<a b="1"/>`).work).toBe(18)
+    expect(tokenize([`<a b="`, `1"/>`]).work).toBe(19)
+    expect(tokenize([`<`, `a b="`, `1"/>`]).work).toBe(19)
+  })
+
+  it("an attribute without a value is found in a tag read in place, whatever follows it in the piece", () => {
+    expect(one(`<r><a x/><b y="1"/></r>`).error).toMatchObject({ _tag: "MalformedFile", reason: "attribute without a value in <a>" })
   })
 
   it("random XML-ish input never throws, ends in events or a typed error, with linear work", () => {
