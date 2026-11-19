@@ -86,7 +86,7 @@ export const Cell = Schema.Union([EmptyCell, TextCell, NumberCell, BooleanCell, 
  * @since 0.1.0
  * @category models
  */
-export type Cell = EmptyCell | TextCell | NumberCell | BooleanCell | DateCell | ErrorCell
+export type Cell = typeof Cell.Type
 
 /**
  * Optional cell metadata for the constructors.

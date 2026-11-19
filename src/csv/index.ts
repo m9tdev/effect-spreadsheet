@@ -87,14 +87,24 @@ export interface ReadOptions {
  * @since 0.1.0
  * @category readers
  */
-export const rows: {
-  (input: Uint8Array, options?: ReadOptions): Stream.Stream<Workbook.Row, SpreadsheetError>
-  <E, R>(input: Stream.Stream<Uint8Array, E, R>, options?: ReadOptions): Stream.Stream<Workbook.Row, E | SpreadsheetError, R>
-} = (<E, R>(
+export function rows(input: Uint8Array, options?: ReadOptions): Stream.Stream<Workbook.Row, SpreadsheetError>
+/**
+ * Streams the rows of delimited text from a byte stream, chunked anyhow
+ * (chunk boundaries may split characters, quotes or CRLF), keeping the
+ * stream's error and context. Re-runnable when the input is.
+ *
+ * @since 0.1.0
+ * @category readers
+ */
+export function rows<E, R>(
+  input: Stream.Stream<Uint8Array, E, R>,
+  options?: ReadOptions
+): Stream.Stream<Workbook.Row, E | SpreadsheetError, R>
+export function rows<E, R>(
   input: Uint8Array | Stream.Stream<Uint8Array, E, R>,
   options?: ReadOptions
-): Stream.Stream<Workbook.Row, E | SpreadsheetError, R> =>
-  Stream.unwrap(
+): Stream.Stream<Workbook.Row, E | SpreadsheetError, R> {
+  return Stream.unwrap(
     Effect.map(SpreadsheetLimits.resolve(options?.limits), (limits) => {
       // the delimiter, then the encoding, as `csvOptions` checks them for `read`
       const delimiter = parseDelimiter(options?.delimiter)
@@ -104,7 +114,8 @@ export const rows: {
       if (Result.isFailure(decoding)) return failAtDecoding(toStream(input), limits, decoding.failure)
       return rowsFromByteStream(toStream(input), withDecoding(options, delimiter.success, decoding.success), limits)
     })
-  )) as never
+  )
+}
 
 /**
  * Opens delimited text as a one-sheet workbook. The limits are resolved

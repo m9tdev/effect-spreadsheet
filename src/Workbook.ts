@@ -29,11 +29,7 @@ export const Row = Schema.Struct({
  * @since 0.1.0
  * @category models
  */
-export interface Row {
-  readonly index: number
-  readonly hidden: boolean
-  readonly cells: ReadonlyArray<Cell>
-}
+export type Row = typeof Row.Type
 
 /**
  * A cell range, 0-based and inclusive.
@@ -167,7 +163,7 @@ export const SheetDetails = Schema.Struct({
 export type SheetDetails = typeof SheetDetails.Type
 
 /** @internal */
-export const DetailsSource: unique symbol = Symbol.for("effect-spreadsheet/Workbook/details") as never
+export const DetailsSource: unique symbol = Symbol.for("effect-spreadsheet/Workbook/details")
 
 /**
  * Options for {@link rows}.
@@ -189,7 +185,7 @@ export interface RowsOptions {
 }
 
 /** @internal */
-export const RowsSource: unique symbol = Symbol.for("effect-spreadsheet/Workbook/rows") as never
+export const RowsSource: unique symbol = Symbol.for("effect-spreadsheet/Workbook/rows")
 
 /**
  * A workbook opened by a reader. Its sheets are known up front; rows are
