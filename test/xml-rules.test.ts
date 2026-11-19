@@ -272,6 +272,11 @@ describe("xml path rules: opaque elements", () => {
     expect(run(xml, ["//x"], { opaque: ["//o"] }).log.filter((l) => l.startsWith("open"))).toEqual(["open //x n=3", "open //x n=4", "open //x n=6"])
   })
 
+  it("opaque and skip paths together: each does its own", () => {
+    const { log } = run(`<r><o><x n="1"/></o><s><x n="2"/></s><x n="3"/></r>`, ["//x"], { skip: ["//s"], opaque: ["//o"], forbid: { "//f": "f" } })
+    expect(log.filter((l) => l.startsWith("open"))).toEqual(["open //x n=3"])
+  })
+
   it("outside any opaque element, what can match nothing is still read", () => {
     const rule = (path: string, log: Array<string>): XmlRule => ({
       open: (_, element) => element.collect(),

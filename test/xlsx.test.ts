@@ -784,14 +784,27 @@ describe("xlsx: sheet details", () => {
         name: "S",
         raw: `<worksheet xmlns="x" xmlns:mc="m"><mc:AlternateContent><mc:Choice><cols><col min="3" max="3" hidden="1"/></cols></mc:Choice></mc:AlternateContent>` +
           `<sheetData><row r="1"><c r="A1"><v>1</v></c></row><cols><col min="5" max="5" hidden="1"/></cols><mergeCells><mergeCell ref="E5:F6"/></mergeCells><x><dimension ref="A1:Z9"/></x></sheetData>` +
-          `<x><mergeCells><mergeCell ref="A1:B1"/></mergeCells></x></worksheet>`
+          `<x><mergeCells><mergeCell ref="A1:B1"/></mergeCells></x><x><dimension ref="B2:C3"/><col min="7" max="7" hidden="1"/><mergeCell ref="D4:D5"/></x></worksheet>`
       }]
     })
     const exit = await details(bytes)
     expect(Exit.isSuccess(exit) && exit.value).toEqual({
-      hiddenColumns: [{ first: 2, last: 2 }],
-      merges: [{ firstRow: 0, firstColumn: 0, lastRow: 0, lastColumn: 1 }]
+      hiddenColumns: [{ first: 2, last: 2 }, { first: 6, last: 6 }],
+      merges: [{ firstRow: 0, firstColumn: 0, lastRow: 0, lastColumn: 1 }, { firstRow: 3, firstColumn: 3, lastRow: 4, lastColumn: 3 }],
+      dimension: { firstRow: 1, firstColumn: 1, lastRow: 2, lastColumn: 2 }
     })
+  })
+
+  it("rows and cells are read below any wrapper: the sheet data in the part, a row in the sheet data, a cell in a row", async () => {
+    const bytes = await xlsx({
+      sheets: [{
+        name: "S",
+        raw: `<worksheet xmlns="x" xmlns:mc="m"><mc:AlternateContent><mc:Choice><sheetData><row r="1"><c r="A1"><v>1</v></c></row>` +
+          `<x><row r="2"><y><c r="B2"><v>2</v></c></y><c r="C2"><v>3</v></c></row></x></sheetData></mc:Choice></mc:AlternateContent></worksheet>`
+      }]
+    })
+    const read = await readExit(bytes)
+    expect(Exit.isSuccess(read) && values(read.value.sheets[0]!)).toEqual([[0, false, [[0, "Number", 1]]], [1, false, [[1, "Number", 2], [2, "Number", 3]]]])
   })
 
   it("a cell's content is skipped, as for rows, whatever its element names", async () => {

@@ -26,9 +26,10 @@
  * An element on an `opaque` path is read only by the paths that go through
  * it: the `//` steps from above it don't reach inside it, and the elements
  * inside it that match no path, and inside which none can, are skipped
- * whole. So `//c` with `//c/v` opaque: a `<c>` inside the `<c>` isn't
- * matched, and an `<x>` inside it is skipped with its subtree, its text
- * included.
+ * whole, as is everything below a matched element under which no path
+ * goes on. So with `//c` opaque and a path `//c/v`: a `<c>` inside the
+ * `<c>` isn't matched, its `<v>` children are, and an `<x>` inside it or
+ * inside a `<v>` is skipped with its subtree, its text included.
  *
  * Matching keeps one small state per open element: the set of path steps
  * its children may match, as a bit mask (at most 30 distinct steps, and

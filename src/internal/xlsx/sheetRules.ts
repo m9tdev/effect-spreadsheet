@@ -13,10 +13,10 @@
  *   MalformedFile: it would replace the open row, dropping its cells.
  * - `<c>` anywhere inside a row. A cell is opaque: only its direct `<v>`,
  *   `<f>` and `<is>` children are read, and nothing else in it is a row, a
- *   cell or a nesting error (an `<extLst>` in it is skipped whole). Its
- *   `<v>` and `<f>` are opaque too: their elements are skipped, so only
- *   their direct text counts. The `<is>`'s text is rich text: its `<t>`
- *   elements, leaving out phonetic runs (`<rPh>`).
+ *   cell or a nesting error (an `<extLst>` in it is skipped whole). No path
+ *   goes on below its `<v>` and `<f>`, so their elements are skipped too,
+ *   and only their direct text counts. The `<is>`'s text is rich text: its
+ *   `<t>` elements, leaving out phonetic runs (`<rPh>`).
  * - The layout: `<dimension>`, `<col>` and `<mergeCell>` anywhere outside
  *   the sheet data, as wrappers such as `mc:AlternateContent` may hold them.
  *
@@ -57,7 +57,7 @@ export const sheetRules = (part: string, pass: SheetPass): XmlRules => ({
     [`${SHEET_DATA}//sheetData`]: "<sheetData> inside a <sheetData>",
     [`${ROW}//row`]: "<row> inside a <row>"
   },
-  opaque: [SHEET_DATA, CELL, VALUE, FORMULA],
+  opaque: [SHEET_DATA, CELL],
   on: {
     [ROW]: pass.row ?? {},
     [CELL]: pass.cell ?? {},
