@@ -1,6 +1,6 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import { CONTINUE, RecordReader, readBof } from "../src/internal/biff/records.ts"
+import { CONTINUE, Embedded, RecordReader, readBof, SubstreamReader } from "../src/internal/biff/records.ts"
 import { readRichString, SegmentReader, type Segments } from "../src/internal/biff/segments.ts"
 import type { StringRead } from "../src/internal/binary/layout.ts"
 import { LimitExceeded, MalformedFile } from "../src/SpreadsheetError.ts"
@@ -128,6 +128,90 @@ describe("biff records", () => {
     expect(result).toMatchObject({ _tag: "LimitExceeded", limit: "maxDecompressedBytes", max: 1000 })
     // it stopped early: about 1000 / 4 records read, not 10 000
     expect(reader.records).toBeLessThanOrEqual(252)
+  })
+})
+
+describe("biff substream reader", () => {
+  /** Each call's result: [type or "embedded"/"opens", offset], up to the end or an error, and the records counted. */
+  const walk = (stream: Uint8Array) => {
+    const reader = new SubstreamReader(stream, "sheet")
+    const seen: Array<[number | string, number]> = []
+    // progress: every read() reads one record (at most stream.length / 4 of them)
+    for (let k = 0; k <= stream.length / 4; k++) {
+      const r = reader.read()
+      if (r === undefined) return { seen, end: "end", records: reader.records }
+      if (r instanceof MalformedFile) return { seen, end: r, records: reader.records }
+      seen.push(r instanceof Embedded ? [r.opens ? "opens" : "embedded", r.offset] : [r.type, r.offset])
+    }
+    throw new Error("the reader didn't advance")
+  }
+  const BOF = 0x0809
+  const EOF = 0x000A
+  const NUMBER = 0x0203
+
+  it("an embedded substream, nested ones too, comes as one opening marker, then skipped records up to its EOF", () => {
+    const stream = concat([
+      record(NUMBER, [1]), // 0
+      record(BOF, [0, 6, 0x20, 0]), // 5
+      record(NUMBER, [2]), // 13
+      record(BOF, [0, 6, 0x20, 0]), // 18
+      record(EOF, []), // 26
+      record(NUMBER, [3]), // 30
+      record(EOF, []), // 35
+      record(NUMBER, [4]), // 39
+      record(BOF, [0, 6, 0x20, 0]), // 44
+      record(EOF, []), // 52
+      record(EOF, []) // 56: the substream's own EOF
+    ])
+    expect(walk(stream)).toEqual({
+      seen: [
+        [NUMBER, 0],
+        ["opens", 5],
+        ["embedded", 13],
+        ["embedded", 18],
+        ["embedded", 26],
+        ["embedded", 30],
+        ["embedded", 35],
+        [NUMBER, 39],
+        ["opens", 44],
+        ["embedded", 52],
+        [EOF, 56]
+      ],
+      end: "end",
+      records: 11
+    })
+  })
+
+  it("an unterminated embedded substream runs to the end; a record past it is the reader's error", () => {
+    expect(walk(concat([record(BOF, [0, 6, 0x20, 0]), record(NUMBER, [1])])).seen).toEqual([["opens", 0], ["embedded", 8]])
+    const cut = walk(concat([record(BOF, [0, 6, 0x20, 0]), new Uint8Array([0x03, 0x02, 0x10, 0x00, 1])]))
+    expect(cut.seen).toEqual([["opens", 0]])
+    expect(cut.end).toMatchObject({ _tag: "MalformedFile", offset: 8 })
+  })
+
+  it("readContinued gathers CONTINUEs only for a record of the substream itself", () => {
+    const STRING = 0x0207
+    const stream = concat([
+      record(STRING, [1]), // 0
+      record(CONTINUE, [2]), // 5
+      record(BOF, [0, 6, 0x20, 0]), // 10
+      record(STRING, [3]), // 18
+      record(CONTINUE, [4]), // 23
+      record(EOF, []) // 28
+    ])
+    const reader = new SubstreamReader(stream, "sheet")
+    const first = reader.readContinued(STRING, 100, "maxStringLength")
+    if (first === undefined || first instanceof MalformedFile || first instanceof LimitExceeded || first instanceof Embedded || !("segments" in first)) {
+      throw new Error("expected a continued record")
+    }
+    expect(listSegments(first.segments)).toEqual([[1], [2]])
+    expect(reader.offset).toBe(10)
+    expect(reader.readContinued(STRING, 100, "maxStringLength")).toEqual(new Embedded(10, true))
+    // inside the embedded substream, a STRING is skipped as any record, and so is its CONTINUE
+    expect(reader.readContinued(STRING, 100, "maxStringLength")).toEqual(new Embedded(18, false))
+    expect(reader.readContinued(STRING, 100, "maxStringLength")).toEqual(new Embedded(23, false))
+    expect(reader.readContinued(STRING, 100, "maxStringLength")).toEqual(new Embedded(28, false))
+    expect(reader.readContinued(STRING, 100, "maxStringLength")).toBeUndefined()
   })
 })
 

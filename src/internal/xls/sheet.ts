@@ -35,7 +35,7 @@ import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row, SheetDetails } from "../../Workbook.ts"
-import { BOF_BIFF5_8, type BiffRecord, CONTINUE, type ContinuedRecord, EOF, RecordReader, readBof } from "../biff/records.ts"
+import { type BiffRecord, CONTINUE, type ContinuedRecord, Embedded, EOF, readBof, SubstreamReader } from "../biff/records.ts"
 import { readRichString, SegmentReader } from "../biff/segments.ts"
 import { decodeRk, ERROR_CODES } from "../binary.ts"
 import { FixedReader, type StringFailure } from "../binary/layout.ts"
@@ -158,12 +158,15 @@ const stringFailed = (read: StringFailure, part: string, record: BiffRecord, lim
     ? new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: read.count })
     : truncated(part, record)
 
-/** Opens the substream: checks the offset and the worksheet BOF; the reader after it, or why not. */
-const openSubstream = (context: SheetContext): RecordReader | SpreadsheetError => {
+/**
+ * Opens the substream: checks the offset and the worksheet BOF; the reader
+ * of its records after it (embedded substreams skipped), or why not.
+ */
+const openSubstream = (context: SheetContext): SubstreamReader | SpreadsheetError => {
   if (context.offset < 0 || context.offset + 4 > context.stream.length) {
     return malformed(context.part, `sheet offset ${context.offset} is outside the workbook stream`)
   }
-  const reader = new RecordReader(context.stream, context.part, context.offset, context.end)
+  const reader = new SubstreamReader(context.stream, context.part, context.offset, context.end)
   const bof = reader.next()
   if (bof === undefined) return malformed(context.part, "the sheet has no BOF", context.offset)
   if (bof instanceof MalformedFile) return bof
@@ -192,12 +195,11 @@ class RowScan {
   /** Rows with a ROW record that hides them (fDyZero). */
   readonly hidden = new Set<number>()
   done = false
-  private nested = 0
-  private readonly reader: RecordReader
+  private readonly reader: SubstreamReader
   private readonly fields = new FixedReader()
 
   constructor(context: SheetContext, offset: number) {
-    this.reader = new RecordReader(context.stream, context.part, offset, context.end)
+    this.reader = new SubstreamReader(context.stream, context.part, offset, context.end)
   }
 
   /**
@@ -205,35 +207,30 @@ class RowScan {
    * stop (the main pass reports why). Returns its steps, for the work meter.
    */
   step(max: number): number {
-    // progress: k up to max; every next() advances the reader
+    // progress: k up to max; every read() advances the reader
     for (let k = 0; k < max; k++) {
-      const record = this.reader.next()
+      const record = this.reader.read()
       if (record === undefined || record instanceof MalformedFile) {
         this.done = true
         return k + 1
       }
-      // nested substreams as the main pass sees them (see `handle`)
-      if (record.type === BOF_BIFF5_8) this.nested++
-      else if (record.type === EOF) {
-        if (this.nested === 0) {
-          this.done = true
-          return k + 1
-        }
-        this.nested--
-      } else if (this.nested === 0) {
-        // a cell or ROW record too short for its row is reported by the
-        // main pass; any other record isn't read here
-        const f = this.fields.fixed(record.data, ROW_FIELD_MIN)
-        if (f === undefined) continue
-        const row = f.u16(0)
-        if (CELL_RECORDS.has(record.type)) this.lastAt.set(row, record.offset)
-        else if (record.type === ROW) {
-          this.declared.add(row)
-          // the flags byte, if the record reaches it (a ROW cut before
-          // ROW_MIN fails in the main pass, after rows before it are out)
-          if (record.data.length > 12 && (f.u8(12) & 0x20) !== 0) this.hidden.add(row)
-          if (!this.lastAt.has(row)) this.lastAt.set(row, -1)
-        }
+      if (record instanceof Embedded) continue
+      if (record.type === EOF) {
+        this.done = true
+        return k + 1
+      }
+      // a cell or ROW record too short for its row is reported by the
+      // main pass; any other record isn't read here
+      const f = this.fields.fixed(record.data, ROW_FIELD_MIN)
+      if (f === undefined) continue
+      const row = f.u16(0)
+      if (CELL_RECORDS.has(record.type)) this.lastAt.set(row, record.offset)
+      else if (record.type === ROW) {
+        this.declared.add(row)
+        // the flags byte, if the record reaches it (a ROW cut before
+        // ROW_MIN fails in the main pass, after rows before it are out)
+        if (record.data.length > 12 && (f.u8(12) & 0x20) !== 0) this.hidden.add(row)
+        if (!this.lastAt.has(row)) this.lastAt.set(row, -1)
       }
     }
     return max
@@ -287,8 +284,6 @@ export class Rows {
   steps = 0
   /** The rows' sorting work already handed to the work meter. */
   private sortedTold = 0
-  /** Depth of substreams nested in this one (embedded charts: BOF ... EOF). */
-  nested = 0
   /** Whether a FORMULA waits for its text result in the next STRING record (see `handle`). */
   wait: FormulaWait = IDLE
   /** Pointed at each record whose fixed fields are read (see `handle`). */
@@ -421,20 +416,26 @@ export class Rows {
 const xfNumber = (globals: Globals, column: number, xf: number, value: number): Cell.Cell =>
   numberCell(column, value, globals.styles.format(xf), globals.date1904)
 
-/** Handles one record of the substream; `true` at its EOF. */
-const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: SheetContext): SpreadsheetError | boolean => {
+/**
+ * Handles one record of the substream; `true` at its EOF. An embedded
+ * substream (a chart object) is skipped; its BOF ends a formula's wait.
+ */
+const handle = (record: BiffRecord | ContinuedRecord | Embedded, rows: Rows, context: SheetContext): SpreadsheetError | boolean => {
   const { globals, part } = context
   // a formula's string result comes right after it, or after its SHRFMLA, ARRAY or TABLE
   // (any of them maybe continued by CONTINUE records, which are part of it). Any other
-  // record ends the wait, an embedded substream's BOF too, so this comes before skipping it.
-  // FORMULA starts the wait and STRING takes it (see their cases)
+  // record ends the wait, an embedded substream's BOF too (no FORMULA is read inside one,
+  // so its other records come with no wait). FORMULA starts the wait and STRING takes it
+  // (see their cases)
   const wait = rows.wait
   switch (wait._tag) {
     case "Idle":
       break
     case "AwaitingString": {
-      const type = record.type
-      if (type === STRING || type === SHRFMLA || type === ARRAY || type === TABLE || type === CONTINUE) break
+      if (!(record instanceof Embedded)) {
+        const type = record.type
+        if (type === STRING || type === SHRFMLA || type === ARRAY || type === TABLE || type === CONTINUE) break
+      }
       rows.wait = IDLE
       const error = rows.cell(wait.row, Cell.text(wait.column, ""))
       if (error !== undefined) return error
@@ -443,15 +444,7 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
     default:
       return absurd(wait)
   }
-  // embedded substreams (chart objects) sit between BOF and EOF inside the sheet: skipped
-  if (record.type === BOF_BIFF5_8) {
-    rows.nested++
-    return false
-  }
-  if (rows.nested > 0) {
-    if (record.type === EOF) rows.nested--
-    return false
-  }
+  if (record instanceof Embedded) return false
   const { data } = record
   const fields = rows.fields
   switch (record.type) {
@@ -572,8 +565,8 @@ const handle = (record: BiffRecord | ContinuedRecord, rows: Rows, context: Sheet
  */
 type Phase =
   | { readonly _tag: "Failed"; readonly error: SpreadsheetError }
-  | { readonly _tag: "Scanning"; readonly reader: RecordReader; readonly scan: RowScan }
-  | { readonly _tag: "Reading"; readonly reader: RecordReader; handledAt: number }
+  | { readonly _tag: "Scanning"; readonly reader: SubstreamReader; readonly scan: RowScan }
+  | { readonly _tag: "Reading"; readonly reader: SubstreamReader; handledAt: number }
   | { readonly _tag: "Draining" }
   | { readonly _tag: "Done" }
 
@@ -584,7 +577,7 @@ const DONE: Phase = { _tag: "Done" }
 export const sheetRows = (context: SheetContext): Stream.Stream<Row, SpreadsheetError> =>
   Stream.fromPull(Effect.map(WorkMeter, (meter) => {
     const opened = openSubstream(context)
-    let phase: Phase = opened instanceof RecordReader
+    let phase: Phase = opened instanceof SubstreamReader
       ? { _tag: "Scanning", reader: opened, scan: new RowScan(context, opened.offset) }
       : { _tag: "Failed", error: opened }
     const rows = new Rows(context)
@@ -623,12 +616,11 @@ export const sheetRows = (context: SheetContext): Stream.Stream<Row, Spreadsheet
             // call emits at least one, or none is left
             const caught = rows.complete(current.handledAt)
             if (caught !== undefined) return yield* Effect.fail(caught)
-            // progress: k up to BATCH_RECORDS; every next() advances the reader
+            // progress: k up to BATCH_RECORDS; every read() advances the reader
             for (let k = 0; k < BATCH_RECORDS && rows.effort < rows.budget && !rows.behind(current.handledAt); k++) {
               rows.steps++
-              const record = rows.nested === 0 && context.globals.biff8 && reader.peekType() === STRING
-                ? reader.nextWithContinues(maxStringBytes, "maxStringLength")
-                : reader.next()
+              // a BIFF8 STRING comes with its CONTINUEs (a BIFF5 one has none)
+              const record = context.globals.biff8 ? reader.readContinued(STRING, maxStringBytes, "maxStringLength") : reader.read()
               if (record === undefined) return yield* Effect.fail(malformed(context.part, "the sheet has no EOF"))
               if (record instanceof MalformedFile) return yield* Effect.fail(record)
               if (record instanceof LimitExceeded) {
@@ -700,31 +692,22 @@ interface Walked {
 const walkDetails = (context: SheetContext, walked: Walked, report: Effect.Effect<void>): Effect.Effect<SheetDetails, SpreadsheetError> =>
   Effect.gen(function*() {
     const opened = openSubstream(context)
-    if (!(opened instanceof RecordReader)) return yield* Effect.fail(opened)
+    if (!(opened instanceof SubstreamReader)) return yield* Effect.fail(opened)
     const { part, limits, globals } = context
     const layout = new LayoutBuilder(limits)
     const fields = new FixedReader()
-    let nested = 0
-    // progress: every next() advances the reader
+    // progress: every read() advances the reader
     for (let k = 1;; k++) {
       walked.steps++
       if (k % BATCH_RECORDS === 0) {
         yield* report
         yield* yieldNow
       }
-      const record = opened.next()
+      const record = opened.read()
       if (record === undefined) return yield* Effect.fail(malformed(part, "the sheet has no EOF"))
       if (record instanceof MalformedFile) return yield* Effect.fail(record)
-      if (record.type === BOF_BIFF5_8) {
-        nested++
-        continue
-      }
-      if (record.type === EOF) {
-        if (nested === 0) break
-        nested--
-        continue
-      }
-      if (nested > 0) continue
+      if (record instanceof Embedded) continue
+      if (record.type === EOF) break
       const { data } = record
       if (record.type === DIMENSIONS) {
         // a cut DIMENSIONS is ignored, as is an empty one

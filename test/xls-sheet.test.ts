@@ -342,6 +342,18 @@ describe("xls sheet: rows whose cells come in several places", () => {
     ])
   })
 
+  it("an embedded substream's BOF that ends a formula's wait is the record that passes the cap on held cells", async () => {
+    // row 0 waits for its last cell, row 1 holds 2 cells; the BOF gives the formula its empty text: 4 cells held
+    const records = [X.blank(0, 0, 0), X.blank(1, 0, 0), X.blank(1, 1, 0), X.formula(1, 2, 0, { kind: 0 }), X.bof(0x0020), X.eof(), X.blank(0, 1, 0)]
+    const book = one(records)
+    const stream = X.workbookStream(book)
+    const bofAt = X.workbookStream(one(records.slice(0, 4))).length - 4 // where the EOF of the shorter sheet is
+    expect(Array.from(stream.subarray(bofAt, bofAt + 2))).toEqual([0x09, 0x08])
+    expect(failureOf(await rowsHolding(book, 3))).toMatchObject({ _tag: "MalformedFile", offset: bofAt, reason: "rows split too far apart: over 3 cells held for rows not complete" })
+    // the last BLANK makes it 5, then rows 0 and 1 are complete
+    expect((await rowsHeld(book, 5)).map((r) => [r.index, r.cells.length])).toEqual([[0, 2], [1, 3]])
+  })
+
   it("a row whose last cell is a formula with a string result is emitted only after its STRING", async () => {
     const { sheets } = await readOk(one([X.number(0, 0, 0, 1), X.formula(0, 1, 0, { kind: 0 }), X.string("s"), X.number(1, 0, 0, 2)]))
     expect(values(sheets[0]!)).toEqual([
