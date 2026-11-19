@@ -443,6 +443,11 @@ describe("biff record cursor", () => {
     expect(bytesOf(new RecordCursor(stream, first, 5))).toEqual([1])
   })
 
+  it("characters at the very start of the record's data have no option byte; those at a CONTINUE's start do", () => {
+    expect(textOf(cursorOf([new Uint8Array([0x41, 0x42])]).chars(2, false))).toBe("AB")
+    expect(textOf(cursorOf([new Uint8Array([]), new Uint8Array([0, 0x41, 0x42])]).chars(2, false))).toBe("AB")
+  })
+
   it("consumed() follows every kind of read", () => {
     const segments = splitString("abcdef", false, [2, 4], { runs: 1, ext: 2 })
     const total = segments.reduce((n, s) => n + s.length, 0)

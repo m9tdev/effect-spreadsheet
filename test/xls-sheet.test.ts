@@ -169,6 +169,10 @@ describe("xls sheet: formula string results", () => {
     expect(await cellsOf([X.formula(0, 0, 0, { kind: 0 }), companion(ARRAY), ...wide])).toEqual([[0, 0, "Text", "abcдеж"]])
     expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(6), 0, ...chars("abc")]), X.record(CONTINUE, [0, ...chars("d")])])))
       .toMatchObject({ _tag: "MalformedFile", reason: "truncated record 0x207" })
+    // a CONTINUE of the STRING that runs past the end of the stream is that record's error, not the string's
+    const cut = new Uint8Array([0x3C, 0x00, 0xFF, 0x00, 0x00, 0x62, 0x63])
+    expect(await errorOf(one([X.formula(0, 0, 0, { kind: 0 }), X.record(STRING, [...X.u16(3), 0, ...chars("a")]), cut])))
+      .toMatchObject({ _tag: "MalformedFile", reason: "record 0x3c runs past the end of the stream" })
   })
 
   it("a continued STRING over maxStringLength is LimitExceeded with its character count, however many bytes follow", async () => {
