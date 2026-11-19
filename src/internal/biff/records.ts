@@ -64,13 +64,16 @@ export class RecordReader {
 
   /**
    * Moves past the record at the offset, its header checked against the
-   * end: the offset after it; undefined at the end of the stream.
+   * end: the offset after it; undefined at the end of the stream, or, with
+   * `only`, when the record is of another type (then nothing moves).
    */
-  protected advance(): number | undefined | MalformedFile {
+  protected advance(only = -1): number | undefined | MalformedFile {
     const at = this.offset
     if (at + 4 > this.end) return undefined
+    const type = this.view.getUint16(at, true)
+    if (only !== -1 && type !== only) return undefined
     const end = at + 4 + this.view.getUint16(at + 2, true)
-    if (end > this.end) return this.pastEnd(at, this.view.getUint16(at, true))
+    if (end > this.end) return this.pastEnd(at, type)
     // progress: offset grows by 4 + length >= 4
     this.offset = end
     this.records++
@@ -98,13 +101,19 @@ export class RecordReader {
    * string) with their size so far.
    */
   continues(first: BiffRecord, max: number, maxBytes: number, limit: string): "done" | "more" | MalformedFile | LimitExceeded {
-    // progress: each iteration reads one CONTINUE (advance moves the offset), at most max
+    // the headers are read here rather than through `advance`: a run of
+    // empty CONTINUEs is a loop over headers only, and the call costs about
+    // a fifth of it. progress: each iteration moves past one CONTINUE
+    // (the offset grows by 4 + length >= 4), at most max
     for (let k = 0; k < max; k++) {
-      if (this.peekType() !== CONTINUE) return "done"
-      const end = this.advance()
-      if (end instanceof MalformedFile) return end
+      const at = this.offset
+      if (at + 4 > this.end || this.view.getUint16(at, true) !== CONTINUE) return "done"
+      const end = at + 4 + this.view.getUint16(at + 2, true)
+      if (end > this.end) return this.pastEnd(at, CONTINUE)
+      this.offset = end
+      this.records++
       // the record and its CONTINUEs lie end to end: their size is the distance
-      const total = this.offset - first.offset
+      const total = end - first.offset
       if (total > maxBytes) return new LimitExceeded({ limit, max: maxBytes, actual: total })
     }
     return this.peekType() === CONTINUE ? "more" : "done"
@@ -180,8 +189,7 @@ export class SubstreamReader extends RecordReader {
     const record = { type, offset: at, data: this.bytes.subarray(at + 4, end) }
     if (type === this.continued) {
       // progress: each iteration moves past one CONTINUE (advance moves the offset), or returns
-      while (this.peekType() === CONTINUE) {
-        const next = this.advance()
+      for (let next = this.advance(CONTINUE); next !== undefined; next = this.advance(CONTINUE)) {
         if (next instanceof MalformedFile) return next
       }
     }
