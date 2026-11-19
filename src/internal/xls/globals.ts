@@ -5,28 +5,28 @@
  * names (NAME with EXTERNSHEET and SUPBOOK) and encryption (FILEPASS).
  *
  * The walk reads records from the first BOF to its EOF; every record
- * advances the reader. It goes in batches of at most `BATCH_RECORDS`
- * records, CONTINUEs or strings and about `BATCH_BYTES` bytes, with a yield
- * to the event loop between them, so a file that is nearly all globals
- * (format, style or name floods, a huge SST) doesn't block it. Limits:
- * sheets (and VB modules), defined names, shared strings, string lengths,
- * and the SST's and each SUPBOOK's total size (maxDecompressedBytes).
+ * advances the reader. It is a generator driven by `drive`, which yields to
+ * the event loop after at most `BATCH_RECORDS` records, CONTINUEs or
+ * strings or about `BATCH_BYTES` bytes of them, so a file that is nearly
+ * all globals (format, style or name floods, a huge SST) doesn't block it.
+ * Limits: sheets (and VB modules), defined names, shared strings, string
+ * lengths, and the SST's and each SUPBOOK's total size
+ * (maxDecompressedBytes).
  *
  * @internal
  */
-import { absurd, Effect } from "effect"
+import { absurd, type Effect, Result } from "effect"
 import { Encrypted, LimitExceeded, MalformedFile, type SpreadsheetError, UnsupportedFormat } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { DefinedName } from "../../Workbook.ts"
 import { readRichString, RecordCursor } from "../biff/cursor.ts"
 import { type BiffRecord, BOF_BIFF5_8, EOF, RecordReader, readBof } from "../biff/records.ts"
 import { FixedReader } from "../binary/layout.ts"
-import { WorkMeter } from "../meter.ts"
 import { addFormat, cellStyles, type CellStyles, type NumberFormat } from "../numFmt.ts"
 import { areaText, BIFF8_GRID, cellText, sheetPrefix } from "../refText.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
+import { drive, type Turn, type Walk } from "../walk.ts"
 import { type DefinedNameEntry, toDefinedNames } from "../workbook.ts"
-import { yieldNow } from "../yield.ts"
 import { codepageLabel, readString, type Text, textDecoder } from "./fields.ts"
 import { BATCH_CELLS, BATCH_RECORDS } from "./sheet.ts"
 
@@ -224,47 +224,35 @@ const sheetEnds = (
 }
 
 /**
- * Bytes of record data per batch (see `GlobalsWalk.step`): records of up to
- * 8 224 bytes each, and an SST or SUPBOOK of up to `maxDecompressedBytes`,
- * would otherwise make a batch of `BATCH_RECORDS` records or strings cost
- * megabytes of decoding.
+ * The walk's budget per turn (see `Turn`), in bytes: a record, CONTINUE,
+ * string or defined name costs its bytes of data plus `UNIT`, so a turn
+ * reads at most `BATCH_RECORDS` of them, or about `BATCH_BYTES` bytes of
+ * their data. Records of up to 8 224 bytes each, and an SST or SUPBOOK of
+ * up to `maxDecompressedBytes`, would otherwise make a turn of
+ * `BATCH_RECORDS` of them cost megabytes of decoding.
  */
 export const BATCH_BYTES = 16 * BATCH_CELLS
+
+/** What a record, CONTINUE, string or defined name costs besides its bytes: `BATCH_RECORDS` of them fill a turn. */
+const UNIT = BATCH_BYTES / BATCH_RECORDS
 
 /** A record the walk reads with its CONTINUEs. */
 type ContinuedKind = "Sst" | "Supbook" | "ExternSheet" | "Name"
 
-/**
- * What the walk works on: plain records; or the CONTINUEs of an SST,
- * SUPBOOK, EXTERNSHEET or NAME (`record`, the last one read), checked and
- * passed over; then the strings of an SST or SUPBOOK, read through a
- * cursor over its data and its CONTINUEs'.
- */
-type Pending =
-  | { readonly _tag: "Records" }
-  | { readonly _tag: "Continues"; readonly of: ContinuedKind; readonly record: BiffRecord }
-  | { readonly _tag: "SstStrings"; readonly segments: RecordCursor; readonly unique: number }
-  | {
-    readonly _tag: "SupbookSheets"
-    readonly segments: RecordCursor
-    readonly ctab: number
-    readonly sheets: Array<string>
-  }
-
-const RECORDS: Pending = { _tag: "Records" }
-
-type ContinuesPending = Extract<Pending, { readonly _tag: "Continues" }>
-type StringsPending = Extract<Pending, { readonly _tag: "SstStrings" | "SupbookSheets" }>
+/** Part of the walk (see `Walk`): yields when the turn's budget is spent. */
+type Steps<A> = Generator<void, A, void>
 
 /**
- * The walk over the globals substream, from the first BOF to its EOF, in
- * bounded steps (`step`). Every unit of work (a record, a CONTINUE, a
- * string) advances the record reader or a string reader.
+ * What the globals walk gathers, and the steps it takes over the globals
+ * substream, from the first BOF to its EOF (`records`). Every step (a
+ * record, a run of CONTINUEs, a string) advances the record reader or a
+ * string reader, and counts its cost on the turn.
  */
 class GlobalsWalk {
   readonly stream: Uint8Array
   readonly reader: RecordReader
   readonly limits: Limits
+  readonly turn: Turn
   biff8 = true
   text: Text
   date1904 = false
@@ -279,17 +267,14 @@ class GlobalsWalk {
   readonly books: Array<Book> = []
   externalBooks = 0
   xtis: Array<Xti> = []
-  pending: Pending = RECORDS
   /** Pointed at each record whose fixed fields are read. */
   private readonly fields = new FixedReader()
-  /** Work done in the current batch: records, CONTINUEs and strings read, and their bytes. */
-  private units = 0
-  private bytes = 0
 
-  constructor(stream: Uint8Array, limits: Limits) {
+  constructor(stream: Uint8Array, limits: Limits, turn: Turn) {
     this.stream = stream
     this.reader = new RecordReader(stream, "workbook globals")
     this.limits = limits
+    this.turn = turn
     this.text = { biff8: true, decoder: textDecoder("windows-1252"), maxLength: limits.maxStringLength }
   }
 
@@ -310,96 +295,95 @@ class GlobalsWalk {
   }
 
   /**
-   * One batch: records (CONTINUEs included) and strings until `BATCH_RECORDS`
-   * of them or `BATCH_BYTES` of their data. "done" at the EOF.
+   * The records after the BOF, up to the EOF: one step each, and an SST,
+   * SUPBOOK, EXTERNSHEET or NAME goes on with its CONTINUEs and then its
+   * strings or entries.
    */
-  step(): "more" | "done" | SpreadsheetError {
-    this.units = 0
-    this.bytes = 0
-    // progress: every iteration reads at least one record, CONTINUE or string
-    // (each advances a reader), and adds it to units, or returns
-    while (this.units < BATCH_RECORDS && this.bytes < BATCH_BYTES) {
-      const pending = this.pending
-      let outcome: "done" | SpreadsheetError | undefined
-      switch (pending._tag) {
-        case "Records":
-          outcome = this.record()
+  *records(): Steps<SpreadsheetError | undefined> {
+    const { reader, biff8, turn } = this
+    // progress: every iteration reads a record (the reader advances) and
+    // goes on past its CONTINUEs, or returns
+    for (;;) {
+      const record = reader.next()
+      if (record === undefined) return malformed("the workbook globals have no EOF")
+      if (record instanceof MalformedFile) return record
+      let cost = UNIT + 4 + record.data.length
+      let continued: ContinuedKind | undefined
+      switch (record.type) {
+        case EOF:
+          return undefined
+        case FILEPASS:
+          return new Encrypted({ format: "xls" })
+        // BIFF5 has no SST; its EXTERNSHEETs and NAMEs aren't read, so neither are its SUPBOOKs
+        case SST:
+          continued = "Sst"
           break
-        case "Continues":
-          outcome = this.continues(pending)
+        case SUPBOOK:
+          continued = "Supbook"
           break
-        case "SstStrings":
-        case "SupbookSheets":
-          outcome = this.readStrings(pending)
+        case EXTERNSHEET:
+          continued = "ExternSheet"
           break
-        default:
-          return absurd(pending)
+        case NAME:
+          continued = "Name"
+          break
+        default: {
+          const read = this.record(record)
+          if (typeof read !== "number") return read
+          cost += read
+        }
       }
-      if (outcome !== undefined) return outcome
+      if (turn.spend(cost)) yield
+      if (continued !== undefined && biff8) {
+        const failed = yield* this.continued(record, continued)
+        if (failed !== undefined) return failed
+      }
     }
-    return "more"
   }
 
-  /** Reads one record (an SST, SUPBOOK, EXTERNSHEET or NAME becomes `pending`); "done" at the EOF. */
-  private record(): "done" | SpreadsheetError | undefined {
-    const { reader, limits, biff8 } = this
-    const record = reader.next()
-    if (record === undefined) return malformed("the workbook globals have no EOF")
-    if (record instanceof MalformedFile) return record
-    this.units++
-    this.bytes += 4 + record.data.length
+  /**
+   * Reads a record that isn't continued: its cost besides the record's own
+   * (a FORMAT's code is scanned), or an error.
+   */
+  private record(record: BiffRecord): number | SpreadsheetError {
+    const { limits, biff8 } = this
     const { data } = record
     switch (record.type) {
-      case EOF:
-        return "done"
-      case FILEPASS:
-        return new Encrypted({ format: "xls" })
-      // BIFF5 has no SST; its EXTERNSHEETs and NAMEs aren't read, so neither are its SUPBOOKs
-      case SST:
-        return biff8 ? this.startContinues(record, "Sst") : undefined
-      case SUPBOOK:
-        return biff8 ? this.startContinues(record, "Supbook") : undefined
-      case EXTERNSHEET:
-        return biff8 ? this.startContinues(record, "ExternSheet") : undefined
-      case NAME:
-        return biff8 ? this.startContinues(record, "Name") : undefined
       case CODEPAGE: {
         // a cut CODEPAGE is ignored
         const f = this.fields.fixed(data, U16_RECORD_MIN)
         if (f !== undefined) this.text = { ...this.text, decoder: textDecoder(codepageLabel(f.u16(0))) }
-        return undefined
+        return 0
       }
       case DATEMODE: {
         // a cut DATEMODE means the 1900 system
         const f = this.fields.fixed(data, U16_RECORD_MIN)
         this.date1904 = f !== undefined && f.u16(0) === 1
-        return undefined
+        return 0
       }
       case BOUNDSHEET:
-        return this.boundSheet(record)
+        return this.boundSheet(record) ?? 0
       case FORMAT: {
         // a cut FORMAT is ignored; a code over the limit is not
         const f = this.fields.fixed(data, FORMAT_MIN)
-        if (f === undefined) return undefined
+        if (f === undefined) return 0
         const id = f.u16(0)
         const code = readString(data, FORMAT_MIN, this.text, biff8 ? 2 : 1)
         if (code._tag === "TooLong") return tooLong(limits, code.count)
-        if (code._tag === "Ok") {
-          // classified here (a later FORMAT with the same id wins); the
-          // scan counts in the batch, by the code's length
-          addFormat(this.custom, id, code.value)
-          this.bytes += code.value.length
-        }
-        return undefined
+        if (code._tag !== "Ok") return 0
+        // classified here (a later FORMAT with the same id wins); the scan
+        // costs the code's length
+        addFormat(this.custom, id, code.value)
+        return code.value.length
       }
       case XF: {
         // a cut XF still takes its index, with the General format
         const f = this.fields.fixed(data, XF_MIN)
         this.xfFormats.push(f === undefined ? 0 : f.u16(2))
-        return undefined
+        return 0
       }
       default:
-        return undefined
+        return 0
     }
   }
 
@@ -435,18 +419,63 @@ class GlobalsWalk {
   }
 
   /**
+   * An SST, SUPBOOK, EXTERNSHEET or NAME, just read: goes on past its
+   * CONTINUEs, then reads an EXTERNSHEET or NAME whole, or an SST's or
+   * SUPBOOK's strings.
+   */
+  private *continued(record: BiffRecord, of: ContinuedKind): Steps<SpreadsheetError | undefined> {
+    const segments = yield* this.continues(record)
+    if (!(segments instanceof RecordCursor)) return segments
+    switch (of) {
+      case "ExternSheet":
+        this.externSheet(segments)
+        return undefined
+      case "Name":
+        return this.name(segments)
+      case "Sst":
+        return yield* this.sst(record, segments)
+      case "Supbook":
+        return yield* this.supbook(record, segments)
+      default:
+        return absurd(of)
+    }
+  }
+
+  /**
+   * Moves past the CONTINUEs after `record` and checks them (all of them
+   * together within maxDecompressedBytes), in runs of as many as the turn
+   * has room for (one at least), each one step; then a cursor over the
+   * record's data and theirs.
+   */
+  private *continues(record: BiffRecord): Steps<RecordCursor | SpreadsheetError> {
+    const { reader, limits, turn } = this
+    // progress: a run that isn't the last moves past at least one CONTINUE
+    // (as many as asked, at least 1)
+    for (;;) {
+      const before = reader.records
+      const at = reader.offset
+      const room = Math.max(1, Math.floor(turn.left / UNIT))
+      const run = reader.continues(record, room, limits.maxDecompressedBytes, "maxDecompressedBytes")
+      if (run !== "more" && run !== "done") return run
+      const read = reader.records - before
+      if (read > 0 && turn.spend(read * UNIT + reader.offset - at)) yield
+      // the CONTINUEs end where the reader is: the cursor reads up to there
+      if (run === "done") return new RecordCursor(this.stream, record, reader.offset)
+    }
+  }
+
+  /**
    * An EXTERNSHEET (with its CONTINUEs): the XTIs, as many as declared and
    * present. A few hundred kilobytes at most (65 535 entries of 6 bytes),
-   * all counted in the batch's bytes while its CONTINUEs were read.
+   * all counted in the cost of its CONTINUEs.
    */
-  private externSheet(segments: RecordCursor): undefined {
+  private externSheet(segments: RecordCursor): void {
     const count = segments.has(EXTERNSHEET_COUNT) ? segments.u16() : 0
     this.xtis = []
     // progress: k up to count; each entry reads 6 of the bytes left
     for (let k = 0; k < count && segments.has(XTI_SIZE); k++) {
       this.xtis.push({ book: segments.u16(), first: segments.u16(), last: segments.u16() })
     }
-    return undefined
   }
 
   /**
@@ -481,169 +510,108 @@ class GlobalsWalk {
     return undefined
   }
 
-  /** Starts reading `record`'s CONTINUEs (the next steps go on with them). */
-  private startContinues(record: BiffRecord, of: ContinuedKind): undefined {
-    this.pending = { _tag: "Continues", of, record }
+  /** An SST (with its CONTINUEs): its strings, as many as declared and present. */
+  private *sst(record: BiffRecord, segments: RecordCursor): Steps<SpreadsheetError | undefined> {
+    const { limits } = this
+    if (!segments.has(SST_HEADER)) return malformed("truncated SST", record.offset)
+    segments.u32() // total count
+    const unique = segments.u32()
+    if (unique > limits.maxSharedStrings) {
+      return new LimitExceeded({ limit: "maxSharedStrings", max: limits.maxSharedStrings, actual: unique })
+    }
+    this.strings = []
+    return yield* this.readStrings(segments, unique, this.strings)
+  }
+
+  /**
+   * A SUPBOOK (with its CONTINUEs): this workbook, an add-in's functions,
+   * or an external workbook with its path and sheet names.
+   */
+  private *supbook(record: BiffRecord, segments: RecordCursor): Steps<SpreadsheetError | undefined> {
+    const { limits } = this
+    // this workbook and add-ins are exactly ctab + marker (4 bytes); an
+    // external book's path can have a character count equal to a marker
+    const head = record.data.length === SUPBOOK_MARKER_LENGTH ? this.fields.fixed(record.data, SUPBOOK_MARKER_LENGTH) : undefined
+    const marker = head?.u16(2)
+    if (marker === 0x0401 || marker === 0x3A01) {
+      this.books.push(marker === 0x0401 ? SELF : { kind: "addin" })
+      return undefined
+    }
+    const ctab = segments.has(SUPBOOK_CTAB) ? segments.u16() : 0
+    const path = readRichString(segments, limits.maxStringLength) // the path's character count is the marker's place
+    if (path._tag === "TooLong") return tooLong(limits, path.count)
+    if (this.turn.spend(UNIT)) yield
+    const sheets: Array<string> = []
+    // without a path, no sheet names follow
+    const failed = yield* this.readStrings(segments, path._tag === "Truncated" ? 0 : ctab, sheets)
+    if (failed !== undefined) return failed
+    this.externalBooks++
+    this.books.push({ kind: "external", link: this.externalBooks, sheets })
     return undefined
   }
 
   /**
-   * Goes on with a record that may be continued: checks its CONTINUEs and
-   * moves past them within the batch's budget (all of them together within
-   * maxDecompressedBytes), then reads an EXTERNSHEET or NAME whole, or
-   * starts on an SST's or SUPBOOK's strings.
+   * Reads up to `count` strings into `list`, one step each: fewer when the
+   * data ends first (those read are kept).
    */
-  private continues(pending: ContinuesPending): SpreadsheetError | undefined {
-    const { reader, limits } = this
-    const { record } = pending
-    const before = reader.records
-    const at = reader.offset
-    const step = reader.continues(record, BATCH_RECORDS - this.units, limits.maxDecompressedBytes, "maxDecompressedBytes")
-    this.units += reader.records - before
-    this.bytes += reader.offset - at
-    if (step === "more") return undefined
-    if (step !== "done") return step
-    // the CONTINUEs end where the reader is: the cursor reads up to there
-    const segments = new RecordCursor(this.stream, record, reader.offset)
-    switch (pending.of) {
-      case "ExternSheet":
-        this.pending = RECORDS
-        return this.externSheet(segments)
-      case "Name":
-        this.pending = RECORDS
-        return this.name(segments)
-      case "Sst": {
-        if (!segments.has(SST_HEADER)) return malformed("truncated SST", record.offset)
-        segments.u32() // total count
-        const unique = segments.u32()
-        if (unique > limits.maxSharedStrings) {
-          return new LimitExceeded({ limit: "maxSharedStrings", max: limits.maxSharedStrings, actual: unique })
-        }
-        this.strings = []
-        this.pending = { _tag: "SstStrings", segments, unique }
-        return undefined
-      }
-      case "Supbook": {
-        // this workbook and add-ins are exactly ctab + marker (4 bytes); an
-        // external book's path can have a character count equal to a marker
-        const head = record.data.length === SUPBOOK_MARKER_LENGTH ? this.fields.fixed(record.data, SUPBOOK_MARKER_LENGTH) : undefined
-        const marker = head?.u16(2)
-        if (marker === 0x0401 || marker === 0x3A01) {
-          this.books.push(marker === 0x0401 ? SELF : { kind: "addin" })
-          this.pending = RECORDS
-          return undefined
-        }
-        const ctab = segments.has(SUPBOOK_CTAB) ? segments.u16() : 0
-        const path = readRichString(segments, limits.maxStringLength) // the path's character count is the marker's place
-        if (path._tag === "TooLong") return tooLong(limits, path.count)
-        this.units++
-        // without a path, no sheet names follow
-        this.pending = { _tag: "SupbookSheets", segments, ctab: path._tag === "Truncated" ? 0 : ctab, sheets: [] }
-        return undefined
-      }
-      default:
-        return absurd(pending.of)
-    }
-  }
-
-  /** Reads an SST's strings or a SUPBOOK's sheet names within the batch's budget. */
-  private readStrings(pending: StringsPending): SpreadsheetError | undefined {
-    const { limits } = this
-    const { segments } = pending
-    let list: Array<string>
-    let count: number
-    switch (pending._tag) {
-      case "SstStrings":
-        list = this.strings
-        count = pending.unique
-        break
-      case "SupbookSheets":
-        list = pending.sheets
-        count = pending.ctab
-        break
-      default:
-        return absurd(pending)
-    }
-    const started = segments.consumed()
-    let ended = false
-    // progress: each string consumes at least 3 bytes, or the list ends; at most the batch's units
-    while (this.units < BATCH_RECORDS && segments.consumed() - started < BATCH_BYTES - this.bytes) {
-      if (list.length >= count) {
-        ended = true
-        break
-      }
+  private *readStrings(segments: RecordCursor, count: number, list: Array<string>): Steps<LimitExceeded | undefined> {
+    const { limits, turn } = this
+    // progress: list grows by one per iteration, up to count, or the loop ends
+    while (list.length < count) {
+      const at = segments.consumed()
       const read = readRichString(segments, limits.maxStringLength)
       if (read._tag === "TooLong") return tooLong(limits, read.count)
-      this.units++
-      if (read._tag === "Truncated") {
-        ended = true // fewer strings than declared: keep those read
-        break
-      }
+      if (read._tag === "Truncated") return undefined
       list.push(read.value)
+      if (turn.spend(UNIT + segments.consumed() - at)) yield
     }
-    this.bytes += segments.consumed() - started
-    if (!ended && list.length < count) return undefined
-    this.pending = RECORDS
-    switch (pending._tag) {
-      case "SstStrings":
-        return undefined
-      case "SupbookSheets":
-        this.externalBooks++
-        this.books.push({ kind: "external", link: this.externalBooks, sheets: pending.sheets })
-        return undefined
-      default:
-        return absurd(pending)
-    }
+    return undefined
   }
 }
 
 /**
- * Reads the globals of a workbook stream (its first substream), in batches
- * of bounded work with a yield to the event loop between them, and so are
- * its defined names. Sheet names are made unique
- * (`uniqueSheetNames`). Each batch counts one unit of work on the meter.
+ * The globals walk (see `Walk`): the records up to the EOF, then the sheets'
+ * substream ends (sheet names made unique, `uniqueSheetNames`), the cell
+ * styles and the defined names, one step each.
+ */
+function* globalsWalk(stream: Uint8Array, limits: Limits, turn: Turn): Walk<Globals, SpreadsheetError> {
+  const walk = new GlobalsWalk(stream, limits, turn)
+  const started = walk.start()
+  if (started !== undefined) return Result.fail(started)
+  const failed = yield* walk.records()
+  if (failed !== undefined) return Result.fail(failed)
+  const { sheets, xtis, books, custom } = walk
+  const unique = uniqueSheetNames(sheets.map((s) => s.name))
+  const ended = sheetEnds(stream, walk.reader.offset, sheets.map((s, k) => ({ ...s, name: unique[k]! })), walk.modules)
+  if (ended instanceof MalformedFile) return Result.fail(ended)
+
+  // a lookup per cell: the codes were classified as their FORMATs were read
+  const styles = cellStyles(walk.xfFormats, walk.xfFormats.length, custom)
+  const definedNames: Array<DefinedNameEntry> = []
+  const sheetNames = ended.map((s) => s.name) // once, not per name
+  const formulas = new FixedReader()
+  // progress: k up to names.length (at most maxDefinedNames)
+  for (let k = 0; k < walk.names.length; k++) {
+    const n = walk.names[k]!
+    const formula = nameFormula(formulas, n.rgce, xtis, books, sheetNames)
+    definedNames.push({ name: n.name, formula, hidden: n.hidden, scope: n.scope })
+    if (turn.spend(UNIT)) yield
+  }
+  return Result.succeed({
+    biff8: walk.biff8,
+    text: walk.text,
+    date1904: walk.date1904,
+    sheets: ended,
+    styles,
+    strings: walk.strings,
+    definedNames: toDefinedNames(definedNames, sheets.length)
+  })
+}
+
+/**
+ * Reads the globals of a workbook stream (its first substream), driven in
+ * turns of at most `BATCH_BYTES` of cost with a yield to the event loop
+ * between them (`drive`). Each turn counts one batch on the work meter.
  */
 export const readGlobals = (stream: Uint8Array, limits: Limits): Effect.Effect<Globals, SpreadsheetError> =>
-  Effect.gen(function*() {
-    const meter = yield* WorkMeter
-    const walk = new GlobalsWalk(stream, limits)
-    const started = walk.start()
-    if (started !== undefined) return yield* Effect.fail(started)
-    // progress: every step reads at least one record, CONTINUE or string, or ends
-    for (let k = 0;; k++) {
-      if (k > 0) yield* yieldNow
-      meter.add("batches", 1)
-      const outcome = walk.step()
-      if (outcome === "done") break
-      if (outcome !== "more") return yield* Effect.fail(outcome)
-    }
-    const { sheets, xtis, books, custom } = walk
-    const unique = uniqueSheetNames(sheets.map((s) => s.name))
-    const ended = sheetEnds(stream, walk.reader.offset, sheets.map((s, k) => ({ ...s, name: unique[k]! })), walk.modules)
-    if (ended instanceof MalformedFile) return yield* Effect.fail(ended)
-
-    // a lookup per cell: the codes were classified as their FORMATs were read
-    const styles = cellStyles(walk.xfFormats, walk.xfFormats.length, custom)
-    const definedNames: Array<DefinedNameEntry> = []
-    const sheetNames = ended.map((s) => s.name) // once, not per name
-    const formulas = new FixedReader()
-    // progress: k up to names.length (at most maxDefinedNames), yielding every BATCH_RECORDS
-    for (let k = 0; k < walk.names.length; k++) {
-      if (k % BATCH_RECORDS === 0) {
-        if (k > 0) yield* yieldNow
-        meter.add("batches", 1)
-      }
-      const n = walk.names[k]!
-      const formula = nameFormula(formulas, n.rgce, xtis, books, sheetNames)
-      definedNames.push({ name: n.name, formula, hidden: n.hidden, scope: n.scope })
-    }
-    return {
-      biff8: walk.biff8,
-      text: walk.text,
-      date1904: walk.date1904,
-      sheets: ended,
-      styles,
-      strings: walk.strings,
-      definedNames: toDefinedNames(definedNames, sheets.length)
-    }
-  })
+  drive((turn) => globalsWalk(stream, limits, turn), BATCH_BYTES, "batches")
