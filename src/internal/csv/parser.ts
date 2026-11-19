@@ -23,7 +23,7 @@ import * as Cell from "../../Cell.ts"
 import { LimitExceeded, MalformedFile, type SpreadsheetError } from "../../SpreadsheetError.ts"
 import type { Limits } from "../../SpreadsheetLimits.ts"
 import type { Row } from "../../Workbook.ts"
-import { type FieldEnds, fieldEnds, type FieldSink, lexFields, type LexState, lexState, Mode } from "./lex.ts"
+import { type FieldEnds, fieldEndsOf, type FieldSink, lexFields, type LexState, Mode } from "./lex.ts"
 import { isDelimiter } from "./options.ts"
 import { guessDelimiter, SNIFF_CHARS } from "./sniff.ts"
 
@@ -136,12 +136,16 @@ export class CsvParser {
  * that stops tokenizing, or undefined to go on; after an error the
  * tokenizer is not used again (the parser keeps the error).
  */
-class Tokenizer implements FieldSink {
+class Tokenizer implements FieldSink, LexState {
   private readonly ends: FieldEnds
   /** Characters skipped before the first piece (a `sep=` line). */
   readonly start: number
 
-  private readonly lex: LexState = lexState()
+  // where the lexer stands (LexState): kept on the tokenizer itself, which
+  // saves an object per read
+  mode: Mode = Mode.FieldStart
+  skipLF = false
+  recordStarted = false
   private field = ""
   private column = 0
   private cells: Array<Cell.Cell> = []
@@ -158,7 +162,7 @@ class Tokenizer implements FieldSink {
   /** `start`: characters of the first piece to skip (a `sep=` line); error offsets count them. */
   constructor(options: ParserOptions, delimiter: number, start: number) {
     this.options = options
-    this.ends = fieldEnds([delimiter])
+    this.ends = fieldEndsOf(delimiter)
     this.start = start
   }
 
@@ -184,14 +188,21 @@ class Tokenizer implements FieldSink {
   }
 
   endField(s: string, from: number, to: number): boolean {
-    if (to > from && !this.text(s, from, to)) return false
+    // the field's text so far, then its last part (most fields are only that)
+    let value = this.field
+    if (to > from) {
+      value = value.length === 0 ? s.slice(from, to) : value + s.slice(from, to)
+      const max = this.options.limits.maxStringLength
+      if (value.length > max) {
+        return this.fail(new LimitExceeded({ limit: "maxStringLength", max, actual: value.length }))
+      }
+    }
     const column = this.column
     const maxColumns = this.options.limits.maxColumns
     if (column >= maxColumns) {
       return this.fail(new LimitExceeded({ limit: "maxColumns", max: maxColumns, actual: column + 1 }))
     }
     this.column = column + 1
-    const value = this.field
     this.field = ""
     // An empty field emits no cell; every emitted cell counts.
     if (value.length === 0) return true
@@ -233,21 +244,21 @@ class Tokenizer implements FieldSink {
    * stops at the first error and returns it.
    */
   parse(s: string, from: number): SpreadsheetError | undefined {
-    lexFields(s, from, this.lex, this.ends, this)
+    lexFields(s, from, this, this.ends, this)
     this.consumed += s.length
     return this.error
   }
 
   /** End of input: ends the last record, if one has started. Returns the error, if any. */
   finish(): SpreadsheetError | undefined {
-    if (this.lex.mode === Mode.Quoted && this.options.strict) {
+    if (this.mode === Mode.Quoted && this.options.strict) {
       return new MalformedFile({
         format: "csv",
         offset: this.consumed,
         reason: `unterminated quoted field in row ${this.rowIndex + 1}`
       })
     }
-    if (!this.lex.recordStarted) return undefined
+    if (!this.recordStarted) return undefined
     return this.endField("", 0, 0) && this.endRecord() ? undefined : this.error
   }
 }

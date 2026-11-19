@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest"
 import fc from "fast-check"
-import { fieldEnds, type FieldSink, lexFields, type LexState, lexState, Mode } from "../src/internal/csv/lex.ts"
+import { fieldEnds, fieldEndsOf, type FieldSink, lexFields, type LexState, lexState, Mode } from "../src/internal/csv/lex.ts"
+import { guessDelimiter } from "../src/internal/csv/sniff.ts"
 
 type Event =
   | readonly ["field", string, string]
@@ -78,6 +79,20 @@ describe("csv lexer", () => {
     assert.deepStrictEqual(set, [0x0A, 0x0D, 0x3B, 0x2603])
   })
 
+  it("field ends of one delimiter are shared, and only a few are kept", () => {
+    const semicolon = fieldEndsOf(0x3B)
+    assert.strictEqual(fieldEndsOf(0x3B), semicolon)
+    assert.deepStrictEqual(fieldEndsOf(0x3B), fieldEnds([0x3B]))
+    assert.notStrictEqual(fieldEndsOf(0x2C), semicolon)
+    assert.deepStrictEqual(fieldEndsOf(0x2C), fieldEnds([0x2C]))
+    // after 8 other delimiters the table was dropped and is built again
+    // progress: d increases up to 0x41 + 8
+    for (let d = 0x41; d < 0x41 + 8; d++) fieldEndsOf(d)
+    const again = fieldEndsOf(0x3B)
+    assert.notStrictEqual(again, semicolon)
+    assert.deepStrictEqual(again, semicolon)
+  })
+
   it("reports fields and records, with the character that ends each field", () => {
     const { events, state } = lex(["a,b\r\nc,\"d,\"\"e\"\"\"\n\n,\r"])
     assert.deepStrictEqual(events, [
@@ -128,6 +143,15 @@ describe("csv lexer", () => {
       ["afterQuote", 11],
       ["field", "xy", "\n"],
       ["record", "\n", true]
+    ])
+  })
+
+  it("a delimiter or line break right after a closing quote ends the field: no text after the quote", () => {
+    assert.deepStrictEqual(lex(['"a",b']).events, [["field", "a", ","]])
+    assert.deepStrictEqual(lex(['"a";"b"\r\n'], [";"]).events, [
+      ["field", "a", ";"],
+      ["field", "b", "\r"],
+      ["record", "\r", true]
     ])
   })
 
@@ -197,6 +221,35 @@ describe("csv lexer", () => {
         }
       ),
       { numRuns: 2000 }
+    )
+  })
+})
+
+describe("csv delimiter guess", () => {
+  it("a guess doesn't depend on the guesses before it", () => {
+    // `;` once, then a line without it, cut off: `,` counts only in the cut-off line
+    const sample = "a;b\nc\n"
+    assert.strictEqual(guessDelimiter(sample, false), 0x3B)
+    // a guess that counted 4 `,` in the line it was reading when the sample ended
+    assert.strictEqual(guessDelimiter("a;b\nc;d\nx,y,z,w,v", false), 0x3B)
+    assert.strictEqual(guessDelimiter(sample, false), 0x3B)
+    // and after a guess that stopped at 64 lines
+    assert.strictEqual(guessDelimiter("a,b,c\n".repeat(70), false), 0x2C)
+    assert.strictEqual(guessDelimiter(sample, false), 0x3B)
+    assert.strictEqual(guessDelimiter("", true), 0x2C)
+  })
+
+  it("any order of guesses gives the same guesses", () => {
+    const samples = fc.array(fc.constantFrom("a", ",", ";", "\t", "|", '"', "\n", "\r\n"), { maxLength: 40 }).map((xs) =>
+      xs.join("")
+    )
+    fc.assert(
+      fc.property(fc.array(fc.tuple(samples, fc.boolean()), { minLength: 1, maxLength: 6 }), (cases) => {
+        const forward = cases.map(([s, complete]) => guessDelimiter(s, complete))
+        const backward = [...cases].reverse().map(([s, complete]) => guessDelimiter(s, complete)).reverse()
+        assert.deepStrictEqual(forward, backward)
+      }),
+      { numRuns: 1000 }
     )
   })
 })

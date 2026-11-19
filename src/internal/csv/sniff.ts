@@ -22,6 +22,15 @@ for (let t = 0; t < K; t++) CANDIDATE_INDEX[CANDIDATES[t]!] = t
 const MAX_LINES = 64
 
 /**
+ * The per-line counts, shared by the guesses: allocating and zeroing them
+ * would dominate the guess on a small sample. A guess runs to the end
+ * without yielding, so one array serves every guess; each clears the slots
+ * the previous one used (`countsUsed`).
+ */
+const COUNTS: Array<number> = new Array<number>((MAX_LINES + 1) * K).fill(0)
+let countsUsed = 0
+
+/**
  * Counts the candidates that end fields, per line, with every candidate
  * taken as a delimiter (a field starts at the start of a line and after any
  * candidate, so quotes follow the parser's rules). Lines without a
@@ -33,8 +42,13 @@ class CandidateCounts implements FieldSink {
    * read and then the line being read. A line without a character has no
    * candidate, so its slot is still zero for the next line.
    */
-  readonly counts: Array<number> = new Array<number>((MAX_LINES + 1) * K).fill(0)
+  readonly counts: Array<number>
   lines = 0
+
+  /** `counts`: all zero, at least (MAX_LINES + 1) * K slots. */
+  constructor(counts: Array<number>) {
+    this.counts = counts
+  }
 
   text(): boolean {
     return true
@@ -71,12 +85,18 @@ class CandidateCounts implements FieldSink {
  *    tie-break order; with none at all, `,`.
  */
 export const guessDelimiter = (sample: string, complete: boolean): number => {
+  // clear what the last guess counted (all of it, even if that guess threw)
+  COUNTS.fill(0, 0, countsUsed)
+  countsUsed = COUNTS.length
   const state = lexState()
-  const sink = new CandidateCounts()
+  const sink = new CandidateCounts(COUNTS)
   lexFields(sample, 0, state, CANDIDATE_ENDS, sink)
   const counts = sink.counts
-  // the line being read counts as a line only if the sample is whole
-  const lines = state.recordStarted && complete && sink.lines < MAX_LINES ? sink.lines + 1 : sink.lines
+  // slots counted into: every line read, and the line being read
+  countsUsed = Math.min((sink.lines + 1) * K, COUNTS.length)
+  // the line being read counts as a line only if the sample is whole (after
+  // MAX_LINES lines lexing stopped at a line break, so no line is being read)
+  const lines = state.recordStarted && complete ? sink.lines + 1 : sink.lines
 
   let best = -1
   let bestPerLine = 0

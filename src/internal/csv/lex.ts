@@ -40,6 +40,25 @@ export const fieldEnds = (delimiters: ReadonlyArray<number>): FieldEnds => {
   return ends
 }
 
+/**
+ * Field-end tables of single delimiters, shared: building one fills 64 KiB,
+ * which would dominate the read of a small input. A table is never written
+ * after it is built. At most TABLES_KEPT are kept.
+ */
+const tables = new Map<number, FieldEnds>()
+const TABLES_KEPT = 8
+
+/** The field ends for one delimiter, shared with every other user of that delimiter. */
+export const fieldEndsOf = (delimiter: number): FieldEnds => {
+  let ends = tables.get(delimiter)
+  if (ends === undefined) {
+    if (tables.size >= TABLES_KEPT) tables.clear()
+    ends = fieldEnds([delimiter])
+    tables.set(delimiter, ends)
+  }
+  return ends
+}
+
 export const Mode = {
   /** At the start of a field. */
   FieldStart: 0,

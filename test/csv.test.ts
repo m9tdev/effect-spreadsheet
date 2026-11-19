@@ -76,6 +76,9 @@ describe("csv: structure", () => {
     if (error?._tag === "MalformedFile") assert.match(error.reason, /unterminated/)
     // a properly closed quote at EOF is fine in strict mode
     assert.deepStrictEqual(await csvAoa('a,"b"', { strict: true }), [["a", "b"]])
+    // so is a delimiter or a line break right after the closing quote
+    assert.deepStrictEqual(await csvAoa('"a",b\n', { strict: true }), [["a", "b"]])
+    assert.deepStrictEqual(await csvAoa('"a"\r\n"b";"c"\n', { strict: true, delimiter: ";" }), [["a"], ["b", "c"]])
   })
 
   it("whitespace is kept", async () => {

@@ -3,11 +3,16 @@
  * parser over a whole text fed in 64 Ki-character pieces, with the
  * delimiter given, and the delimiter guess over 2000 16 Ki-character samples.
  * Several input shapes (plain, quoted, wide, short lines, tab-delimited).
+ * Also many tiny inputs, where the cost of setting up a read shows: the
+ * parser with the delimiter given or guessed, the guess alone, and the
+ * public `Csv.rows` end to end.
  * Prints one JSON line: the median milliseconds of each case.
  * Not a test: the numbers depend on the machine and its load; compare two
  * builds by alternating their runs. Run: node scripts/bench/csv-lex.ts [rounds]
  */
+import { Effect, Stream } from "effect"
 import * as Result from "effect/Result"
+import * as Csv from "../../src/csv/index.ts"
 import { CsvParser } from "../../src/internal/csv/parser.ts"
 import { guessDelimiter, SNIFF_CHARS } from "../../src/internal/csv/sniff.ts"
 import * as SpreadsheetLimits from "../../src/SpreadsheetLimits.ts"
@@ -84,9 +89,45 @@ const time = (f: () => number): Array<number> => {
   return ms
 }
 
+const TINY = "a,b,c\n1,2,3\n"
+const TINY_BYTES = new TextEncoder().encode(TINY)
+
+/** Parses TINY `count` times, each with a new parser. */
+const tinyParse = (delimiter: number | undefined, count: number) => (): number => {
+  let rows = 0
+  // progress: k increases up to count
+  for (let k = 0; k < count; k++) {
+    const parser = new CsvParser({ delimiter, inferTypes: false, strict: false, limits: SpreadsheetLimits.defaults })
+    const r = parser.feed(TINY, true)
+    if (Result.isFailure(r)) throw new Error(r.failure._tag)
+    rows += r.success.length
+  }
+  return rows
+}
+
+const tinySniff = (count: number) => (): number => {
+  let sum = 0
+  // progress: k increases up to count
+  for (let k = 0; k < count; k++) sum += guessDelimiter(TINY, true)
+  return sum
+}
+
+const tinyRows = (count: number) => (): number => {
+  let rows = 0
+  // progress: k increases up to count
+  for (let k = 0; k < count; k++) rows += Effect.runSync(Stream.runCollect(Csv.rows(TINY_BYTES))).length
+  return rows
+}
+
+const ms = (f: () => number): number => Math.round(median(time(f)) * 10) / 10
+
 const result: Record<string, number> = {}
 for (const [name, { delimiter, text }] of Object.entries(SHAPES)) {
-  result[`parse.${name}`] = Math.round(median(time(() => parse(text, delimiter))) * 10) / 10
-  result[`sniff.${name}`] = Math.round(median(time(() => sniff(text))) * 10) / 10
+  result[`parse.${name}`] = ms(() => parse(text, delimiter))
+  result[`sniff.${name}`] = ms(() => sniff(text))
 }
+result["tiny.parse.known"] = ms(tinyParse(0x2C, 100_000))
+result["tiny.parse.sniffed"] = ms(tinyParse(undefined, 100_000))
+result["tiny.sniff"] = ms(tinySniff(300_000))
+result["tiny.public.rows"] = ms(tinyRows(5_000))
 console.log(JSON.stringify(result))
