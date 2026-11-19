@@ -34,9 +34,10 @@
  * about, the same however the input is split.
  *
  * A handler can ask, when an element opens, for its subtree to be skipped
- * (no events from inside it, nor its end tag) or for its text to be
- * collected (handed to `close`, bounded as a whole by `maxStringLength`).
- * Skipped content is still read and checked like any other.
+ * (no events from inside it, nor its end tag), for its text to be collected
+ * (handed to `close`, bounded as a whole by `maxStringLength`), or for its
+ * text to be left out of collected text. Skipped content is still read and
+ * checked like any other.
  *
  * Cost: every character is examined a bounded number of times (counted in
  * `work`, and handed to the work meter after each piece); a token split
@@ -80,6 +81,12 @@ export interface XmlElement {
    * is collected already, this does nothing: the text goes to that element.
    */
   readonly collect: (prior?: number) => void
+  /**
+   * Leaves the element's text, its descendants' included, out of collected
+   * text: an enclosing element's, and any asked for inside it (their end
+   * tags get `undefined`). Unlike `skip`, the events still come.
+   */
+  readonly omitText: () => void
 }
 
 /**
@@ -212,11 +219,13 @@ export class XmlTokenizer implements XmlElement {
   private skipAt = 0
   /** The depth of the element whose text is collected, or 0. */
   private collectAt = 0
-  /** Its text so far, and that text's length plus the `prior` it was asked with. */
+  /** The depth of the element whose text is left out of collected text, or 0. */
+  private omitAt = 0
+  /** Its text so far, and that text's length plus the `prior` it was asked with (set when a collection starts). */
   private readonly collected: Array<string> = []
   private collectedLength = 0
-  /** What `open` asked for the element it was handed: nothing, a skip or a collection ("none" outside `open`). */
-  private request: "none" | "skip" | "collect" = "none"
+  /** What `open` asked for the element it was handed ("none" outside `open`). */
+  private request: "none" | "skip" | "collect" | "omit" = "none"
   private requestPrior = 0
   private phase: Phase = "Prolog"
   /** Characters fed before the current piece. */
@@ -242,6 +251,10 @@ export class XmlTokenizer implements XmlElement {
   collect(prior = 0): void {
     this.request = "collect"
     this.requestPrior = prior
+  }
+
+  omitText(): void {
+    this.request = "omit"
   }
 
   /** Hands the piece's work to the meter. */
@@ -359,7 +372,7 @@ export class XmlTokenizer implements XmlElement {
   /** Text inside the root element: collected and handed to the handler, unless it is in a skipped subtree. */
   private deliverText(value: string): Status {
     if (this.skipAt !== 0) return undefined
-    if (this.collectAt !== 0) {
+    if (this.collectAt !== 0 && this.omitAt === 0) {
       this.collected.push(value)
       this.collectedLength += value.length
       if (this.collectedLength > this.limits.maxStringLength) {
@@ -626,10 +639,10 @@ export class XmlTokenizer implements XmlElement {
       this.request = "none"
       if (error !== undefined) return error
       if (request === "skip") this.skipAt = this.stack.length
-      else if (request === "collect" && this.collectAt === 0) {
+      else if (request === "collect" && this.collectAt === 0 && this.omitAt === 0) {
         this.collectAt = this.stack.length
         this.collectedLength = this.requestPrior
-      }
+      } else if (request === "omit" && this.omitAt === 0) this.omitAt = this.stack.length
     }
     return selfClosing ? this.closeElement(qname) : undefined
   }
@@ -650,12 +663,12 @@ export class XmlTokenizer implements XmlElement {
       if (depth === this.skipAt) this.skipAt = 0
       return undefined
     }
+    if (depth === this.omitAt) this.omitAt = 0
     let text: string | undefined
     if (depth === this.collectAt) {
       const parts = this.collected
       text = parts.length === 0 ? "" : parts.length === 1 ? parts[0]! : parts.join("")
       parts.length = 0
-      this.collectedLength = 0
       this.collectAt = 0
     }
     return this.handler.close(localName(qname), text)

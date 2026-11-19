@@ -201,7 +201,6 @@ export class SheetRows implements XmlHandler {
       cell.child = "formula"
       element.collect()
     } else if (name === "is" && cell.inlineValue === undefined) {
-      this.rich.take()
       cell.child = "inline"
     } else element.skip()
   }

@@ -103,29 +103,30 @@ export const readWorkbookPart = (
 
 /**
  * Collects rich text the way `<si>` and `<is>` hold it: the text of the
- * `<t>` elements (directly, or inside `<r>` runs), joined; phonetic runs
- * (`<rPh>`) are skipped wherever they are, with the `<t>` elements inside
- * them (also a run inside a `<t>`: the `<t>`'s text after it is kept). The
- * tokenizer collects each `<t>`'s text, counting the text before it against
- * `maxStringLength`. Feed it the events inside the container.
+ * `<t>` elements (directly, or inside `<r>` runs), joined; the text of
+ * phonetic runs (`<rPh>`) is left out wherever they are, with the `<t>`
+ * elements inside them (also a run inside a `<t>`: the `<t>`'s text after
+ * it is kept). Their events still come, so the container's checks see
+ * them. The tokenizer collects each `<t>`'s text, counting the text before
+ * it against `maxStringLength`. Feed it the events inside the container.
  */
 export class RichText {
   private parts: Array<string> = []
   private length = 0
-  /** Elements open inside the container (skipped ones aside: their end tags don't come). */
+  /** Elements open inside the container: back to 0 when the container's own end tag comes. */
   private depth = 0
 
   open(name: string, element: XmlElement): void {
-    if (name === "rPh") return element.skip()
     this.depth++
-    if (name === "t") element.collect(this.length)
+    if (name === "rPh") element.omitText()
+    else if (name === "t") element.collect(this.length)
   }
 
   /** An end tag inside the container; true for the container's own. */
   close(name: string, text: string | undefined): boolean {
     if (this.depth === 0) return true
     this.depth--
-    // undefined for a <t> inside a <t>: its text is the outer one's
+    // undefined for a <t> inside a <t> (its text is the outer one's) or inside a phonetic run
     if (name === "t" && text !== undefined) {
       this.parts.push(text)
       this.length += text.length
@@ -133,12 +134,11 @@ export class RichText {
     return false
   }
 
-  /** The text so far (unescaped); resets for the next container. */
+  /** The container's text (unescaped), at its end tag; resets for the next container. */
   take(): string {
     const value = Attr.unescapeXstring(this.parts.length === 1 ? this.parts[0]! : this.parts.join(""))
     this.parts = []
     this.length = 0
-    this.depth = 0
     return value
   }
 }
@@ -163,7 +163,6 @@ export const readSharedStrings = (
           return new LimitExceeded({ limit: "maxSharedStrings", max: limits.maxSharedStrings, actual: strings.length + 1 })
         }
         inItem = true
-        rich.take()
       } else if (inItem) rich.open(name, element)
       return undefined
     },

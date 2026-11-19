@@ -319,7 +319,7 @@ describe("xml tokenizer: element text and skipped subtrees", () => {
    */
   const directed = (
     pieces: ReadonlyArray<string>,
-    choose: (name: string) => "skip" | "collect" | number | undefined,
+    choose: (name: string) => "skip" | "collect" | "omit" | number | undefined,
     l: SpreadsheetLimits.Limits = limits
   ) => {
     const events: Array<Directed> = []
@@ -329,6 +329,7 @@ describe("xml tokenizer: element text and skipped subtrees", () => {
         const choice = choose(name)
         if (choice === "skip") element.skip()
         else if (choice === "collect") element.collect()
+        else if (choice === "omit") element.omitText()
         else if (typeof choice === "number") element.collect(choice)
       },
       close: (name, text) => {
@@ -350,7 +351,7 @@ describe("xml tokenizer: element text and skipped subtrees", () => {
     return { events, error }
   }
 
-  const byName = (choices: Record<string, "skip" | "collect" | number>) => (name: string) => choices[name]
+  const byName = (choices: Record<string, "skip" | "collect" | "omit" | number>) => (name: string) => choices[name]
 
   it("a collected element's end tag brings its text: nested elements' and CDATA included, decoded and normalized, however split", () => {
     const doc = `<a><t>x &amp;<b>y</b><![CDATA[<z>]]>\r\nw</t><t/><u>q</u></a>`
@@ -407,6 +408,47 @@ describe("xml tokenizer: element text and skipped subtrees", () => {
     for (let cut = 0; cut <= doc.length; cut++) {
       expect(directed([doc.slice(0, cut), doc.slice(cut)], choose).events, `cut at ${cut}`).toEqual(whole.events)
     }
+  })
+
+  it("an element's text can be left out of collected text, its events still coming", () => {
+    const doc = `<a><t>x<o>y<t>z</t><o>v</o></o>w</t><o><t>q</t></o><t>p</t></a>`
+    const choose = byName({ t: "collect", o: "omit" })
+    const whole = directed([doc], choose)
+    expect(whole.error).toBeUndefined()
+    expect(whole.events).toEqual([
+      ["open", "a"],
+      ["open", "t"],
+      ["text", "x"],
+      ["open", "o"],
+      ["text", "y"],
+      ["open", "t"],
+      ["text", "z"],
+      ["close", "t", undefined],
+      ["open", "o"],
+      ["text", "v"],
+      ["close", "o", undefined],
+      ["close", "o", undefined],
+      ["text", "w"],
+      // the text after it is collected again
+      ["close", "t", "xw"],
+      // a collection asked for inside it doesn't start
+      ["open", "o"],
+      ["open", "t"],
+      ["text", "q"],
+      ["close", "t", undefined],
+      ["close", "o", undefined],
+      // and one after it does
+      ["open", "t"],
+      ["text", "p"],
+      ["close", "t", "p"],
+      ["close", "a", undefined]
+    ])
+    for (let cut = 0; cut <= doc.length; cut++) {
+      expect(directed([doc.slice(0, cut), doc.slice(cut)], choose).events, `cut at ${cut}`).toEqual(whole.events)
+    }
+    // left-out text doesn't count against the limit
+    const small = { ...limits, maxStringLength: 10 }
+    expect(directed([`<a><t>12345<o>${"x".repeat(10)}</o>67890</t></a>`], choose, small).error).toBeUndefined()
   })
 
   it("skipped content is checked as usual: the same input fails the same way", () => {

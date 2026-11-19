@@ -773,6 +773,9 @@ describe("xlsx: hostile and broken files", () => {
       sheets: [{ name: "S", data: `<row><c t="s"><v>0</v></c><c t="str"><f>${long("1")}<x>${long("9")}</x></f><v>${long("2")}<x>${long("8")}</x></v></c></row>` }]
     }, max)
     expect(values(sheets[0]!)).toEqual([[0, false, [[0, "Text", long("a") + "c".repeat(30)], [1, "Text", long("2")]]]])
+    // a phonetic run's text is left out, but an <si> inside it is still one inside the item
+    expect(await errorOf({ sharedStringsXml: `<sst xmlns="x"><si><t>a</t><rPh><si/></rPh></si></sst>`, sheets: [{ name: "S" }] }))
+      .toMatchObject({ _tag: "MalformedFile", reason: "<si> inside an <si>" })
     expect(sheets[0]![0]!.cells[1]!.formula).toBe(long("1"))
   })
 
