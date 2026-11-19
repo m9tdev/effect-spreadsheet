@@ -15,7 +15,8 @@ import { malformedIn, type SheetEntry, sheetVisibility } from "../package.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import type { DefinedNameEntry } from "../workbook.ts"
 import * as Attr from "../xml/attributes.ts"
-import type { XmlElement, XmlHandler } from "../xml/tokenizer.ts"
+import { rulesHandler, type XmlRule } from "../xml/rules.ts"
+import type { XmlElement } from "../xml/tokenizer.ts"
 import type { Archive, LocatedEntry } from "../zip/archive.ts"
 
 export const malformed = malformedIn("xlsx")
@@ -36,7 +37,9 @@ export interface WorkbookPart {
  * Sheet names are decoded, then made unique (`uniqueSheetNames`).
  * A `<sheets>` inside `<sheets>`, or a `<definedName>` inside a defined
  * name, is MalformedFile: it would end the sheet list early, or replace the
- * open name.
+ * open name. The elements are read wherever they sit (a `<sheet>` anywhere
+ * inside a `<sheets>`), as wrappers such as `mc:AlternateContent` may hold
+ * them.
  */
 export const readWorkbookPart = (
   archive: Archive,
@@ -47,20 +50,22 @@ export const readWorkbookPart = (
   const sheets: Array<Omit<SheetEntry, "name"> & { readonly name: string | undefined }> = []
   const definedNames: Array<DefinedNameEntry> = []
   let date1904 = false
-  let inSheets = false
+  // the open defined name: its formula is its text, at its end tag
   let name: { name: string; scope: number | undefined; hidden: boolean } | undefined
-  const handler: XmlHandler = {
-    open: (element, attributes, opened) => {
-      switch (element) {
-        case "workbookPr":
+  const handler = rulesHandler({
+    malformed: (reason) => malformed(reason, entry.name),
+    forbid: {
+      "//sheets//sheets": "<sheets> inside <sheets>",
+      "//definedName//definedName": "<definedName> inside a <definedName>"
+    },
+    on: {
+      "//workbookPr": {
+        open: (attributes) => {
           date1904 = Attr.bool(attributes, "date1904")
-          return
-        case "sheets":
-          if (inSheets) return malformed("<sheets> inside <sheets>", entry.name)
-          inSheets = true
-          return
-        case "sheet": {
-          if (!inSheets) return
+        }
+      },
+      "//sheets//sheet": {
+        open: (attributes) => {
           if (sheets.length >= limits.maxSheets) {
             return new LimitExceeded({ limit: "maxSheets", max: limits.maxSheets, actual: sheets.length + 1 })
           }
@@ -69,10 +74,11 @@ export const readWorkbookPart = (
             visibility: sheetVisibility(Attr.string(attributes, "state")),
             relationshipId: Attr.rel(attributes, "id")
           })
-          return
+          return undefined
         }
-        case "definedName": {
-          if (name !== undefined) return malformed("<definedName> inside a <definedName>", entry.name)
+      },
+      "//definedName": {
+        open: (attributes, element) => {
           if (definedNames.length >= limits.maxDefinedNames) {
             return new LimitExceeded({ limit: "maxDefinedNames", max: limits.maxDefinedNames, actual: definedNames.length + 1 })
           }
@@ -81,20 +87,18 @@ export const readWorkbookPart = (
           const scope = local === "bad" ? undefined : local
           name = { name: Attr.xstring(attributes, "name") ?? "", scope, hidden: Attr.bool(attributes, "hidden") }
           // its text is the formula, nested elements' text included
-          opened.collect()
-          return
+          element.collect()
+          return undefined
+        },
+        close: (text) => {
+          // a guard: every <definedName> that gets here was opened by the rule above
+          if (name === undefined) return
+          definedNames.push({ name: name.name, formula: Attr.unescapeXstring(text ?? ""), hidden: name.hidden, scope: name.scope })
+          name = undefined
         }
       }
-      return undefined
-    },
-    close: (element, text) => {
-      if (element === "sheets") inSheets = false
-      else if (element === "definedName" && name !== undefined) {
-        definedNames.push({ name: name.name, formula: Attr.unescapeXstring(text ?? ""), hidden: name.hidden, scope: name.scope })
-        name = undefined
-      }
     }
-  }
+  })
   return Effect.map(parsePart(archive, entry, handler, limits), () => {
     const names = uniqueSheetNames(sheets.map((s) => s.name))
     return { sheets: sheets.map((s, k) => ({ ...s, name: names[k]! })), definedNames, date1904 }
@@ -102,13 +106,9 @@ export const readWorkbookPart = (
 }
 
 /**
- * Collects rich text the way `<si>` and `<is>` hold it: the text of the
- * `<t>` elements (directly, or inside `<r>` runs), joined; the text of
- * phonetic runs (`<rPh>`) is left out wherever they are, with the `<t>`
- * elements inside them (also a run inside a `<t>`: the `<t>`'s text after
- * it is kept). Their events still come, so the container's checks see
- * them. The tokenizer collects each `<t>`'s text, counting the text before
- * it against `maxStringLength`. Feed it the events inside the container.
+ * Collects rich text from the tokenizer events inside its container, for
+ * the worksheet reader's inline strings (`<is>`); it reads the text as
+ * `RichString` below does. Feed it the events inside the container.
  */
 export class RichText {
   private parts: Array<string> = []
@@ -144,8 +144,46 @@ export class RichText {
 }
 
 /**
- * Reads the shared-string table. An `<si>` inside an `<si>` is
- * MalformedFile: it would replace the open item's text.
+ * The text of a rich string, as `<si>` and `<is>` hold it: the text of
+ * its `<t>` elements (directly, or inside `<r>` runs), joined. The text of
+ * phonetic runs (`<rPh>`) is left out wherever they are, with the `<t>`
+ * elements inside them (also a run inside a `<t>`: the `<t>`'s text after
+ * it is kept); their elements still get the rules, so a forbidden one
+ * inside them fails. The tokenizer collects each `<t>`'s text, counting
+ * the text before it against `maxStringLength`.
+ */
+class RichString {
+  private parts: Array<string> = []
+  private length = 0
+
+  /** The rules for the string's descendants, under the container's path (`//si`). */
+  rules(container: string): Record<string, XmlRule> {
+    return {
+      [`${container}//rPh`]: { open: (_, element) => element.omitText() },
+      [`${container}//t`]: {
+        open: (_, element) => element.collect(this.length),
+        // undefined for a <t> inside a <t> (its text is the outer one's) or inside a phonetic run
+        close: (text) => {
+          if (text === undefined) return
+          this.parts.push(text)
+          this.length += text.length
+        }
+      }
+    }
+  }
+
+  /** The string's text (unescaped), at the container's end tag; resets for the next one. */
+  take(): string {
+    const value = Attr.unescapeXstring(this.parts.length === 1 ? this.parts[0]! : this.parts.join(""))
+    this.parts = []
+    this.length = 0
+    return value
+  }
+}
+
+/**
+ * Reads the shared-string table: each `<si>`, wherever it sits. An `<si>`
+ * inside an `<si>` is MalformedFile: it would replace the open item's text.
  */
 export const readSharedStrings = (
   archive: Archive,
@@ -153,31 +191,33 @@ export const readSharedStrings = (
   limits: Limits
 ): Effect.Effect<ReadonlyArray<string>, SpreadsheetError> => {
   const strings: Array<string> = []
-  const rich = new RichText()
-  let inItem = false
-  const handler: XmlHandler = {
-    open: (name, _, element) => {
-      if (name === "si") {
-        if (inItem) return malformed("<si> inside an <si>", entry.name)
-        if (strings.length >= limits.maxSharedStrings) {
-          return new LimitExceeded({ limit: "maxSharedStrings", max: limits.maxSharedStrings, actual: strings.length + 1 })
+  const item = new RichString()
+  const handler = rulesHandler({
+    malformed: (reason) => malformed(reason, entry.name),
+    forbid: { "//si//si": "<si> inside an <si>" },
+    on: {
+      "//si": {
+        open: () => {
+          if (strings.length >= limits.maxSharedStrings) {
+            return new LimitExceeded({ limit: "maxSharedStrings", max: limits.maxSharedStrings, actual: strings.length + 1 })
+          }
+          return undefined
+        },
+        close: () => {
+          strings.push(item.take())
         }
-        inItem = true
-      } else if (inItem) rich.open(name, element)
-      return undefined
-    },
-    close: (name, text) => {
-      // the item's own end tag (an <si> inside it fails at its start tag)
-      if (inItem && rich.close(name, text)) {
-        strings.push(rich.take())
-        inItem = false
-      }
+      },
+      ...item.rules("//si")
     }
-  }
+  })
   return Effect.as(parsePart(archive, entry, handler, limits), strings)
 }
 
-/** Reads the number formats and the cell styles that use them (`<c s="...">` is an index into `cellXfs`). */
+/**
+ * Reads the number formats and the cell styles that use them (`<c s="...">`
+ * is an index into `cellXfs`): each `<numFmt>` anywhere inside a
+ * `<numFmts>`, each `<xf>` anywhere inside a `<cellXfs>`.
+ */
 export const readStyles = (
   archive: Archive,
   entry: LocatedEntry,
@@ -188,32 +228,28 @@ export const readStyles = (
   // maxStringLength characters
   const custom = new Map<number, NumberFormat>()
   const xfIds: Array<number> = []
-  let inCellXfs = false
-  // custom codes only from <numFmts>: <dxfs><dxf><numFmt> (conditional
-  // formats) may reuse an id with another code
-  let inNumFmts = false
-  const handler: XmlHandler = {
-    open: (name, attributes) => {
-      if (name === "numFmts") inNumFmts = true
-      else if (name === "numFmt" && inNumFmts) {
-        // one without a valid id or a code is skipped
-        const id = Attr.uint(attributes, "numFmtId", NINE_DIGITS)
-        const code = Attr.string(attributes, "formatCode")
-        if (typeof id === "number" && code !== undefined) {
+  const handler = rulesHandler({
+    malformed: (reason) => malformed(reason, entry.name),
+    on: {
+      // custom codes only from <numFmts>: <dxfs><dxf><numFmt> (conditional
+      // formats) may reuse an id with another code
+      "//numFmts//numFmt": {
+        open: (attributes) => {
+          // one without a valid id or a code is skipped
+          const id = Attr.uint(attributes, "numFmtId", NINE_DIGITS)
+          const code = Attr.string(attributes, "formatCode")
           // a later <numFmt> with the same id wins
-          addFormat(custom, id, code)
+          if (typeof id === "number" && code !== undefined) addFormat(custom, id, code)
         }
-      } else if (name === "cellXfs") inCellXfs = true
-      else if (name === "xf" && inCellXfs) {
-        // a missing or bad id is General (0)
-        const id = Attr.uint(attributes, "numFmtId", NINE_DIGITS)
-        xfIds.push(typeof id === "number" ? id : 0)
+      },
+      "//cellXfs//xf": {
+        open: (attributes) => {
+          // a missing or bad id is General (0)
+          const id = Attr.uint(attributes, "numFmtId", NINE_DIGITS)
+          xfIds.push(typeof id === "number" ? id : 0)
+        }
       }
-    },
-    close: (name) => {
-      if (name === "cellXfs") inCellXfs = false
-      else if (name === "numFmts") inNumFmts = false
     }
-  }
+  })
   return Effect.map(parsePart(archive, entry, handler, limits), () => cellStyles(xfIds, xfIds.length, custom))
 }
