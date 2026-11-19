@@ -471,6 +471,53 @@ describe("xlsx: an element nested in one of its own kind", () => {
   })
 })
 
+describe("xlsx: where the workbook, shared-strings and styles elements are read", () => {
+  const cells = `<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" s="0"><v>45000</v></c><c r="D1" s="1"><v>45000</v></c><c r="E1" s="2"><v>45000</v></c></row>`
+  it("under any wrapper: sheets, defined names, shared strings, number formats and cell styles", async () => {
+    const wrap = (s: string) => `<mc:AlternateContent xmlns:mc="m"><mc:Choice>${s}</mc:Choice></mc:AlternateContent>`
+    const { wb, sheets } = await readOk({
+      sheets: [{ name: "A", data: cells }, { name: "B" }],
+      workbookXml: `${wrap(`<workbookPr date1904="1"/>`)}<sheets>${wrap(`<sheet name="A" r:id="rId1"/>`)}<sheet name="B" r:id="rId2"/></sheets>` +
+        wrap(`<definedNames>${wrap(`<definedName name="N">S!A1</definedName>`)}</definedNames>`),
+      sharedStringsXml: `<sst xmlns="x">${wrap(`<si><r><t>o</t></r>${wrap(`<t>ne</t>`)}</si>`)}<si><t>two</t></si></sst>`,
+      xfs: [],
+      stylesExtra: `<numFmts>${wrap(`<numFmt numFmtId="200" formatCode="0.0"/>`)}</numFmts><cellXfs>${wrap(`<xf numFmtId="200"/>`)}<xf numFmtId="14"/></cellXfs>`
+    })
+    expect(wb.sheets.map((s) => s.name)).toEqual(["A", "B"])
+    expect(wb.definedNames).toEqual([expect.objectContaining({ name: "N", formula: "S!A1" })])
+    const row = sheets[0]![0]!.cells
+    expect(row.slice(0, 2).map(Cell.value)).toEqual(["one", "two"])
+    // xf 0 has the custom format; xf 1 a date in the 1904 system; xf 2 is past the styles
+    expect(row.slice(2).map((c) => [c._tag, c.numFmt])).toEqual([["Number", "0.0"], ["Date", "mm-dd-yy"], ["Number", undefined]])
+    expect((Cell.value(row[3]!) as Date).toISOString()).toBe("2027-03-16T00:00:00.000Z")
+  })
+
+  it("only inside their lists: a <sheet>, <numFmt> or <xf> elsewhere is ignored", async () => {
+    const { wb, sheets } = await readOk({
+      sheets: [{ name: "A", data: cells }, { name: "B" }],
+      workbookXml: `<sheet name="X" r:id="rId2"/><sheets><sheet name="A" r:id="rId1"/><sheet name="B" r:id="rId2"/></sheets><x><sheet name="Y" r:id="rId2"/></x>`,
+      sharedStrings: ["x", "y"],
+      xfs: [],
+      stylesExtra: `<numFmt numFmtId="200" formatCode="0.0"/><dxfs><dxf><numFmt numFmtId="201" formatCode="0.00"/></dxf></dxfs><xf numFmtId="14"/>` +
+        `<cellStyleXfs><xf numFmtId="14"/></cellStyleXfs><cellXfs><xf numFmtId="200"/><xf numFmtId="201"/></cellXfs>`
+    })
+    expect(wb.sheets.map((s) => s.name)).toEqual(["A", "B"])
+    // 200 and 201 are not number formats of the workbook: no format
+    expect(sheets[0]![0]!.cells.slice(2).map((c) => [c._tag, c.numFmt])).toEqual([["Number", undefined], ["Number", undefined], ["Number", undefined]])
+  })
+
+  it("a list nested in a list of its own kind: the entries after it in the outer list are read too", async () => {
+    const { sheets } = await readOk({
+      sheets: [{ name: "S", data: cells }],
+      sharedStrings: ["x", "y"],
+      xfs: [],
+      stylesExtra: `<numFmts><numFmts><numFmt numFmtId="200" formatCode="0.0"/></numFmts><numFmt numFmtId="201" formatCode="yyyy-mm-dd"/></numFmts>` +
+        `<cellXfs><cellXfs><xf numFmtId="200"/></cellXfs><xf numFmtId="201"/><xf numFmtId="14"/></cellXfs>`
+    })
+    expect(sheets[0]![0]!.cells.slice(2).map((c) => [c._tag, c.numFmt])).toEqual([["Number", "0.0"], ["Date", "yyyy-mm-dd"], ["Date", "mm-dd-yy"]])
+  })
+})
+
 describe("xlsx: rows completed before an error", () => {
   const sheet = (data: string): TestWorkbook => ({ sheets: [{ name: "S", data }] })
   /** The rows a consumer sees before the stream ends or fails, and the error. */
