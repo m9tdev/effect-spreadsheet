@@ -4,7 +4,7 @@ import * as Result from "effect/Result"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { open } from "../src/internal/zip/archive.ts"
-import { parse, XmlDecoder } from "../src/internal/xml/parse.ts"
+import { parse, xmlText } from "../src/internal/xml/parse.ts"
 import { isName, type XmlHandler, XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
 import { isSpreadsheetError, MalformedFile, type SpreadsheetError } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
@@ -592,9 +592,9 @@ describe("xml bytes", () => {
       const { exit } = await run(chunks)
       expect(failureOf(exit)).toMatchObject({ _tag: "MalformedFile", part: "part.xml" })
     }
-    const decoder = new XmlDecoder()
-    expect(decoder.push(new Uint8Array([0x3C]))).toBe("")
-    expect(decoder.end()).toBe("<")
+    const decoder = xmlText(undefined)
+    expect(decoder.push(new Uint8Array([0x3C]))).toEqual(Result.succeed(""))
+    expect(decoder.end()).toEqual(Result.succeed("<"))
   })
 
   it("parses every XML part of the committed corpus workbooks, hidden-row fixtures included, in linear work", async () => {
@@ -621,15 +621,15 @@ describe("xml bytes", () => {
 
 describe("xml decoder: encoding sniff", () => {
   const decodeAll = (pieces: ReadonlyArray<ReadonlyArray<number>>): string | SpreadsheetError => {
-    const decoder = new XmlDecoder("part.xml")
+    const decoder = xmlText("part.xml")
     let text = ""
     for (const piece of pieces) {
       const out = decoder.push(new Uint8Array(piece))
-      if (typeof out !== "string") return out
-      text += out
+      if (Result.isFailure(out)) return out.failure
+      text += out.success
     }
     const rest = decoder.end()
-    return typeof rest === "string" ? text + rest : rest
+    return Result.isSuccess(rest) ? text + rest.success : rest.failure
   }
   const utf16 = (s: string, littleEndian: boolean): Array<number> =>
     [...s].flatMap((ch) => {
@@ -668,10 +668,10 @@ describe("xml decoder: encoding sniff", () => {
   })
 
   it("held bytes are not decoded until the encoding is known", () => {
-    const decoder = new XmlDecoder()
-    expect(decoder.push(new Uint8Array([0x3C]))).toBe("")
-    expect(decoder.push(new Uint8Array([0x61]))).toBe("<a")
-    expect(decoder.push(new Uint8Array([0x3E]))).toBe(">")
-    expect(decoder.end()).toBe("")
+    const decoder = xmlText(undefined)
+    expect(decoder.push(new Uint8Array([0x3C]))).toEqual(Result.succeed(""))
+    expect(decoder.push(new Uint8Array([0x61]))).toEqual(Result.succeed("<a"))
+    expect(decoder.push(new Uint8Array([0x3E]))).toEqual(Result.succeed(">"))
+    expect(decoder.end()).toEqual(Result.succeed(""))
   })
 })

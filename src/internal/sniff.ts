@@ -6,7 +6,7 @@
  * @internal
  */
 import type { UnreadableFormat } from "../Workbook.ts"
-import { detectEncoding } from "./csv/decode.ts"
+import { detectEncoding } from "./text.ts"
 
 const TEXT_PREFIX_BYTES = 8 * 1024
 
