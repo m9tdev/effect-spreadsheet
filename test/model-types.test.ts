@@ -90,6 +90,16 @@ describe("dual-input readers", () => {
     assert.isTrue(Effect.isEffect(fromArray))
   })
 
+  it.effect("toRecords reads an iterable when the Effect runs, each time it runs", () =>
+    Effect.gen(function*() {
+      const rows: Array<Workbook.Row> = []
+      const records = Spreadsheet.toRecords(rows, { header: ["a"] })
+      rows.push({ index: 0, hidden: false, cells: [{ _tag: "Text", column: 0, value: "x" }] })
+      assert.deepStrictEqual(yield* records, [{ a: "x" }])
+      rows.push({ index: 1, hidden: false, cells: [{ _tag: "Number", column: 0, value: 2 }] })
+      assert.deepStrictEqual(yield* records, [{ a: "x" }, { a: 2 }])
+    }))
+
   it("Csv.rows keeps a byte stream's error and context", () => {
     const fromBytes = Csv.rows(new Uint8Array())
     expectTypeOf(fromBytes).toEqualTypeOf<Stream.Stream<Workbook.Row, SpreadsheetError.SpreadsheetError>>()
