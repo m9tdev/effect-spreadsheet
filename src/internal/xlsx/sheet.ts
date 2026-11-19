@@ -12,9 +12,11 @@
  *   previous row's, or a cell whose reference names another row than its
  *   own, is MalformedFile. Rows are streamed, so a row already emitted
  *   can't be merged with a later one.
- * - A `<row>` inside a row, or a `<sheetData>` inside the sheet data, is
- *   MalformedFile: it can't be read without dropping the open row's cells
- *   or the rows after it.
+ * - Rows and cells are found by the worksheet rules table (`sheetRules`),
+ *   which `sheetDetails` shares: a `<row>` anywhere in the sheet data, a
+ *   `<c>` anywhere in a row. A `<row>` inside a row, or a `<sheetData>`
+ *   inside the sheet data, is MalformedFile: it can't be read without
+ *   dropping the open row's cells or the rows after it.
  * - Cells: `<c r>` gives the column, else the previous cell's + 1. A row
  *   whose cells are out of order is sorted, keeping the last of duplicates.
  *   An unsorted row is compacted that way as soon as it holds more than
@@ -48,8 +50,10 @@ import { parseCellRef } from "../refs.ts"
 import { RowBuilder } from "../sheet/rows.ts"
 import { xmlDecoder } from "../xml/parse.ts"
 import * as Attr from "../xml/attributes.ts"
-import type { XmlAttributes, XmlElement, XmlHandler } from "../xml/tokenizer.ts"
-import { malformed, NINE_DIGITS, RichText } from "./parts.ts"
+import { type Opened, rulesHandler } from "../xml/rules.ts"
+import type { XmlAttributes, XmlHandler } from "../xml/tokenizer.ts"
+import { malformed, NINE_DIGITS, RichString } from "./parts.ts"
+import { sheetRules } from "./sheetRules.ts"
 
 export interface SheetContext {
   readonly part: string
@@ -77,18 +81,7 @@ interface PendingCell {
   formula: string | undefined
   /** The first `<is>`'s text, unescaped. Used only by an inline string (or a cell without `t` and `<v>`). */
   inlineValue: string | undefined
-  /** The direct child that is open, which says what its end tag completes. */
-  child: CellChild
 }
-
-/**
- * Which direct child of a cell is open: none (between its children), its
- * first `<v>` (its text is the value), its first `<f>` (the formula), or its
- * first `<is>` (the inline string). The other children (a repeated
- * `<v>`/`<f>`/`<is>`, an `<extLst>`) are skipped, and so is everything
- * nested in a `<v>` or `<f>`: only their direct text counts.
- */
-type CellChild = "none" | "value" | "formula" | "inline"
 
 /**
  * Where a row or cell sits, for errors: a cell's `r` text, if it has one.
@@ -109,17 +102,18 @@ export class SheetRows implements XmlHandler {
     return this.rows.take()
   }
 
-  private inSheetData = false
-
   /**
-   * The open cell, if any (only inside a row). Only its direct children
-   * give its value, and only its own end tag closes it: the elements it
-   * doesn't read are skipped whole, whatever their names.
+   * The open cell, if any. Only its first direct `<v>`, `<f>` and `<is>`
+   * children give its value: the rules table skips the rest of it, and a
+   * repeated one is skipped here.
    */
   private cell: PendingCell | undefined
-  private readonly rich = new RichText()
+  private readonly rich = new RichString()
 
   private readonly context: SheetContext
+
+  readonly open: XmlHandler["open"]
+  readonly close: XmlHandler["close"]
 
   constructor(context: SheetContext) {
     this.context = context
@@ -129,80 +123,47 @@ export class SheetRows implements XmlHandler {
       malformed: (reason) => malformed(reason, part),
       cellInOtherRow: (row, ref) => malformed(`cell ${JSON.stringify((ref ?? "").slice(0, 20))} in row ${row + 1}`, part)
     })
-  }
-
-  open = (name: string, attributes: XmlAttributes, element: XmlElement): SpreadsheetError | undefined => {
-    const cell = this.cell
-    if (cell !== undefined) {
-      if (cell.child === "inline") this.rich.open(name, element)
-      // a direct child (between children, no child is open), or an element
-      // nested in a <v> or <f>, which is skipped
-      else if (cell.child === "none") this.openChild(cell, name, element)
-      else element.skip()
-      return undefined
-    }
-    if (name === "sheetData") {
-      // a nested one would end the sheet data at its end tag, hiding the rows after it
-      if (this.inSheetData) return malformed("<sheetData> inside a <sheetData>", this.context.part)
-      this.inSheetData = true
-      return undefined
-    }
-    if (!this.inSheetData) return undefined
-    if (name === "row") {
-      // a nested one would replace the open row, dropping its cells
-      if (this.rows.inRow) return malformed("<row> inside a <row>", this.context.part)
-      return this.openRow(attributes)
-    }
-    if (name === "c") {
-      const start = this.rows.beginCell(undefined)
-      if (start !== "read") return start === "skip" ? undefined : start
-      return this.openCell(attributes)
-    }
-    return undefined
-  }
-
-  close = (name: string, text: string | undefined): SpreadsheetError | undefined => {
-    const cell = this.cell
-    if (cell !== undefined) {
-      // the end of a direct child (the others are skipped), or of the cell
-      switch (cell.child) {
-        case "none":
-          return this.closeCell(cell)
-        case "value":
-          cell.value = text ?? ""
-          break
-        case "formula":
-          cell.formula = text ?? ""
-          break
-        case "inline":
-          // an end tag inside the <is>, or its own
-          if (!this.rich.close(name, text)) return undefined
-          cell.inlineValue = this.rich.take()
-          break
-      }
-      cell.child = "none"
-      return undefined
-    }
-    if (name === "row" && this.rows.inRow) return this.rows.closeRow()
-    if (name === "sheetData") this.inSheetData = false
-    return undefined
-  }
-
-  /**
-   * A direct child element of the cell. Only the first `<v>`, `<f>` and
-   * `<is>` count; the tokenizer collects the text of a `<v>` or `<f>`. A
-   * repeated one is skipped, not appended, like any other child.
-   */
-  private openChild(cell: PendingCell, name: string, element: XmlElement): void {
-    if (name === "v" && cell.value === undefined) {
-      cell.child = "value"
-      element.collect()
-    } else if (name === "f" && cell.formula === undefined) {
-      cell.child = "formula"
-      element.collect()
-    } else if (name === "is" && cell.inlineValue === undefined) {
-      cell.child = "inline"
-    } else element.skip()
+    const handler = rulesHandler(sheetRules(part, {
+      row: {
+        open: (attributes) => this.openRow(attributes),
+        close: () => this.rows.closeRow()
+      },
+      cell: {
+        open: (attributes) => this.openCell(attributes),
+        close: () => this.closeCell()
+      },
+      value: {
+        open: (_, element) => {
+          if (this.cell?.value !== undefined) return "skip"
+          element.collect()
+          return undefined
+        },
+        close: (text) => {
+          if (this.cell !== undefined) this.cell.value = text ?? ""
+        }
+      },
+      formula: {
+        open: (_, element) => {
+          if (this.cell?.formula !== undefined) return "skip"
+          element.collect()
+          return undefined
+        },
+        close: (text) => {
+          if (this.cell !== undefined) this.cell.formula = text ?? ""
+        }
+      },
+      inline: {
+        open: () => (this.cell?.inlineValue !== undefined ? "skip" : undefined),
+        close: () => {
+          const value = this.rich.take()
+          if (this.cell !== undefined) this.cell.inlineValue = value
+        }
+      },
+      inlinePhonetic: this.rich.phonetic,
+      inlineText: this.rich.text
+    }))
+    this.open = handler.open
+    this.close = handler.close
   }
 
   /** A `<row>`: its `r` gives the index; without one, its first cell or the previous row decides. */
@@ -222,8 +183,11 @@ export class SheetRows implements XmlHandler {
   }
 
   /** A `<c>` in a row: its `r` gives the column (and the row), else the previous cell's column + 1. */
-  private openCell(attributes: XmlAttributes): SpreadsheetError | undefined {
+  private openCell(attributes: XmlAttributes): Opened {
     const rows = this.rows
+    // the table matches cells only inside a row, so one is open: "read"
+    const start = rows.beginCell(undefined)
+    if (start !== "read") return start
     let column = rows.nextColumn
     let row: number | undefined
     const r = Attr.string(attributes, "r")
@@ -245,13 +209,14 @@ export class SheetRows implements XmlHandler {
       style: style === "bad" ? undefined : style,
       value: undefined,
       formula: undefined,
-      inlineValue: undefined,
-      child: "none"
+      inlineValue: undefined
     }
     return undefined
   }
 
-  private closeCell(pending: PendingCell): SpreadsheetError | undefined {
+  private closeCell(): SpreadsheetError | undefined {
+    const pending = this.cell
+    if (pending === undefined) return undefined
     this.cell = undefined
     const cell = this.toCell(pending)
     if (cell instanceof MalformedFile) return cell

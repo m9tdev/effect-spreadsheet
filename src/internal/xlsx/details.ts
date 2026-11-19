@@ -4,6 +4,11 @@
  * declared dimension. Cell data is tokenized but not collected, so the cost
  * is linear in the part's bytes and the memory in the spans and merges.
  *
+ * The part is read through the rows reader's rules table (`sheetRules`),
+ * so the layout elements are those outside the sheet data, and a nesting
+ * the rows reader rejects (a `<row>` inside a row, a `<sheetData>` inside
+ * the sheet data) is MalformedFile here too.
+ *
  * The layout is collected by the shared `LayoutBuilder`, which holds its
  * limits: `<col>` elements count against `maxColumns` (a sheet has at most
  * that many columns to describe), merges against `maxCellsPerSheet`.
@@ -18,8 +23,9 @@ import { parseRange } from "../refs.ts"
 import { LayoutBuilder } from "../sheet/layout.ts"
 import { parse } from "../xml/parse.ts"
 import * as Attr from "../xml/attributes.ts"
-import type { XmlHandler } from "../xml/tokenizer.ts"
+import { rulesHandler } from "../xml/rules.ts"
 import { malformed, NINE_DIGITS } from "./parts.ts"
+import { sheetRules } from "./sheetRules.ts"
 
 export const sheetDetails = (
   bytes: Stream.Stream<Uint8Array, SpreadsheetError>,
@@ -28,28 +34,19 @@ export const sheetDetails = (
 ): Effect.Effect<SheetDetails, SpreadsheetError> =>
   Effect.suspend(() => {
     const layout = new LayoutBuilder(limits)
-    let inSheetData = false
-    let inRow = false
-    const handler: XmlHandler = {
-      open: (name, attributes, element) => {
-        if (name === "sheetData") {
-          // a nested one would end the sheet data at its end tag, reading what follows as layout
-          if (inSheetData) return malformed("<sheetData> inside a <sheetData>", part)
-          inSheetData = true
-          return undefined
-        }
-        if (inSheetData) {
-          if (name === "row") inRow = true
-          // as in the rows reader, a cell's content is skipped whatever its
-          // names, and only the cell's own end tag closes it
-          else if (name === "c" && inRow) element.skip()
-          return undefined
-        }
-        if (name === "dimension") {
+    // the rows reader's table, so a part the rows fail on as malformed fails here too
+    const handler = rulesHandler(sheetRules(part, {
+      // cell data isn't layout
+      cell: { open: () => "skip" },
+      dimension: {
+        open: (attributes) => {
           const ref = Attr.string(attributes, "ref")
           const range = ref === undefined ? undefined : parseRange(ref)
           if (range !== undefined) layout.dimension(range)
-        } else if (name === "col") {
+        }
+      },
+      col: {
+        open: (attributes) => {
           const counted = layout.columnRecord()
           if (counted !== undefined) return counted
           if (!Attr.bool(attributes, "hidden")) return undefined
@@ -59,19 +56,17 @@ export const sheetDetails = (
           if (typeof min !== "number" || typeof max !== "number" || min === 0) return malformed("bad <col> range", part)
           // a reversed span hides nothing; the part at or past maxColumns is dropped
           layout.hideColumns(min - 1, max - 1)
-        } else if (name === "mergeCell") {
+          return undefined
+        }
+      },
+      mergeCell: {
+        open: (attributes) => {
           const ref = Attr.string(attributes, "ref")
           const range = ref === undefined ? undefined : parseRange(ref)
           if (range === undefined) return malformed(`bad merge range ${JSON.stringify((ref ?? "").slice(0, 40))}`, part)
           return layout.merge(range)
         }
-        return undefined
-      },
-      close: (name) => {
-        if (name === "row") inRow = false
-        else if (name === "sheetData") inSheetData = false
-        return undefined
       }
-    }
+    }))
     return Effect.map(parse(bytes, handler, limits, part), () => layout.result())
   })
