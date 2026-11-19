@@ -7,9 +7,12 @@
  *
  * - Every sector number is checked against the file before use (a partial
  *   last sector is read as far as it goes).
- * - Every chain (DIFAT, FAT, miniFAT, directory, stream) is cycle-checked
- *   and bounded: by `maxSectorChain`, by the sectors the file has, and for
- *   streams by the sectors their size needs (a walk stops there).
+ * - Every chain (DIFAT, FAT, miniFAT, directory, stream) is walked by one
+ *   walker (`walk`): cycle-checked and bounded by `maxSectorChain`, by the
+ *   sectors the file has, and for streams by the sectors their size needs
+ *   (a walk stops there).
+ * - Each sector has at most one owner (the container's own structures, or
+ *   one stream): streams that share sectors are a `MalformedFile`.
  * - The directory tree is walked once per entry (entries visited twice are
  *   a `MalformedFile`); entry names and sizes are checked.
  *
@@ -38,6 +41,15 @@ const MINI_CUTOFF = 4096
 
 export type CfbEntryType = "root" | "storage" | "stream"
 
+/**
+ * A stream's size: its byte count, or `Invalid` when the directory gives a
+ * size larger than the file. An entry with an invalid size opens; reading
+ * its stream fails.
+ */
+export type CfbSize =
+  | { readonly _tag: "Valid"; readonly bytes: number }
+  | { readonly _tag: "Invalid" }
+
 export interface CfbEntry {
   /** Index in the directory. */
   readonly id: number
@@ -45,7 +57,8 @@ export interface CfbEntry {
   /** Path from the root, `/`-separated (e.g. `Workbook`, `_VBA_PROJECT_CUR/VBA/dir`). */
   readonly path: string
   readonly type: CfbEntryType
-  readonly size: number
+  /** The stream's size (0 for a storage). */
+  readonly size: CfbSize
   readonly start: number
 }
 
@@ -58,7 +71,11 @@ export interface Cfb {
    * same path, the one with the lower directory id wins.
    */
   readonly find: (path: string) => CfbEntry | undefined
-  /** A stream's bytes (copied out of its sectors). */
+  /**
+   * A stream's bytes: a view of the file when the stream is in consecutive
+   * sectors of it, else a copy gathered from its sectors (mini streams are
+   * always copies).
+   */
   readonly read: (entry: CfbEntry) => Result.Result<Uint8Array, CfbError>
 }
 
@@ -72,83 +89,169 @@ const malformed = (reason: string, offset?: number) =>
 const fail = (reason: string, offset?: number) => Result.fail(malformed(reason, offset))
 
 /**
- * Walks a sector chain with a table (`FAT` or miniFAT).
- *
- * Progress: each step moves to a sector not visited in this walk (checked
- * with a stamp per walk), so a walk ends after at most `table.length`
- * steps; it also ends at `maxSteps` (the sectors the caller needs, or
- * `maxSectorChain`). The sectors each walk visits go to the work meter.
+ * Who holds a sector: the container's own structures (the FAT and DIFAT
+ * sectors, the directory, the miniFAT), or the stream of a directory entry
+ * (the root entry's stream is the mini stream).
  */
-class Chains {
-  /**
-   * Who owns each sector: 0 none, `id + 1` for directory entry `id`, a
-   * negative value for the container's own structures. A sector may be
-   * claimed once: two streams sharing sectors would let reading every
-   * stream copy the same data again and again.
-   */
-  private readonly owners: Int32Array
-  private readonly stamps: Uint32Array
-  private stamp = 0
-  private readonly table: Uint32Array
-  private readonly limitSectors: number
-  private readonly maxChain: number
-  private readonly what: string
-  private readonly meter: Meter
+type Owner =
+  | { readonly _tag: "Fat" }
+  | { readonly _tag: "Directory" }
+  | { readonly _tag: "MiniFat" }
+  | { readonly _tag: "Stream"; readonly id: number }
 
-  constructor(table: Uint32Array, limitSectors: number, maxChain: number, what: string, meter: Meter) {
-    this.table = table
-    this.stamps = new Uint32Array(table.length)
-    this.owners = new Int32Array(table.length)
-    this.limitSectors = limitSectors
-    this.maxChain = maxChain
-    this.what = what
-    this.meter = meter
-  }
+const FAT_OWNER: Owner = { _tag: "Fat" }
+const DIRECTORY_OWNER: Owner = { _tag: "Directory" }
+const MINIFAT_OWNER: Owner = { _tag: "MiniFat" }
+const streamOwner = (id: number): Owner => ({ _tag: "Stream", id })
 
-  /** Marks a sector as the container's own (FAT, DIFAT). */
-  reserve(sector: number, owner: number): void {
-    if (sector < this.owners.length) this.owners[sector] = owner
-  }
-
-  /**
-   * Up to `count` sectors of the chain from `start` (all of them when
-   * `count` is undefined), claimed for `owner`: a sector another owner has
-   * claimed is a `MalformedFile` (the same owner may walk it again).
-   */
-  walk(start: number, count: number | undefined, owner: number): Result.Result<Array<number>, CfbError> {
-    const out: Array<number> = []
-    if (count === 0) return Result.succeed(out)
-    const result = this.follow(start, count, owner, out)
-    this.meter.add("sectors", out.length)
-    return result
-  }
-
-  /** `walk`'s loop: collects the chain's sectors in `out`. */
-  private follow(start: number, count: number | undefined, owner: number, out: Array<number>): Result.Result<Array<number>, CfbError> {
-    this.stamp++
-    let sector = start
-    // progress: every step adds one new (unvisited) sector, see the class doc
-    while (sector !== ENDOFCHAIN) {
-      if (sector > MAXREGSECT || sector >= this.limitSectors || sector >= this.table.length) {
-        return fail(`${this.what} chain points at sector ${sector}`)
-      }
-      if (this.stamps[sector] === this.stamp) return fail(`${this.what} chain has a cycle at sector ${sector}`)
-      if (out.length >= this.maxChain) {
-        return Result.fail(new LimitExceeded({ limit: "maxSectorChain", max: this.maxChain, actual: out.length + 1 }))
-      }
-      const holder = this.owners[sector]!
-      if (holder !== 0 && holder !== owner) return fail(`sector ${sector} of the ${this.what} belongs to two streams`)
-      this.owners[sector] = owner
-      this.stamps[sector] = this.stamp
-      out.push(sector)
-      if (count !== undefined && out.length === count) return Result.succeed(out)
-      sector = this.table[sector]!
-    }
-    return Result.succeed(out)
+/** An owner as one number, for the owner table: distinct per owner, never 0. */
+const ownerKey = (owner: Owner): number => {
+  switch (owner._tag) {
+    case "Fat":
+      return -1
+    case "Directory":
+      return -2
+    case "MiniFat":
+      return -3
+    case "Stream":
+      return owner.id + 1
   }
 }
 
-const utf16 = new TextDecoder("utf-16le")
+/**
+ * The sectors one table numbers (the file's, or the mini stream's): which
+ * ones the current walk has visited (a stamp per walk), and who owns each.
+ */
+class Sectors {
+  private readonly stamps: Uint32Array
+  private stamp = 0
+  /**
+   * Each sector's owner, by `ownerKey` (0: none). A sector may be claimed by
+   * one owner: two streams sharing sectors would let reading every stream
+   * copy the same data again and again.
+   */
+  private readonly owners: Int32Array
+
+  constructor(length: number) {
+    this.stamps = new Uint32Array(length)
+    this.owners = new Int32Array(length)
+  }
+
+  /** Starts a walk: no sector is visited yet. */
+  begin(): void {
+    this.stamp++
+  }
+
+  /** Marks `sector` visited in this walk; false if it already was. */
+  visit(sector: number): boolean {
+    if (this.stamps[sector] === this.stamp) return false
+    this.stamps[sector] = this.stamp
+    return true
+  }
+
+  /** Marks a sector as `owner`'s without a check (the FAT and DIFAT sectors, listed by the header). */
+  reserve(sector: number, owner: Owner): void {
+    if (sector < this.owners.length) this.owners[sector] = ownerKey(owner)
+  }
+
+  /** Claims `sector` for the owner with `key`; false if another owner holds it (the same owner may claim it again). */
+  claim(sector: number, key: number): boolean {
+    const holder = this.owners[sector]!
+    if (holder !== 0 && holder !== key) return false
+    this.owners[sector] = key
+    return true
+  }
+}
+
+/**
+ * How a chain goes on: a table (the FAT or the miniFAT) that gives the
+ * sector after each sector, or a function (the DIFAT's: the last word of a
+ * DIFAT sector). `ENDOFCHAIN` ends it.
+ */
+type Next = Uint32Array | ((sector: number) => number)
+
+interface WalkOptions {
+  /** The chain's table, for messages: `FAT`, `miniFAT` or `DIFAT`. */
+  readonly what: string
+  /** Sector numbers from this one on are outside (the file, the mini stream, the table). */
+  readonly limitSectors: number
+  /** `maxSectorChain`. */
+  readonly max: number
+  /** Stop after this many sectors (the ones a stream's size needs); all of them when undefined. */
+  readonly count?: number | undefined
+  /** The chain length the header declares: a longer chain is a `MalformedFile`. */
+  readonly declared?: number | undefined
+  /** Who the walked sectors are claimed for (none: not claimed). */
+  readonly owner?: Owner | undefined
+  readonly sectors: Sectors
+  /** The sectors walked go to it. */
+  readonly meter: Meter
+}
+
+/**
+ * The sectors of the chain from `start`, each after the one before by `next`.
+ *
+ * Progress: each step moves to a sector not visited in this walk (checked
+ * with a stamp per walk), so a walk ends after at most `limitSectors` steps;
+ * it also ends at `max` (and at `count`, `declared`).
+ */
+const walk = (start: number, next: Next, o: WalkOptions): Result.Result<Array<number>, CfbError> => {
+  const out: Array<number> = []
+  if (o.count === 0) return Result.succeed(out)
+  const result = follow(start, next, o, out)
+  o.meter.add("sectors", out.length)
+  return result
+}
+
+/** `walk`'s loop: collects the chain's sectors in `out`. */
+const follow = (start: number, next: Next, o: WalkOptions, out: Array<number>): Result.Result<Array<number>, CfbError> => {
+  // the options as locals: the loop runs once per sector
+  const { what, sectors, limitSectors, max } = o
+  const declared = o.declared ?? Infinity
+  const count = o.count ?? Infinity
+  const owner = o.owner === undefined ? 0 : ownerKey(o.owner)
+  sectors.begin()
+  let sector = start
+  // progress: every step adds one new (unvisited) sector, see `walk`
+  while (sector !== ENDOFCHAIN) {
+    if (sector > MAXREGSECT || sector >= limitSectors) return fail(`${what} chain points at sector ${sector}`)
+    if (!sectors.visit(sector)) return fail(`${what} chain has a cycle at sector ${sector}`)
+    if (out.length >= declared) return fail(`${what} chain is longer than the header says`)
+    if (out.length >= max) return Result.fail(new LimitExceeded({ limit: "maxSectorChain", max, actual: out.length + 1 }))
+    if (owner !== 0 && !sectors.claim(sector, owner)) return fail(`sector ${sector} of the ${what} belongs to two streams`)
+    out.push(sector)
+    if (out.length === count) return Result.succeed(out)
+    // a table is read here, not through a function call: this runs once per sector
+    sector = typeof next === "function" ? next(sector) : next[sector]!
+  }
+  return Result.succeed(out)
+}
+
+/**
+ * Where a stream's sectors are and how its chain goes: the file's sectors
+ * with the FAT, or the mini stream's mini sectors with the miniFAT.
+ */
+interface Medium {
+  readonly what: "FAT" | "miniFAT"
+  /** The bytes sector 0 starts in, at `first`. */
+  readonly data: Uint8Array
+  readonly first: number
+  /** The sector size. */
+  readonly unit: number
+  readonly table: Uint32Array
+  /** Sector numbers from this one on are outside (`data`, `table`). */
+  readonly limitSectors: number
+  readonly sectors: Sectors
+  /** Whether a stream in consecutive sectors is a view of `data` (else it is copied). */
+  readonly view: boolean
+}
+
+/** A stream's sectors, walked as far as its size needs. */
+interface Extent {
+  readonly medium: Medium
+  readonly sectors: ReadonlyArray<number>
+  readonly size: number
+}
 
 /** Whether each sector follows the one before it. */
 const consecutive = (sectors: ReadonlyArray<number>): boolean => {
@@ -156,6 +259,37 @@ const consecutive = (sectors: ReadonlyArray<number>): boolean => {
   for (let k = 1; k < sectors.length; k++) if (sectors[k] !== sectors[k - 1]! + 1) return false
   return true
 }
+
+/**
+ * An extent's bytes, the one read path: a view of the medium when it allows
+ * views and the extent is consecutive and inside it, else a copy.
+ */
+const bytesOf = ({ medium, sectors, size }: Extent): Result.Result<Uint8Array, MalformedFile> => {
+  const { data, first, unit } = medium
+  const at = sectors.length > 0 ? first + sectors[0]! * unit : 0
+  if (medium.view && sectors.length * unit >= size && at + size <= data.length && consecutive(sectors)) {
+    // a stream in consecutive sectors (as writers lay out big streams) is a
+    // view of the file, not a copy: no pause to copy hundreds of MiB
+    return Result.succeed(data.subarray(at, at + size))
+  }
+  const out = new Uint8Array(size)
+  let filled = 0
+  // progress: one sector per iteration
+  for (const sector of sectors) {
+    if (filled >= size) break
+    const from = first + sector * unit
+    // a partial last sector holds what the data has
+    const chunk = data.subarray(from, from + unit)
+    const take = Math.min(unit, size - filled)
+    if (chunk.length < take) return fail("stream runs past the end of the file")
+    out.set(chunk.subarray(0, take), filled)
+    filled += take
+  }
+  if (filled < size) return fail("stream chain is shorter than its size")
+  return Result.succeed(out)
+}
+
+const utf16 = new TextDecoder("utf-16le")
 
 /** Opens a compound file. The sectors it visits, opening and reading streams, go to `meter`. */
 export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter): Result.Result<Cfb, CfbError> => {
@@ -179,12 +313,10 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
   const fileSectors = Math.ceil((bytes.length - sectorSize) / sectorSize)
   const perSector = sectorSize / 4
   const maxChain = limits.maxSectorChain
-  let visited = 0
+  /** FAT sector k describes sectors k * perSector onwards: the FAT sectors that can describe the file's sectors. */
+  const fatSectorsNeeded = Math.ceil(fileSectors / perSector)
+  const fileTable = new Sectors(fatSectorsNeeded * perSector)
 
-  const sectorAt = (sector: number): Uint8Array => {
-    const at = (sector + 1) * sectorSize
-    return bytes.subarray(at, Math.min(bytes.length, at + sectorSize))
-  }
   const sectorU32 = (sector: number, index: number): number => {
     const at = (sector + 1) * sectorSize + index * 4
     return at + 4 <= bytes.length ? view.getUint32(at, true) : FREESECT
@@ -194,103 +326,104 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
   // Some writers (pyExcelerator) declare more FAT sectors than the file has
   // (109 in an 8-sector file) and list only the real ones, the rest free.
   // The declared count only bounds how many numbers are collected (at most
-  // one per sector of the file); the FAT is the in-use entries listed. A chain
-  // that reaches past the loaded FAT fails when it is walked.
-  const declaredFat = u32(44)
-  const numFatWanted = Math.min(declaredFat, fileSectors)
+  // one per sector of the file), so slots past it are ignored, junk or not;
+  // the FAT is the in-use entries listed. A chain that reaches past the
+  // loaded FAT fails when it is walked.
+  const numFatWanted = Math.min(u32(44), fileSectors)
   const fatSectors: Array<number> = []
-  let headerEnded = false
-  // progress: k up to 109
-  for (let k = 0; k < HEADER_DIFAT && fatSectors.length < numFatWanted; k++) {
-    const sector = u32(76 + 4 * k)
-    if (sector === FREESECT) {
-      headerEnded = true
-      break
-    }
-    fatSectors.push(sector)
-  }
-  let difat = u32(68)
-  const numDifat = u32(72)
-  const difatSeen = new Set<number>()
-  // progress: each DIFAT sector is visited once (difatSeen), at most numDifat and fileSectors of them
-  while (!headerEnded && fatSectors.length < numFatWanted && difat !== ENDOFCHAIN && difat !== FREESECT) {
-    if (difat > MAXREGSECT || difat >= fileSectors) return fail(`DIFAT chain points at sector ${difat}`)
-    if (difatSeen.has(difat)) return fail(`DIFAT chain has a cycle at sector ${difat}`)
-    if (difatSeen.size >= numDifat) return fail("DIFAT chain is longer than the header says")
-    if (difatSeen.size >= maxChain) return Result.fail(new LimitExceeded({ limit: "maxSectorChain", max: maxChain, actual: difatSeen.size + 1 }))
-    difatSeen.add(difat)
-    visited++
-    // progress: k up to perSector - 1
-    for (let k = 0; k < perSector - 1 && fatSectors.length < numFatWanted; k++) {
-      const sector = sectorU32(difat, k)
-      if (sector === FREESECT) {
-        headerEnded = true // the listed FAT sectors end here
-        break
-      }
+  /** Collects FAT sector numbers from `slots` slots, up to a free one (the list ends) or the count wanted; whether more are wanted. */
+  const collect = (slots: number, slot: (k: number) => number): boolean => {
+    // progress: k up to slots
+    for (let k = 0; k < slots && fatSectors.length < numFatWanted; k++) {
+      const sector = slot(k)
+      if (sector === FREESECT) return false
       fatSectors.push(sector)
     }
-    if (headerEnded) break
-    difat = sectorU32(difat, perSector - 1)
+    return fatSectors.length < numFatWanted
   }
+  /** A DIFAT pointer; a free one ends the chain too. */
+  const difatLink = (sector: number) => sector === FREESECT ? ENDOFCHAIN : sector
+  const headerWantsMore = collect(HEADER_DIFAT, (k) => u32(76 + 4 * k))
+  // a DIFAT sector lists perSector - 1 FAT sectors, then the next DIFAT
+  // sector; its sectors go to the meter with the FAT's, once loaded
+  const difat = walk(
+    headerWantsMore ? difatLink(u32(68)) : ENDOFCHAIN,
+    (sector) => collect(perSector - 1, (k) => sectorU32(sector, k)) ? difatLink(sectorU32(sector, perSector - 1)) : ENDOFCHAIN,
+    { what: "DIFAT", limitSectors: fileSectors, max: maxChain, declared: u32(72), sectors: fileTable, meter: noMeter }
+  )
+  if (Result.isFailure(difat)) return Result.fail(difat.failure)
   if (fatSectors.length === 0) return fail("no FAT sectors")
-  // the FAT itself. FAT sector k describes sectors k * perSector onwards, so
-  // only the first ceil(fileSectors / perSector) can describe sectors the
-  // file has; walks reject sectors past the file before using the FAT, so the
-  // rest are never consulted and are not read. (pyExcelerator lists FAT
-  // sectors past the end of a small file; those must not fail it, while a
-  // FAT sector a chain could need and the file lacks still does.)
-  const numFat = Math.min(fatSectors.length, Math.ceil(fileSectors / perSector))
+  // the FAT itself. Only the first fatSectorsNeeded FAT sectors can describe
+  // sectors the file has; walks reject sectors past the file before using the
+  // FAT, so the rest are never consulted and are not read. (pyExcelerator
+  // lists FAT sectors past the end of a small file; those must not fail it,
+  // while a FAT sector a chain could need and the file lacks still does.)
+  const numFat = Math.min(fatSectors.length, fatSectorsNeeded)
   const fat = new Uint32Array(numFat * perSector)
   // progress: one FAT sector per iteration
   for (let k = 0; k < numFat; k++) {
     const sector = fatSectors[k]!
     if (sector > MAXREGSECT || sector >= fileSectors) return fail(`FAT sector ${sector} is outside the file`)
-    const data = sectorAt(sector)
-    visited++
-    const words = Math.floor(data.length / 4)
+    const at = (sector + 1) * sectorSize
+    const words = Math.floor((Math.min(bytes.length, at + sectorSize) - at) / 4)
     // progress: i up to words
-    for (let i = 0; i < words; i++) fat[k * perSector + i] = view.getUint32(data.byteOffset - bytes.byteOffset + i * 4, true)
+    for (let i = 0; i < words; i++) fat[k * perSector + i] = view.getUint32(at + i * 4, true)
     // a partial last sector leaves the rest free
     for (let i = words; i < perSector; i++) fat[k * perSector + i] = FREESECT
   }
-  meter.add("sectors", visited)
-  const chains = new Chains(fat, fileSectors, maxChain, "FAT", meter)
-  const OWN_FAT = -1
-  const OWN_DIRECTORY = -2
-  const OWN_MINIFAT = -3
+  meter.add("sectors", difat.success.length + numFat)
   // progress: one sector per iteration
-  for (const sector of fatSectors) chains.reserve(sector, OWN_FAT)
-  for (const sector of difatSeen) chains.reserve(sector, OWN_FAT)
+  for (const sector of fatSectors) fileTable.reserve(sector, FAT_OWNER)
+  for (const sector of difat.success) fileTable.reserve(sector, FAT_OWNER)
+  const file: Medium = {
+    what: "FAT",
+    data: bytes,
+    first: sectorSize,
+    unit: sectorSize,
+    table: fat,
+    limitSectors: Math.min(fileSectors, fat.length),
+    sectors: fileTable,
+    view: true
+  }
 
-  /** Copies `size` bytes of a chain of `unit`-byte sectors. */
-  const gather = (
-    sectors: ReadonlyArray<number>,
-    size: number,
-    unit: number,
-    slice: (sector: number) => Uint8Array
-  ): Result.Result<Uint8Array, MalformedFile> => {
-    const out = new Uint8Array(size)
-    let at = 0
-    // progress: one sector per iteration
-    for (const sector of sectors) {
-      if (at >= size) break
-      const data = slice(sector)
-      const take = Math.min(unit, size - at)
-      if (data.length < take) return fail("stream runs past the end of the file")
-      out.set(data.subarray(0, take), at)
-      at += take
-    }
-    if (at < size) return fail("stream chain is shorter than its size")
-    return Result.succeed(out)
+  /** Up to `count` sectors (all when undefined) of the chain from `start` in `medium`, claimed for `owner`. */
+  const chain = (medium: Medium, start: number, count: number | undefined, owner: Owner) => {
+    return walk(start, medium.table, {
+      what: medium.what,
+      limitSectors: medium.limitSectors,
+      max: maxChain,
+      count,
+      owner,
+      sectors: medium.sectors,
+      meter
+    })
+  }
+
+  /**
+   * The extent of a stream (`name` in messages) of `size` from `start` in
+   * `medium`, claimed for `owner`: an invalid size fails here, when the
+   * stream is read.
+   */
+  const extent = (
+    name: string,
+    size: CfbSize,
+    start: number,
+    medium: Medium,
+    owner: Owner
+  ): Result.Result<Extent, CfbError> => {
+    if (size._tag === "Invalid") return fail(`${name} is larger than the file`)
+    const walked = chain(medium, start, Math.ceil(size.bytes / medium.unit), owner)
+    if (Result.isFailure(walked)) return Result.fail(walked.failure)
+    return Result.succeed({ medium, sectors: walked.success, size: size.bytes })
   }
 
   // the directory
-  const dirChain = chains.walk(u32(48), undefined, OWN_DIRECTORY)
+  const dirChain = chain(file, u32(48), undefined, DIRECTORY_OWNER)
   if (Result.isFailure(dirChain)) return Result.fail(dirChain.failure)
-  const dirGathered = gather(dirChain.success, dirChain.success.length * sectorSize, sectorSize, sectorAt)
-  if (Result.isFailure(dirGathered)) return Result.fail(dirGathered.failure)
-  const dirBytes = dirGathered.success
-  const dirView = new DataView(dirBytes.buffer)
+  const dirRead = bytesOf({ medium: file, sectors: dirChain.success, size: dirChain.success.length * sectorSize })
+  if (Result.isFailure(dirRead)) return Result.fail(dirRead.failure)
+  const dirBytes = dirRead.success
+  const dirView = new DataView(dirBytes.buffer, dirBytes.byteOffset, dirBytes.byteLength)
   const count = Math.floor(dirBytes.length / DIRECTORY_ENTRY)
   if (count === 0) return fail("empty directory")
 
@@ -301,7 +434,7 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
     readonly right: number
     readonly child: number
     readonly start: number
-    readonly size: number
+    readonly size: CfbSize
   }
   const raw = (id: number): Result.Result<Raw, MalformedFile> => {
     const at = id * DIRECTORY_ENTRY
@@ -310,8 +443,9 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
     const name = utf16.decode(dirBytes.subarray(at, at + Math.max(0, nameLength - 2)))
     const low = dirView.getUint32(at + 120, true)
     const high = dirView.getUint32(at + 124, true)
-    // version 3 files may leave garbage in the high word
-    const size = major === 3 ? low : high >= 0x200000 ? Infinity : high * 0x100000000 + low
+    // version 3 files may leave garbage in the high word; a size past 2^53
+    // is not exact, but larger than any file all the same
+    const declared = major === 3 ? low : high * 0x100000000 + low
     return Result.succeed({
       name,
       type: dirView.getUint8(at + 66),
@@ -319,7 +453,7 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
       right: dirView.getUint32(at + 72, true),
       child: dirView.getUint32(at + 76, true),
       start: dirView.getUint32(at + 116, true),
-      size
+      size: declared > fileSectors * sectorSize ? { _tag: "Invalid" } : { _tag: "Valid", bytes: declared }
     })
   }
   const rawRoot = raw(0)
@@ -349,7 +483,8 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
     // MS-CFB forbids "/" (and \ : !) in names; "/" would break paths
     if (entry.name.includes("/")) return fail(`directory entry ${id} has "/" in its name`)
     const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`
-    entries.push({ id, name: entry.name, path, type, size: type === "stream" ? entry.size : 0, start: entry.start })
+    const size: CfbSize = type === "stream" ? entry.size : { _tag: "Valid", bytes: 0 }
+    entries.push({ id, name: entry.name, path, type, size, start: entry.start })
     if (entry.right !== NOSTREAM) stack.push([entry.right, prefix, depth])
     if (entry.left !== NOSTREAM) stack.push([entry.left, prefix, depth])
     if (type === "storage" && entry.child !== NOSTREAM) {
@@ -361,16 +496,12 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
   }
   entries.sort((a, b) => a.id - b.id)
 
-  // the mini stream (in the root entry) and the miniFAT, read on first use
-  interface Mini {
-    readonly data: Uint8Array
-    readonly chains: Chains
-  }
-  let mini: Result.Result<Mini, CfbError> | undefined
-  const loadMini = (): Result.Result<Mini, CfbError> => {
+  // the mini stream (the root entry's stream) and the miniFAT, read on first use
+  let mini: Result.Result<Medium, CfbError> | undefined
+  const loadMini = (): Result.Result<Medium, CfbError> => {
     if (mini !== undefined) return mini
     const numMiniFat = u32(64)
-    const miniFatChain = chains.walk(u32(60), numMiniFat, OWN_MINIFAT)
+    const miniFatChain = chain(file, u32(60), numMiniFat, MINIFAT_OWNER)
     if (Result.isFailure(miniFatChain)) return (mini = Result.fail(miniFatChain.failure))
     const miniFatSectors = miniFatChain.success
     if (miniFatSectors.length < numMiniFat) return (mini = fail("miniFAT chain is shorter than the header says"))
@@ -379,16 +510,22 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
     miniFatSectors.forEach((sector, k) => {
       for (let i = 0; i < perSector; i++) table[k * perSector + i] = sectorU32(sector, i)
     })
-    if (!Number.isFinite(root.size) || root.size > fileSectors * sectorSize) {
-      return (mini = fail("mini stream is larger than the file"))
-    }
-    const rootChain = chains.walk(root.start, Math.ceil(root.size / sectorSize), 1)
-    if (Result.isFailure(rootChain)) return (mini = Result.fail(rootChain.failure))
-    const data = gather(rootChain.success, root.size, sectorSize, sectorAt)
+    const rootExtent = extent("mini stream", root.size, root.start, file, streamOwner(0))
+    if (Result.isFailure(rootExtent)) return (mini = Result.fail(rootExtent.failure))
+    const data = bytesOf(rootExtent.success)
     if (Result.isFailure(data)) return (mini = Result.fail(data.failure))
     // a last, partial mini sector counts (its stream reads only what it has)
     const miniSectors = Math.ceil(data.success.length / MINI_SECTOR)
-    return (mini = Result.succeed({ data: data.success, chains: new Chains(table, miniSectors, maxChain, "miniFAT", meter) }))
+    return (mini = Result.succeed({
+      what: "miniFAT",
+      data: data.success,
+      first: 0,
+      unit: MINI_SECTOR,
+      table,
+      limitSectors: Math.min(miniSectors, table.length),
+      sectors: new Sectors(table.length),
+      view: false
+    }))
   }
 
   const byPath = new Map<string, CfbEntry>()
@@ -403,28 +540,16 @@ export const open = (bytes: Uint8Array, limits: Limits, meter: Meter = noMeter):
     read: (entry) => {
       if (entry.type !== "stream") return fail(`${entry.path} is not a stream`)
       const size = entry.size
-      if (!Number.isFinite(size) || size > fileSectors * sectorSize) {
-        return fail(`stream ${entry.path} is larger than the file`)
-      }
-      if (size < MINI_CUTOFF) {
-        if (size === 0) return Result.succeed(new Uint8Array(0))
+      // an empty stream reads without loading the mini stream
+      if (size._tag === "Valid" && size.bytes === 0) return Result.succeed(new Uint8Array(0))
+      let medium = file
+      if (size._tag === "Valid" && size.bytes < MINI_CUTOFF) {
         const m = loadMini()
         if (Result.isFailure(m)) return Result.fail(m.failure)
-        const { data, chains: miniChains } = m.success
-        const sectors = miniChains.walk(entry.start, Math.ceil(size / MINI_SECTOR), entry.id + 1)
-        if (Result.isFailure(sectors)) return Result.fail(sectors.failure)
-        return gather(sectors.success, size, MINI_SECTOR, (s) => data.subarray(s * MINI_SECTOR, s * MINI_SECTOR + MINI_SECTOR))
+        medium = m.success
       }
-      const walked = chains.walk(entry.start, Math.ceil(size / sectorSize), entry.id + 1)
-      if (Result.isFailure(walked)) return Result.fail(walked.failure)
-      const sectors = walked.success
-      // a stream in consecutive sectors (as writers lay out big streams) is a
-      // view of the file, not a copy: no pause to copy hundreds of MiB
-      const at = sectors.length > 0 ? (sectors[0]! + 1) * sectorSize : 0
-      if (sectors.length * sectorSize >= size && at + size <= bytes.length && consecutive(sectors)) {
-        return Result.succeed(bytes.subarray(at, at + size))
-      }
-      return gather(sectors, size, sectorSize, sectorAt)
+      const read = extent(`stream ${entry.path}`, size, entry.start, medium, streamOwner(entry.id))
+      return Result.isFailure(read) ? Result.fail(read.failure) : bytesOf(read.success)
     }
   })
 }
