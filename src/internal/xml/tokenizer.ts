@@ -33,6 +33,11 @@
  * Errors carry the offset (in characters) of the tag or text run they are
  * about, the same however the input is split.
  *
+ * A handler can ask, when an element opens, for its subtree to be skipped
+ * (no events from inside it, nor its end tag) or for its text to be
+ * collected (handed to `close`, bounded as a whole by `maxStringLength`).
+ * Skipped content is still read and checked like any other.
+ *
  * Cost: every character is examined a bounded number of times (counted in
  * `work`, and handed to the work meter after each piece); a token split
  * across many pieces is collected in parts and joined once.
@@ -54,15 +59,41 @@ export const attr = (attributes: XmlAttributes, name: string): string | undefine
 }
 
 /**
+ * The element being opened, as `XmlHandler.open` sees it: the handler may
+ * call one of these before it returns, to choose what the tokenizer does
+ * with the element's content.
+ */
+export interface XmlElement {
+  /**
+   * Skips the element's subtree: no events for anything inside it, nor for
+   * its end tag. The content is still read and checked (well-formedness,
+   * limits), so the same input fails the same way. Text inside it is not
+   * part of an enclosing element's collected text.
+   */
+  readonly skip: () => void
+  /**
+   * Collects the element's text: every text run and CDATA section inside
+   * it, nested elements included (except skipped subtrees), joined and
+   * handed to `close`. Their total, plus `prior` (the length of text
+   * already collected for the same value, e.g. earlier runs of a rich
+   * string), may not exceed `maxStringLength`. Inside an element whose text
+   * is collected already, this does nothing: the text goes to that element.
+   */
+  readonly collect: (prior?: number) => void
+}
+
+/**
  * Receives tokens. Names are local names (any `prefix:` removed); attribute
- * names are kept as written (e.g. `r:id`). Consecutive `text` calls belong
- * to the same text run (text and CDATA arrive separately). A returned error
- * stops tokenizing.
+ * names are kept as written (e.g. `r:id`). `close` gets the element's
+ * collected text if `open` asked for it (`XmlElement.collect`), else
+ * `undefined`. Consecutive `text` calls belong to the same text run (text
+ * and CDATA arrive separately); text in a skipped subtree doesn't come. A
+ * returned error stops tokenizing.
  */
 export interface XmlHandler {
-  readonly open: (name: string, attributes: XmlAttributes) => SpreadsheetError | undefined | void
-  readonly close: (name: string) => SpreadsheetError | undefined | void
-  readonly text: (value: string) => SpreadsheetError | undefined | void
+  readonly open: (name: string, attributes: XmlAttributes, element: XmlElement) => SpreadsheetError | undefined | void
+  readonly close: (name: string, text: string | undefined) => SpreadsheetError | undefined | void
+  readonly text?: (value: string) => SpreadsheetError | undefined | void
 }
 
 export interface XmlLimits {
@@ -162,7 +193,7 @@ export const isName = (s: string): boolean => {
   return true
 }
 
-export class XmlTokenizer {
+export class XmlTokenizer implements XmlElement {
   /** Characters examined in the current piece (each input character a bounded number of times). */
   private work = 0
 
@@ -177,6 +208,16 @@ export class XmlTokenizer {
   private textLength = 0
 
   private readonly stack: Array<string> = []
+  /** The depth (stack length) of the element whose subtree is skipped, or 0. */
+  private skipAt = 0
+  /** The depth of the element whose text is collected, or 0. */
+  private collectAt = 0
+  /** Its text so far, and that text's length plus the `prior` it was asked with. */
+  private readonly collected: Array<string> = []
+  private collectedLength = 0
+  /** What `open` asked for the element it was handed: nothing, a skip or a collection ("none" outside `open`). */
+  private request: "none" | "skip" | "collect" = "none"
+  private requestPrior = 0
   private phase: Phase = "Prolog"
   /** Characters fed before the current piece. */
   private consumed = 0
@@ -192,6 +233,15 @@ export class XmlTokenizer {
     this.limits = limits
     this.part = part
     this.meter = meter
+  }
+
+  skip(): void {
+    this.request = "skip"
+  }
+
+  collect(prior = 0): void {
+    this.request = "collect"
+    this.requestPrior = prior
   }
 
   /** Hands the piece's work to the meter. */
@@ -303,7 +353,20 @@ export class XmlTokenizer {
     // line ends are normalized first (XML 1.0 §2.11), so &#13; survives
     const value = this.decode(normalizeLineEnds(raw), this.textStart)
     if (typeof value !== "string") return value
-    return this.handler.text(value)
+    return this.deliverText(value)
+  }
+
+  /** Text inside the root element: collected and handed to the handler, unless it is in a skipped subtree. */
+  private deliverText(value: string): Status {
+    if (this.skipAt !== 0) return undefined
+    if (this.collectAt !== 0) {
+      this.collected.push(value)
+      this.collectedLength += value.length
+      if (this.collectedLength > this.limits.maxStringLength) {
+        return new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: this.collectedLength })
+      }
+    }
+    return this.handler.text === undefined ? undefined : this.handler.text(value)
   }
 
   private addMarkup(mode: Markup, s: string): Status {
@@ -483,7 +546,7 @@ export class XmlTokenizer {
         if (content.length > this.limits.maxStringLength) {
           return new LimitExceeded({ limit: "maxStringLength", max: this.limits.maxStringLength, actual: content.length })
         }
-        return content.length > 0 ? this.handler.text(normalizeLineEnds(content)) : undefined
+        return content.length > 0 ? this.deliverText(normalizeLineEnds(content)) : undefined
       }
       default:
         return absurd(kind)
@@ -557,9 +620,18 @@ export class XmlTokenizer {
     }
     this.phase = "Root"
     this.stack.push(qname)
-    const error = this.handler.open(localName(qname), attributes)
-    if (error !== undefined || !selfClosing) return error
-    return this.closeElement(qname)
+    if (this.skipAt === 0) {
+      const error = this.handler.open(localName(qname), attributes, this)
+      const request = this.request
+      this.request = "none"
+      if (error !== undefined) return error
+      if (request === "skip") this.skipAt = this.stack.length
+      else if (request === "collect" && this.collectAt === 0) {
+        this.collectAt = this.stack.length
+        this.collectedLength = this.requestPrior
+      }
+    }
+    return selfClosing ? this.closeElement(qname) : undefined
   }
 
   private endTag(markup: string): Status {
@@ -571,9 +643,22 @@ export class XmlTokenizer {
   }
 
   private closeElement(qname: string): Status {
+    const depth = this.stack.length
     this.stack.pop()
     if (this.stack.length === 0) this.phase = "Epilog"
-    return this.handler.close(localName(qname))
+    if (this.skipAt !== 0) {
+      if (depth === this.skipAt) this.skipAt = 0
+      return undefined
+    }
+    let text: string | undefined
+    if (depth === this.collectAt) {
+      const parts = this.collected
+      text = parts.length === 0 ? "" : parts.length === 1 ? parts[0]! : parts.join("")
+      parts.length = 0
+      this.collectedLength = 0
+      this.collectAt = 0
+    }
+    return this.handler.close(localName(qname), text)
   }
 
   /** Decodes entities and character references; or the error, if one is invalid. */

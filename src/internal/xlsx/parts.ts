@@ -15,7 +15,7 @@ import { malformedIn, type SheetEntry, sheetVisibility } from "../package.ts"
 import { uniqueSheetNames } from "../sheetNames.ts"
 import type { DefinedNameEntry } from "../workbook.ts"
 import * as Attr from "../xml/attributes.ts"
-import type { XmlHandler } from "../xml/tokenizer.ts"
+import type { XmlElement, XmlHandler } from "../xml/tokenizer.ts"
 import type { Archive, LocatedEntry } from "../zip/archive.ts"
 
 export const malformed = malformedIn("xlsx")
@@ -48,9 +48,9 @@ export const readWorkbookPart = (
   const definedNames: Array<DefinedNameEntry> = []
   let date1904 = false
   let inSheets = false
-  let name: { name: string; scope: number | undefined; hidden: boolean; text: Array<string>; length: number } | undefined
+  let name: { name: string; scope: number | undefined; hidden: boolean } | undefined
   const handler: XmlHandler = {
-    open: (element, attributes) => {
+    open: (element, attributes, opened) => {
       switch (element) {
         case "workbookPr":
           date1904 = Attr.bool(attributes, "date1904")
@@ -79,27 +79,20 @@ export const readWorkbookPart = (
           // a bad scope is the workbook's, like a missing one
           const local = Attr.uint(attributes, "localSheetId", NINE_DIGITS)
           const scope = local === "bad" ? undefined : local
-          name = { name: Attr.xstring(attributes, "name") ?? "", scope, hidden: Attr.bool(attributes, "hidden"), text: [], length: 0 }
+          name = { name: Attr.xstring(attributes, "name") ?? "", scope, hidden: Attr.bool(attributes, "hidden") }
+          // its text is the formula, nested elements' text included
+          opened.collect()
           return
         }
       }
       return undefined
     },
-    close: (element) => {
+    close: (element, text) => {
       if (element === "sheets") inSheets = false
       else if (element === "definedName" && name !== undefined) {
-        definedNames.push({ name: name.name, formula: Attr.unescapeXstring(name.text.join("")), hidden: name.hidden, scope: name.scope })
+        definedNames.push({ name: name.name, formula: Attr.unescapeXstring(text ?? ""), hidden: name.hidden, scope: name.scope })
         name = undefined
       }
-    },
-    text: (value) => {
-      if (name === undefined) return
-      name.text.push(value)
-      name.length += value.length
-      if (name.length > limits.maxStringLength) {
-        return new LimitExceeded({ limit: "maxStringLength", max: limits.maxStringLength, actual: name.length })
-      }
-      return undefined
     }
   }
   return Effect.map(parsePart(archive, entry, handler, limits), () => {
@@ -109,41 +102,35 @@ export const readWorkbookPart = (
 }
 
 /**
- * Collects rich text the way `<si>` and `<is>` hold it: the `<t>` elements
- * (directly, or inside `<r>` runs), joined; phonetic runs (`<rPh>`) are
- * skipped wherever they are, with the `<t>` elements inside them (also a
- * run inside a `<t>`: the `<t>`'s text after it is kept). Feed it the
- * events inside the container.
+ * Collects rich text the way `<si>` and `<is>` hold it: the text of the
+ * `<t>` elements (directly, or inside `<r>` runs), joined; phonetic runs
+ * (`<rPh>`) are skipped wherever they are, with the `<t>` elements inside
+ * them (also a run inside a `<t>`: the `<t>`'s text after it is kept). The
+ * tokenizer collects each `<t>`'s text, counting the text before it against
+ * `maxStringLength`. Feed it the events inside the container.
  */
 export class RichText {
   private parts: Array<string> = []
   private length = 0
-  private inT = 0
-  private inPhonetic = 0
-  private readonly maxLength: number
+  /** Elements open inside the container (skipped ones aside: their end tags don't come). */
+  private depth = 0
 
-  constructor(maxLength: number) {
-    this.maxLength = maxLength
+  open(name: string, element: XmlElement): void {
+    if (name === "rPh") return element.skip()
+    this.depth++
+    if (name === "t") element.collect(this.length)
   }
 
-  open(name: string): void {
-    if (name === "rPh") this.inPhonetic++
-    else if (name === "t" && this.inPhonetic === 0) this.inT++
-  }
-
-  close(name: string): void {
-    if (name === "rPh") this.inPhonetic--
-    // a <t> inside a phonetic run wasn't counted by open
-    else if (name === "t" && this.inPhonetic === 0 && this.inT > 0) this.inT--
-  }
-
-  text(value: string): LimitExceeded | undefined {
-    if (this.inT === 0 || this.inPhonetic > 0) return undefined
-    this.parts.push(value)
-    this.length += value.length
-    return this.length > this.maxLength
-      ? new LimitExceeded({ limit: "maxStringLength", max: this.maxLength, actual: this.length })
-      : undefined
+  /** An end tag inside the container; true for the container's own. */
+  close(name: string, text: string | undefined): boolean {
+    if (this.depth === 0) return true
+    this.depth--
+    // undefined for a <t> inside a <t>: its text is the outer one's
+    if (name === "t" && text !== undefined) {
+      this.parts.push(text)
+      this.length += text.length
+    }
+    return false
   }
 
   /** The text so far (unescaped); resets for the next container. */
@@ -151,8 +138,7 @@ export class RichText {
     const value = Attr.unescapeXstring(this.parts.length === 1 ? this.parts[0]! : this.parts.join(""))
     this.parts = []
     this.length = 0
-    this.inT = 0
-    this.inPhonetic = 0
+    this.depth = 0
     return value
   }
 }
@@ -167,10 +153,10 @@ export const readSharedStrings = (
   limits: Limits
 ): Effect.Effect<ReadonlyArray<string>, SpreadsheetError> => {
   const strings: Array<string> = []
-  const rich = new RichText(limits.maxStringLength)
+  const rich = new RichText()
   let inItem = false
   const handler: XmlHandler = {
-    open: (name) => {
+    open: (name, _, element) => {
       if (name === "si") {
         if (inItem) return malformed("<si> inside an <si>", entry.name)
         if (strings.length >= limits.maxSharedStrings) {
@@ -178,16 +164,16 @@ export const readSharedStrings = (
         }
         inItem = true
         rich.take()
-      } else if (inItem) rich.open(name)
+      } else if (inItem) rich.open(name, element)
       return undefined
     },
-    close: (name) => {
-      if (name === "si" && inItem) {
+    close: (name, text) => {
+      // the item's own end tag (an <si> inside it fails at its start tag)
+      if (inItem && rich.close(name, text)) {
         strings.push(rich.take())
         inItem = false
-      } else if (inItem) rich.close(name)
-    },
-    text: (value) => (inItem ? rich.text(value) : undefined)
+      }
+    }
   }
   return Effect.as(parsePart(archive, entry, handler, limits), strings)
 }
@@ -228,8 +214,7 @@ export const readStyles = (
     close: (name) => {
       if (name === "cellXfs") inCellXfs = false
       else if (name === "numFmts") inNumFmts = false
-    },
-    text: () => undefined
+    }
   }
   return Effect.map(parsePart(archive, entry, handler, limits), () => cellStyles(xfIds, xfIds.length, custom))
 }
