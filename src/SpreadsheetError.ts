@@ -8,14 +8,37 @@ import { Schema } from "effect"
 
 /**
  * The bytes are a format this library doesn't read (yet), or no spreadsheet
- * at all. `format` names what was detected, e.g. `"xls"`, `"cfb"`, `"zip"`,
- * `"pdf"`, `"unknown"`.
+ * at all. `format` names what was found:
+ *
+ * - a detected format without a reader (an `UnreadableFormat` of the
+ *   `Workbook` module), e.g. `"cfb"`, `"pdf"`, `"unknown"`; `"zip"` also
+ *   names a zip entry compressed with a method that isn't read;
+ * - `"biff2"`, `"biff3"` or `"biff4"`: an XLS workbook of that BIFF version
+ *   (Excel 2.x-4.x);
+ * - `"xls"`: an XLS workbook stream whose BOF record names an unknown BIFF
+ *   version.
  *
  * @since 0.1.0
  * @category errors
  */
 export class UnsupportedFormat extends Schema.TaggedError<UnsupportedFormat>()("UnsupportedFormat", {
-  format: Schema.String,
+  format: Schema.Literals([
+    "ods",
+    "spreadsheetml",
+    "sylk",
+    "cfb",
+    "zip",
+    "html",
+    "xml",
+    "pdf",
+    "image",
+    "rtf",
+    "unknown",
+    "biff2",
+    "biff3",
+    "biff4",
+    "xls"
+  ]),
   reason: Schema.String
 }) {
   override get message(): string {

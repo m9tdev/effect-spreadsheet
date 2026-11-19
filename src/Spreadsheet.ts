@@ -4,7 +4,7 @@
  *
  * @since 0.1.0
  */
-import { absurd, Effect, Stream } from "effect"
+import { Effect, Stream } from "effect"
 import type * as Cell from "./Cell.ts"
 import * as Csv from "./csv/index.ts"
 import { readCsvWorkbook } from "./internal/csv/read.ts"
@@ -17,13 +17,17 @@ import { readXlsbPackage } from "./internal/xlsb/read.ts"
 import { readXlsxPackage } from "./internal/xlsx/read.ts"
 import { type InvalidOption, LimitExceeded, type SpreadsheetError, UnsupportedFormat } from "./SpreadsheetError.ts"
 import * as SpreadsheetLimits from "./SpreadsheetLimits.ts"
-import type { Format, Row, Workbook } from "./Workbook.ts"
+import type { Format, ReadableFormat, Row, UnreadableFormat, Workbook } from "./Workbook.ts"
 
 export type {
   /** @since 0.1.0 */
   Format,
   /** @since 0.1.0 */
-  RecordsOptions
+  ReadableFormat,
+  /** @since 0.1.0 */
+  RecordsOptions,
+  /** @since 0.1.0 */
+  UnreadableFormat
 }
 
 /**
@@ -63,18 +67,12 @@ export const detectFormat = (
   accept(bytes, options?.limits, detected)
 
 /**
- * The formats `read` hands to a reader by format; see the `switch` in
- * `read`. Compound files, bare BIFF streams and packages aren't among
- * them: they go by what the probe found in them.
+ * Why each format detection hands on without a reader fails: every
+ * `Detected` format but `"csv"`, the one read by format (compound files,
+ * bare BIFF streams and packages go by what the probe found in them). A
+ * new detected format doesn't compile until it gets a reason here.
  */
-type Readable = "csv"
-
-/**
- * Why each format without a reader fails. Typed over every detected
- * `Format` that isn't `Readable`, so a new `Format` doesn't compile until it
- * either gets a reader in `read` or a reason here.
- */
-const unsupported: Record<Exclude<Detected["format"], Readable>, string> = {
+const unsupported: Record<Exclude<Detected["format"], "csv">, string> = {
   ods: "ODS reading is not implemented",
   spreadsheetml: "SpreadsheetML 2003 reading is not implemented yet",
   sylk: "SYLK reading is not implemented",
@@ -128,23 +126,9 @@ const readDetected = (
   input: Accepted,
   options: ReadOptions | undefined
 ): Effect.Effect<Workbook, SpreadsheetError> => {
-  switch (format) {
-    case "csv":
-      return readCsvWorkbook(input.bytes, input.limits, options?.csv)
-    case "ods":
-    case "spreadsheetml":
-    case "sylk":
-    case "zip":
-    case "html":
-    case "xml":
-    case "pdf":
-    case "image":
-    case "rtf":
-    case "unknown":
-      return Effect.fail(new UnsupportedFormat({ format, reason: unsupported[format] }))
-    default:
-      return absurd(format)
-  }
+  return format === "csv"
+    ? readCsvWorkbook(input.bytes, input.limits, options?.csv)
+    : Effect.fail(new UnsupportedFormat({ format, reason: unsupported[format] }))
 }
 
 /**

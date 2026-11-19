@@ -48,6 +48,13 @@ Errors: `UnsupportedFormat { format, reason }`, `MalformedFile { format, part?, 
 `LimitExceeded { limit, max, actual }`, `Encrypted { format }`, `SheetNotFound { sheet }`,
 `InvalidOption { option, reason }` (e.g. a bad delimiter, encoding label or records header).
 
+Formats are typed by what can happen to them. `workbook.format` is a `ReadableFormat`
+(`"csv"`, `"xlsx"`, `"xlsb"`, `"xls"`). `Spreadsheet.detectFormat` gives a `Format`: a
+`ReadableFormat` or an `UnreadableFormat`, which names what was found (`"ods"`, `"cfb"`,
+`"zip"`, `"pdf"`, `"unknown"`, ...). `UnsupportedFormat.format` is an `UnreadableFormat`, a
+BIFF version that isn't read (`"biff2"`, `"biff3"`, `"biff4"`), or `"xls"` for an unknown BIFF
+version in an XLS workbook stream. A `switch` over any of them can be exhaustive.
+
 Bad input and bad reader options are typed errors; bad limits are not. A delimiter that isn't
 one usable character, an unknown encoding label or a `toRecords` `header` other than
 `"first-row"`, a row index or an array of names fails with `InvalidOption`, but a limit that

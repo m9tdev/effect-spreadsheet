@@ -10,7 +10,7 @@
 import { Effect, type Stream } from "effect"
 import { MalformedFile, type SpreadsheetError } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
-import type { DefinedName, Format, Row, SheetDetails, Visibility, Workbook } from "../Workbook.ts"
+import type { DefinedName, Row, SheetDetails, Visibility, Workbook } from "../Workbook.ts"
 import { type CellStyles, NO_STYLES } from "./numFmt.ts"
 import { lookup, type Named, packageRels, partRels, type Rels } from "./opc.ts"
 import { fromSources, type SheetSource } from "./workbook.ts"
@@ -178,7 +178,7 @@ export const readPackage = <W extends { readonly sheets: ReadonlyArray<SheetEntr
     }
 
     return fromSources({
-      format: f.format satisfies Format,
+      format: f.format,
       sheets: sheets.map(({ sheet, part }) => ({ name: sheet.name, visibility: sheet.visibility, source: sourceOf(part) })),
       definedNames,
       limits

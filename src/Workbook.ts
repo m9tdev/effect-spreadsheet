@@ -78,18 +78,23 @@ export const SheetInfo = Schema.Struct({
 export type SheetInfo = typeof SheetInfo.Type
 
 /**
- * A file format, as detected from the bytes (`Spreadsheet.detectFormat`)
- * and as reported by `Workbook.format`. Spreadsheet formats are named after
- * the reader that handles them; the others say what was found instead.
+ * A format this library reads, named after its reader: what
+ * `Workbook.format` reports.
  *
  * @since 0.1.0
  * @category models
  */
-export type Format =
-  | "csv"
-  | "xlsx"
-  | "xlsb"
-  | "xls"
+export type ReadableFormat = "csv" | "xlsx" | "xlsb" | "xls"
+
+/**
+ * A format detection can report that no reader reads: it names what was
+ * found. Reading it fails with `UnsupportedFormat` (or `Encrypted`, for an
+ * encrypted workbook in a compound file, which is detected as `"cfb"`).
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export type UnreadableFormat =
   | "ods"
   | "spreadsheetml"
   | "sylk"
@@ -104,6 +109,15 @@ export type Format =
   | "rtf"
   /** Binary data of no known kind. */
   | "unknown"
+
+/**
+ * A file format, as detected from the bytes (`Spreadsheet.detectFormat`):
+ * one a reader reads, or one that names what was found instead.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export type Format = ReadableFormat | UnreadableFormat
 
 /**
  * A defined name (named range, print area, ...), as metadata only: its
@@ -185,8 +199,8 @@ export const RowsSource: unique symbol = Symbol.for("effect-spreadsheet/Workbook
  * @category models
  */
 export interface Workbook {
-  /** The format the workbook was read from, e.g. `"csv"`, `"xlsx"`. */
-  readonly format: Format
+  /** The format the workbook was read from, e.g. `"csv"`, `"xlsx"`: always one a reader reads. */
+  readonly format: ReadableFormat
   /** In workbook order. Names are unique without case: readers rename a later duplicate (`Name (2)`) and name a nameless sheet (`Sheet<n>`). */
   readonly sheets: ReadonlyArray<SheetInfo>
   /** Defined names (metadata only; empty for formats without them). */
@@ -213,7 +227,7 @@ const NO_DETAILS: SheetDetails = { hiddenColumns: [], merges: [] }
  * @category constructors
  */
 export const make = (options: {
-  readonly format: Format
+  readonly format: ReadableFormat
   readonly sheets: ReadonlyArray<SheetInfo>
   readonly definedNames?: ReadonlyArray<DefinedName> | undefined
   readonly limits: Limits

@@ -5,7 +5,7 @@
  *
  * @internal
  */
-import type { Format } from "../Workbook.ts"
+import type { UnreadableFormat } from "../Workbook.ts"
 import { detectEncoding } from "./csv/decode.ts"
 
 const TEXT_PREFIX_BYTES = 8 * 1024
@@ -33,7 +33,7 @@ export const ZIP_MAGICS: ReadonlyArray<ReadonlyArray<number>> = [
 export const CFB_MAGIC: ReadonlyArray<number> = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 
 /** What bytes that are neither a container nor a bare BIFF stream can be. */
-export type PlainFormat = Exclude<Format, "xlsx" | "xlsb" | "ods" | "zip" | "xls" | "cfb">
+export type PlainFormat = "csv" | Exclude<UnreadableFormat, "ods" | "zip" | "cfb">
 
 /** BOF "type of the following data": workbook globals, VB module, worksheet, chart, macro sheet, BIFF4 workbook. */
 const BOF_DATA_TYPES = new Set([0x0005, 0x0006, 0x0010, 0x0020, 0x0040, 0x0100])

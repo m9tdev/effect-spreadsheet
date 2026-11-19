@@ -36,12 +36,12 @@ import {
   UnsupportedFormat
 } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
-import type { Format } from "../Workbook.ts"
+import type { Format, UnreadableFormat } from "../Workbook.ts"
 import { type Cfb, type CfbEntry, type CfbError, open as openCfb } from "./cfb/cfb.ts"
 import { type Meter, noMeter } from "./meter.ts"
 import { contentType, lookup, type Named, packageRels } from "./opc.ts"
 import { fixedWorkbook } from "./package.ts"
-import { biffBof, CFB_MAGIC, plainFormat, startsWith, ZIP_MAGICS } from "./sniff.ts"
+import { biffBof, type BiffVersion, CFB_MAGIC, plainFormat, startsWith, ZIP_MAGICS } from "./sniff.ts"
 import { type Archive, locateEntry, openDirectory } from "./zip/archive.ts"
 import { type Directory, normalizeName, readDirectory, type ZipEntry } from "./zip/directory.ts"
 
@@ -70,7 +70,7 @@ export interface EncryptedPackage {
 export interface Unreadable {
   readonly _tag: "Unreadable"
   readonly format: "xls" | "cfb"
-  readonly found: string
+  readonly found: "cfb" | OldBiff
   readonly reason: string
 }
 
@@ -95,12 +95,15 @@ export interface Package {
  */
 export interface Detected {
   readonly _tag: "Detected"
-  readonly format: Exclude<Format, "xls" | "cfb" | "xlsx" | "xlsb">
+  readonly format: "csv" | Exclude<UnreadableFormat, "cfb">
 }
 
 export type Probe = XlsProbe | Package | Detected
 
-const OLD_BIFF_REASON = (version: string) => `${version.toUpperCase()} (Excel 2.x-4.x) workbooks aren't supported`
+/** The BIFF versions of Excel 2.x-4.x, which aren't read. */
+type OldBiff = Exclude<BiffVersion, "biff5/8">
+
+const OLD_BIFF_REASON = (version: OldBiff) => `${version.toUpperCase()} (Excel 2.x-4.x) workbooks aren't supported`
 
 /**
  * What a compound file holds: its `Workbook` or `Book` stream, an encrypted
@@ -124,10 +127,10 @@ const probeCfb = (bytes: Uint8Array, limits: Limits, meter: Meter): Result.Resul
 }
 
 /** BOF record types of BIFF2-4, by version. */
-const OLD_BOFS: ReadonlyMap<number, string> = new Map([[0x0009, "biff2"], [0x0209, "biff3"], [0x0409, "biff4"]])
+const OLD_BOFS: ReadonlyMap<number, OldBiff> = new Map([[0x0009, "biff2"], [0x0209, "biff3"], [0x0409, "biff4"]])
 
 /** The BIFF2-4 version a stream's first record type names, if any. */
-const oldBiff = (stream: Uint8Array): string | undefined =>
+const oldBiff = (stream: Uint8Array): OldBiff | undefined =>
   stream.length >= 2 ? OLD_BOFS.get(stream[0]! | (stream[1]! << 8)) : undefined
 
 /**

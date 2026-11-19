@@ -9,7 +9,7 @@
 import { Effect, Stream } from "effect"
 import { SheetNotFound, type SpreadsheetError } from "../SpreadsheetError.ts"
 import type { Limits } from "../SpreadsheetLimits.ts"
-import { type DefinedName, type Format, make, type Row, type SheetDetails, type SheetInfo, type Visibility, type Workbook } from "../Workbook.ts"
+import { type DefinedName, make, type ReadableFormat, type Row, type SheetDetails, type SheetInfo, type Visibility, type Workbook } from "../Workbook.ts"
 
 /**
  * How a sheet's rows and details are read. Each function gets the
@@ -65,7 +65,7 @@ export const toDefinedNames = (
  * the sheet's position.
  */
 export const fromSources = (options: {
-  readonly format: Format
+  readonly format: ReadableFormat
   readonly sheets: ReadonlyArray<SourcedSheet>
   readonly definedNames?: ReadonlyArray<DefinedName> | undefined
   readonly limits: Limits
