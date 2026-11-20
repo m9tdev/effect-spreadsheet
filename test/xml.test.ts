@@ -863,6 +863,31 @@ describe("xml tokenizer: rejected input", () => {
         expect(one(doc, { ...l, maxXmlAttributes: 2_000 }).error).toMatchObject({ _tag: "LimitExceeded", limit: "maxXmlAttributes" })
       })
 
+      it("at the quote where the tag passes the bound and the values one too many, the bound is checked first", () => {
+        const values = Array.from({ length: 3_000 }, (_, i) => `a${i}="${"v".repeat(20)}"`).join(" ")
+        const doc = `<a ${values}/>`
+        const bound = tagBound(40)
+        // the first opening quote with more than `bound` characters of the tag before it, and the values before it
+        let quote = -1
+        let before = 0
+        // progress: j increases up to the quote, and it comes before the end
+        for (let j = 1, inValue = false; quote < 0; j++) {
+          if (doc[j] !== "\"") continue
+          if (inValue) inValue = false
+          else if (j - 1 > bound) quote = j
+          else {
+            before++
+            inValue = true
+          }
+        }
+        const l = { ...limits, maxStringLength: 40, maxXmlAttributes: before }
+        const cut = bound + 2
+        expect(cut).toBeLessThan(quote)
+        for (const pieces of [[doc], [doc.slice(0, cut), doc.slice(cut)]]) {
+          expect(tokenize(pieces, l).error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+        }
+      })
+
       it("a root tag with namespace declarations is read with a low maxStringLength", () => {
         const root = `<worksheet xmlns="urn:a:main" xmlns:r="urn:a:rel" xmlns:mc="urn:a:mc" xmlns:x14ac="urn:a:x14ac" ` +
           `xmlns:xr="urn:a:xr" mc:Ignorable="x14ac xr" xr:uid="{00000000-0001-0000-0000-000000000000}">`
