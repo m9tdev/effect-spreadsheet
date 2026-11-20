@@ -1,6 +1,7 @@
 /**
  * The format types: a workbook's format is one a reader reads, detection
- * reports any format, and `UnsupportedFormat` names only what isn't read.
+ * reports any format, `UnsupportedFormat` names only what isn't read, and
+ * `MalformedFile` and `Encrypted` name only the layers that can raise them.
  * The type assertions are checked by `tsc` (`pnpm check`); the runtime
  * tests pin the error schema's literal list to its type.
  */
@@ -43,6 +44,23 @@ const UNSUPPORTED_NAMES: Record<UnsupportedName, true> = {
   biff4: true,
   xls: true
 }
+
+type MalformedName = "csv" | "xlsx" | "xlsb" | "xls" | "zip" | "xml" | "cfb"
+type EncryptedName = "xls" | "xlsx" | "zip"
+
+/** Every name a `MalformedFile` can carry, once. */
+const MALFORMED_NAMES: Record<MalformedName, true> = {
+  csv: true,
+  xlsx: true,
+  xlsb: true,
+  xls: true,
+  zip: true,
+  xml: true,
+  cfb: true
+}
+
+/** Every name an `Encrypted` can carry, once. */
+const ENCRYPTED_NAMES: Record<EncryptedName, true> = { xls: true, xlsx: true, zip: true }
 
 /** A switch over a workbook's format that names only the readable formats. */
 const readerOf = (format: Workbook.Workbook["format"]): string => {
@@ -97,6 +115,45 @@ describe("format types", () => {
     }
     for (const format of ["csv", "xlsx", "xlsb", "biff5/8", ""]) {
       assert.throws(() => new SpreadsheetError.UnsupportedFormat({ format: format as UnsupportedName, reason: "r" }))
+    }
+  })
+
+  it("MalformedFile names a reader's format or the container or XML layer under it", () => {
+    expectTypeOf<SpreadsheetError.MalformedFile["format"]>().toEqualTypeOf<MalformedName>()
+    // @ts-expect-error a format without a reader is never parsed far enough to be malformed
+    const pdf: SpreadsheetError.MalformedFile["format"] = "pdf"
+    // @ts-expect-error nor is an old BIFF version, which fails with UnsupportedFormat
+    const biff4: SpreadsheetError.MalformedFile["format"] = "biff4"
+    assert.deepStrictEqual([pdf, biff4], ["pdf", "biff4"])
+  })
+
+  it("Encrypted names an XLS workbook, an encrypted OOXML package or a zip entry", () => {
+    expectTypeOf<SpreadsheetError.Encrypted["format"]>().toEqualTypeOf<EncryptedName>()
+    // @ts-expect-error CSV has no encryption
+    const csv: SpreadsheetError.Encrypted["format"] = "csv"
+    // @ts-expect-error an encrypted XLSB package can't be told from an XLSX one, so it is named xlsx
+    const xlsb: SpreadsheetError.Encrypted["format"] = "xlsb"
+    assert.deepStrictEqual([csv, xlsb], ["csv", "xlsb"])
+  })
+
+  it("MalformedFile's and Encrypted's schemas accept exactly the names of their types", () => {
+    const malformed: ReadonlyArray<string> = SpreadsheetError.MalformedFile.fields.format.literals
+    assert.deepStrictEqual([...malformed].sort(), Object.keys(MALFORMED_NAMES).sort())
+    for (const format of malformed) {
+      const error = new SpreadsheetError.MalformedFile({ format: format as MalformedName, reason: "r" })
+      assert.isTrue(Schema.is(SpreadsheetError.SpreadsheetError)(error))
+    }
+    for (const format of ["ods", "pdf", "unknown", "biff4", ""]) {
+      assert.throws(() => new SpreadsheetError.MalformedFile({ format: format as MalformedName, reason: "r" }))
+    }
+    const encrypted: ReadonlyArray<string> = SpreadsheetError.Encrypted.fields.format.literals
+    assert.deepStrictEqual([...encrypted].sort(), Object.keys(ENCRYPTED_NAMES).sort())
+    for (const format of encrypted) {
+      const error = new SpreadsheetError.Encrypted({ format: format as EncryptedName })
+      assert.isTrue(Schema.is(SpreadsheetError.SpreadsheetError)(error))
+    }
+    for (const format of ["csv", "xlsb", "cfb", ""]) {
+      assert.throws(() => new SpreadsheetError.Encrypted({ format: format as EncryptedName }))
     }
   })
 })
