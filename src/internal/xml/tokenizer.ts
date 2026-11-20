@@ -18,9 +18,10 @@
  * (`maxXmlAttributes`), and, each on its own, by `maxStringLength`: a text
  * run (and collected text), an attribute value, the markup before, between
  * and after a tag's values (its names, `=`, whitespace and a `/`), and the
- * content of a comment, processing instruction or CDATA section. A tag is
- * checked as it is scanned, part by part, so a tag split across pieces
- * holds at most these.
+ * content of a comment, processing instruction or CDATA section. A whole
+ * tag (between `<` and `>`) is bounded too, by `tagBound`. A tag is checked
+ * as it is scanned, so a tag split across pieces holds at most that, plus
+ * one piece.
  *
  * Normalized as XML 1.0 says: line ends in text and CDATA (§2.11: CRLF and
  * a lone CR become LF), and literal whitespace in attribute values (§3.3.3:
@@ -146,6 +147,15 @@ type Delimited = {
 /** Where the tokenizer is between pieces: in text, or inside markup. */
 type Mode = { readonly _tag: "Text" } | Markup
 
+/**
+ * The most characters one tag (between `<` and `>`) may have:
+ * `maxStringLength` plus 64 KiB for the names and spaces around a value, or
+ * twice `maxStringLength` if that is more, so that a tag of a few values up
+ * to `maxStringLength` each fits. Over it is `LimitExceeded` on
+ * `maxStringLength`, with the tag's length so far.
+ */
+export const tagBound = (maxStringLength: number): number => Math.max(maxStringLength + 65_536, 2 * maxStringLength)
+
 /** Shared, so that text and tags cost no allocation. */
 const TEXT: Mode = { _tag: "Text" }
 const TAG: Tag = { _tag: "Tag" }
@@ -161,6 +171,7 @@ const TAG: Tag = { _tag: "Tag" }
  *   markup before, between and after them (every other character between
  *   `<` and `>` but the quotes).
  * - `values`: the attribute values begun so far.
+ * - `length`: the tag's characters in earlier pieces.
  * - `parts`: the tag's characters from earlier pieces; empty while the tag
  *   lies within the current piece, which is then read in place, and
  *   emptied when a joined tag is handled.
@@ -170,6 +181,7 @@ interface TagScan {
   quote: number
   part: number
   values: number
+  length: number
   readonly parts: Array<string>
 }
 
@@ -233,7 +245,9 @@ export class XmlTokenizer implements XmlElement {
   private readonly part: string | undefined
 
   private mode: Mode = TEXT
-  private readonly tag: TagScan = { start: false, quote: 0, part: 0, values: 0, parts: [] }
+  private readonly tag: TagScan = { start: false, quote: 0, part: 0, values: 0, length: 0, parts: [] }
+  /** `tagBound` of the limits. */
+  private readonly tagMax: number
 
   private text: Array<string> = []
   private textLength = 0
@@ -264,6 +278,7 @@ export class XmlTokenizer implements XmlElement {
   constructor(handler: XmlHandler, limits: XmlLimits, part?: string, meter: Meter = noMeter) {
     this.handler = handler
     this.limits = limits
+    this.tagMax = tagBound(limits.maxStringLength)
     this.part = part
     this.meter = meter
   }
@@ -471,6 +486,7 @@ export class XmlTokenizer implements XmlElement {
     tag.quote = 0
     tag.part = 0
     tag.values = 0
+    tag.length = 0
     return tag
   }
 
@@ -479,8 +495,11 @@ export class XmlTokenizer implements XmlElement {
    * ends it, outside quotes (quotes only matter in start tags), and bounds
    * its parts as it goes (see `TagScan`): each attribute value and each
    * stretch of markup around them by `maxStringLength`, the values by
-   * `maxXmlAttributes`. A part's length is checked where it ends, or at the
-   * end of the piece. A tag that ends in this piece and began in it is
+   * `maxXmlAttributes`, and the whole tag by `tagBound`. A part's length is
+   * checked where it ends, or at the end of the piece; the tag's at each
+   * value's opening quote (before the count, so which of the two fails
+   * doesn't depend on where the pieces end), at its '>' and at the end of
+   * the piece. A tag that ends in this piece and began in it is
    * handled in place, on its range of the piece; one that continues is
    * collected, and joined when it ends. Returns the position after its '>',
    * or the piece's end (`n`).
@@ -489,9 +508,12 @@ export class XmlTokenizer implements XmlElement {
     const n = chunk.length
     const start = tag.start
     const max = this.limits.maxStringLength
+    const tagMax = this.tagMax
     let quote = tag.quote
     // where the current part began: before i if it began in an earlier piece
     let from = i - tag.part
+    // where the tag began, the same way: the tag before j is j - begin long
+    const begin = i - tag.length
     let j = i
     // progress: j increases up to n
     for (; j < n; j++) {
@@ -505,6 +527,7 @@ export class XmlTokenizer implements XmlElement {
       } else if (c === 0x3E) break
       else if (start && (c === 0x22 || c === 0x27)) {
         if (j - from > max) return this.tooLong(j - from)
+        if (j - begin > tagMax) return this.tooLong(j - begin)
         if (++tag.values > this.limits.maxXmlAttributes) {
           return new LimitExceeded({ limit: "maxXmlAttributes", max: this.limits.maxXmlAttributes, actual: tag.values })
         }
@@ -513,10 +536,12 @@ export class XmlTokenizer implements XmlElement {
       }
     }
     if (j - from > max) return this.tooLong(j - from)
+    if (j - begin > tagMax) return this.tooLong(j - begin)
     this.work += j - i + 1
     if (j === n) {
       tag.quote = quote
       tag.part = n - from
+      tag.length = n - begin
       tag.parts.push(chunk.slice(i))
       this.mode = TAG
       return n

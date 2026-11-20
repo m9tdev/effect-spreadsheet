@@ -5,7 +5,7 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { open } from "../src/internal/zip/archive.ts"
 import { parse, xmlText } from "../src/internal/xml/parse.ts"
-import { isName, type XmlHandler, XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
+import { isName, tagBound, type XmlHandler, XmlTokenizer } from "../src/internal/xml/tokenizer.ts"
 import { isSpreadsheetError, MalformedFile, type SpreadsheetError } from "../src/SpreadsheetError.ts"
 import * as SpreadsheetLimits from "../src/SpreadsheetLimits.ts"
 import { counter, metered } from "./helpers/meter.ts"
@@ -771,15 +771,107 @@ describe("xml tokenizer: rejected input", () => {
     })
 
     it("a tag past maxStringLength in all is read when each part is within its bound", () => {
-      // 10 000 attributes, about 120 000 characters, with a maxStringLength of 10
-      const attributes = Array.from({ length: 10_000 }, (_, i) => `a${i}="${i % 1000}"`)
+      // 5 000 attributes, about 55 000 characters, with a maxStringLength of 10
+      const attributes = Array.from({ length: 5_000 }, (_, i) => `a${i}="${i % 1000}"`)
       const doc = `<a ${attributes.join(" ")}/>`
-      const many = { ...small, maxXmlAttributes: 10_000 }
-      for (const pieces of [[doc], splitAt(doc, [7, 50_000, 50_001, 99_999])]) {
+      expect(doc.length).toBeGreaterThan(50_000)
+      expect(doc.length - 2).toBeLessThanOrEqual(tagBound(10))
+      const many = { ...small, maxXmlAttributes: 5_000 }
+      for (const pieces of [[doc], splitAt(doc, [7, 30_000, 30_001, 49_999])]) {
         const { error, events } = tokenize(pieces, many)
         expect(error).toBeUndefined()
-        expect(events[0]![0] === "open" && events[0]![2].length).toBe(10_000)
+        expect(events[0]![0] === "open" && events[0]![2].length).toBe(5_000)
       }
+    })
+
+    describe("a whole tag is bounded by maxStringLength + 64 KiB, or twice maxStringLength if more", () => {
+      it("the bound", () => {
+        expect(tagBound(40)).toBe(40 + 65_536)
+        expect(tagBound(65_536)).toBe(131_072)
+        expect(tagBound(262_144)).toBe(524_288)
+      })
+
+      /** `<a .../>` with `length` characters between '<' and '>', of values and markup within `max` each. */
+      const tagOf = (length: number, max: number): string => {
+        const value = "v".repeat(Math.max(1, max - 20))
+        let body = "a"
+        // progress: each attribute adds more than one character, until the rest is at most max
+        for (let k = 0; length - 1 - body.length > max; k++) body += ` a${k}="${value}"`
+        const rest = length - 1 - body.length
+        body += rest >= 6 ? ` z="${"w".repeat(rest - 5)}"` : " ".repeat(rest)
+        return `<${body}/>`
+      }
+
+      for (const max of [40, 262_144]) {
+        it(`a tag of exactly the bound is read, one more character fails, whole or in pieces (maxStringLength ${max})`, () => {
+          const l = { ...limits, maxStringLength: max, maxXmlAttributes: 10_000 }
+          const bound = tagBound(max)
+          const fits = tagOf(bound, max)
+          const over = tagOf(bound + 1, max)
+          expect([fits.length, over.length]).toEqual([bound + 2, bound + 3])
+          const cuts = [[], [1], [bound - 7], [bound], [bound + 1], [bound + 2], [bound / 2, bound - 3]]
+          for (const cut of [...cuts, Array.from({ length: Math.ceil(bound / 4096) }, (_, k) => (k + 1) * 4096)]) {
+            const read = tokenize(splitAt(fits, cut), l)
+            expect(read.error, String(cut)).toBeUndefined()
+            expect(read.events.length).toBe(2)
+            const failed = tokenize(splitAt(over, cut), l)
+            expect(failed.error, String(cut)).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", max })
+            expect(failed.events).toEqual([])
+          }
+          // in one piece, with its length
+          expect(one(over, l).error).toMatchObject({ actual: bound + 1 })
+        })
+      }
+
+      it("at a value's opening quote, the tag up to it may reach the bound but not pass it", () => {
+        const l = { ...limits, maxStringLength: 40, maxXmlAttributes: 10_000 }
+        const bound = tagBound(40)
+        // `a` and values up to `bound` characters before a last value's quote
+        const upTo = (length: number) => {
+          const head = tagOf(length - 2, 40).slice(1, -2)
+          return `<${head} z="v"/>`
+        }
+        // `bound` characters before the quote: checked again at the '>', 4 characters later
+        expect(one(upTo(bound), l).error).toMatchObject({ _tag: "LimitExceeded", actual: bound + 4 })
+        // one more: stops at the quote
+        expect(one(upTo(bound + 1), l).error).toMatchObject({ _tag: "LimitExceeded", actual: bound + 1 })
+      })
+
+      it("a tag's length counts for that tag only, after one that ran over pieces", () => {
+        const l = { ...limits, maxStringLength: 40, maxXmlAttributes: 10_000 }
+        const first = tagOf(60_000, 40)
+        const second = tagOf(10_000, 40)
+        const doc = `<r>${first}${second}</r>`
+        // the first tag has 59 000 of its characters in the first piece
+        expect(tokenize([doc.slice(0, 59_004), doc.slice(59_004)], l).error).toBeUndefined()
+      })
+
+      it("a tag over the bound fails on it before the value count it reaches later, however split", () => {
+        // values of 20 characters: about 2 340 values up to the bound, which comes before the 2 401st
+        const values = Array.from({ length: 3_000 }, (_, i) => `a${i}="${"v".repeat(20)}"`).join(" ")
+        const doc = `<a ${values}/>`
+        const l = { ...limits, maxStringLength: 40, maxXmlAttributes: 2_400 }
+        for (const cut of [[], [70_000], [1, 30_000, 65_000]]) {
+          expect(tokenize(splitAt(doc, cut), l).error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+        }
+        // in one piece, its length up to the quote where it is checked
+        const error = one(doc, l).error
+        expect(error).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength" })
+        expect(error?._tag === "LimitExceeded" && error.actual).toBeGreaterThan(tagBound(40))
+        expect(error?._tag === "LimitExceeded" && error.actual).toBeLessThan(tagBound(40) + 30)
+        // a count reached before the bound still fails on the count
+        expect(one(doc, { ...l, maxXmlAttributes: 2_000 }).error).toMatchObject({ _tag: "LimitExceeded", limit: "maxXmlAttributes" })
+      })
+
+      it("a root tag with namespace declarations is read with a low maxStringLength", () => {
+        const root = `<worksheet xmlns="urn:a:main" xmlns:r="urn:a:rel" xmlns:mc="urn:a:mc" xmlns:x14ac="urn:a:x14ac" ` +
+          `xmlns:xr="urn:a:xr" mc:Ignorable="x14ac xr" xr:uid="{00000000-0001-0000-0000-000000000000}">`
+        expect(root.length).toBeGreaterThan(2 * 40)
+        const doc = `${root}<sheetData/></worksheet>`
+        for (const pieces of [[doc], splitAt(doc, [50]), [...doc]]) {
+          expect(tokenize(pieces, { ...limits, maxStringLength: 40 }).error).toBeUndefined()
+        }
+      })
     })
 
     it("the values of a tag are counted against maxXmlAttributes as they are scanned", () => {
@@ -815,6 +907,19 @@ describe("xml tokenizer: rejected input", () => {
       // the start of a terminator at the end of a piece is not counted yet
       expect(tokenize([`<a><![CDATA[${"d".repeat(10)}]]`, `></a>`], small).error).toBeUndefined()
       expect(tokenize([`<a><![CDATA[${"d".repeat(11)}]`, `]></a>`], small).error).toMatchObject(over(11))
+      // unterminated, at the end of a piece: only what is surely content counts (all
+      // but the last characters, which could start the terminator), so one past
+      // the bound fails and the bound itself is truncated input
+      const five = { ...limits, maxStringLength: 5 }
+      const unterminated: Array<[string, number]> = [["<r><!--", 2], ["<r><?", 1], ["<r><![CDATA[", 2]]
+      for (const [opener, allowance] of unterminated) {
+        for (const at of [0, 2, 3 + opener.length]) {
+          const fits = opener + "x".repeat(5 + allowance)
+          const past = opener + "x".repeat(6 + allowance)
+          expect(tokenize([fits.slice(0, at), fits.slice(at)], five).error, fits).toMatchObject({ _tag: "MalformedFile" })
+          expect(tokenize([past.slice(0, at), past.slice(at)], five).error, past).toMatchObject({ _tag: "LimitExceeded", limit: "maxStringLength", actual: 6 })
+        }
+      }
       // CDATA outside the root that is too long stops on its length
       expect(one(`<![CDATA[${"d".repeat(11)}]]><a/>`, small).error).toMatchObject(over(11))
     })
