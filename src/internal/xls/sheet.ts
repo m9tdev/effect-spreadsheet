@@ -143,7 +143,7 @@ const MERGE_SIZE = 8
 export interface SheetContext {
   readonly stream: Uint8Array
   readonly offset: number
-  /** End of the substream: reading stops there (see `SheetEntry.end`). */
+  /** End of the substream: reading stops there (see `SheetStart`). */
   readonly end: number
   readonly part: string
   readonly globals: Globals
@@ -170,14 +170,12 @@ const stringFailed = (read: StringFailure, part: string, record: BiffRecord, lim
     : truncated(part, record)
 
 /**
- * Opens the substream: checks the offset and the worksheet BOF; the reader
- * of its records after it (embedded substreams skipped, records of type
- * `continued` read with their CONTINUEs), or why not.
+ * Opens the substream at its start (an offset the globals checked, see
+ * `SheetStart`): checks its BOF; the reader of its records after it
+ * (embedded substreams skipped, records of type `continued` read with
+ * their CONTINUEs), or why not.
  */
 const openSubstream = (context: SheetContext, continued?: number): SubstreamReader | SpreadsheetError => {
-  if (context.offset < 0 || context.offset + 4 > context.stream.length) {
-    return malformed(context.part, `sheet offset ${context.offset} is outside the workbook stream`)
-  }
   const reader = new SubstreamReader(context.stream, context.part, context.offset, context.end, continued)
   const bof = reader.next()
   if (bof === undefined) return malformed(context.part, "the sheet has no BOF", context.offset)

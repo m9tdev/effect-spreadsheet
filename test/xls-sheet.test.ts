@@ -49,8 +49,9 @@ const rowsDisplacing = (book: X.TestBook, displacedRecords: number) =>
     const stream = X.workbookStream(book)
     const limits = SpreadsheetLimits.defaults
     const globals = yield* readGlobals(stream, limits)
-    const { offset, end } = globals.sheets[0]!
-    return Array.from(yield* Stream.runCollect(sheetRows({ stream, offset, end, part: "sheet", globals, limits, displacedRecords })))
+    const { offset, start } = globals.sheets[0]!
+    if (start._tag === "Broken") return yield* Effect.fail(start.error)
+    return Array.from(yield* Stream.runCollect(sheetRows({ stream, offset, end: start.end, part: "sheet", globals, limits, displacedRecords })))
   })))
 const rowsDisplaced = async (book: X.TestBook, displacedRecords: number) => {
   const exit = await rowsDisplacing(book, displacedRecords)
@@ -194,9 +195,10 @@ describe("xls sheet: formula string results", () => {
   })
 
   it("a STRING's characters don't continue past the end of its sheet's substream", async () => {
-    // sheet S ends with a STRING short of its count; the CONTINUE with the rest is where sheet T starts
+    // sheet S ends with a STRING short of its count, right before the CONTINUE with the rest: the
+    // substream ends there (the end a next substream's BOF would give), so the string is cut
     const short = X.record(STRING, [...X.u16(3), 0, ...chars("a")])
-    const stream = X.workbookStream({ sheets: [{ name: "S", records: [X.formula(0, 0, 0, { kind: 0 }), short, X.record(CONTINUE, [0, ...chars("bc")])] }, { name: "T", records: [] }] })
+    const stream = X.workbookStream({ sheets: [{ name: "S", records: [X.formula(0, 0, 0, { kind: 0 }), short, X.record(CONTINUE, [0, ...chars("bc")])] }] })
     const view = new DataView(stream.buffer, stream.byteOffset, stream.byteLength)
     /** Offsets of the records from `at` on, up to the end of the stream. */
     const headers = (at: number): Array<number> => {
@@ -205,14 +207,16 @@ describe("xls sheet: formula string results", () => {
       for (; at + 4 <= stream.length; at += 4 + view.getUint16(at + 2, true)) out.push(at)
       return out
     }
-    const bounds = headers(0).filter((at) => view.getUint16(at, true) === 0x0085)
-    const sheetS = view.getUint32(bounds[0]! + 4, true)
+    const sheetS = view.getUint32(headers(0).find((at) => view.getUint16(at, true) === 0x0085)! + 4, true)
     const string = headers(sheetS).find((at) => view.getUint16(at, true) === STRING)!
     const continued = string + 4 + view.getUint16(string + 2, true)
     expect(view.getUint16(continued, true)).toBe(CONTINUE)
-    // point sheet T at the CONTINUE: sheet S's substream now ends right before it
-    view.setUint32(bounds[1]! + 4, continued, true)
-    expect(failureOf(await readExit(stream))).toMatchObject({ _tag: "MalformedFile", reason: "truncated record 0x207", offset: string })
+    const limits = SpreadsheetLimits.defaults
+    const exit = await Effect.runPromise(Effect.exit(Effect.gen(function*() {
+      const globals = yield* readGlobals(stream, limits)
+      return yield* Stream.runCollect(sheetRows({ stream, offset: sheetS, end: continued, part: "sheet", globals, limits }))
+    })))
+    expect(failureOf(exit)).toMatchObject({ _tag: "MalformedFile", reason: "truncated record 0x207", offset: string })
   })
 
   it("a continued STRING over maxStringLength is LimitExceeded with its character count, however many bytes follow", async () => {
@@ -976,17 +980,23 @@ const sheet = (name: string, records: ReadonlyArray<Uint8Array>, eof = true): Su
 const filler = (n: number) => Array.from({ length: n }, () => X.record(0x0225, X.u16(0)))
 
 describe("xls sheet: each sheet reads its own substream once", () => {
-  it("two sheets at the same offset, or one inside the globals (offset 0 too), are MalformedFile", async () => {
-    const same = layout([sheet("A", [X.number(0, 0, 0, 1)]), { ...sheet("B", []), at: (_, offsets) => offsets[0]! }])
-    const shared = failureOf(await Effect.runPromise(Effect.exit(Xls.read(fromStream(same)))))
-    expect(shared).toMatchObject({ _tag: "MalformedFile" })
-    expect((shared as { reason: string }).reason).toMatch(/^sheets "A" and "B" both start at \d+$/)
-    for (const at of [0, 4, -1]) {
-      const inside = layout([{ ...sheet("A", []), at: (globalsEnd) => (at === -1 ? globalsEnd - 4 : at) }])
-      const failure = failureOf(await Effect.runPromise(Effect.exit(Xls.read(fromStream(inside)))))
-      expect(failure, String(at)).toMatchObject({ _tag: "MalformedFile" })
-      expect((failure as { reason: string }).reason, String(at)).toContain("inside the workbook globals")
+  it("many sheets at one offset cost at most the stream: the first listed reads it, the others fail when read", async () => {
+    const subs: Array<Sub> = [
+      sheet("A", filler(20)),
+      ...Array.from({ length: 511 }, (_, k): Sub => ({ ...sheet(`S${k}`, []), at: (_, offsets) => offsets[0]! }))
+    ]
+    const wb = await Effect.runPromise(Xls.read(fromStream(layout(subs))))
+    const steps = counter("steps")
+    expect(Exit.isSuccess(await rowsOf(wb, 0, steps))).toBe(true)
+    expect(Exit.isSuccess(await detailsOf(wb, 0, steps))).toBe(true)
+    // progress: one sheet per iteration
+    for (let k = 1; k < 512; k++) {
+      const reason = expect.stringMatching(new RegExp(`^sheets "A" and "S${k - 1}" both start at \\d+$`))
+      expect(failureOf(await rowsOf(wb, k, steps))).toMatchObject({ _tag: "MalformedFile", reason })
+      expect(failureOf(await detailsOf(wb, k, steps))).toMatchObject({ _tag: "MalformedFile", reason })
     }
+    // A's 22 records, read by the index pass, the rows and the details
+    expect(steps.total()).toBeLessThanOrEqual(3 * 22 + 10)
   })
 
   it("BOUNDSHEETs out of offset order still read; each sheet ends where the next substream starts", async () => {
@@ -1041,6 +1051,15 @@ describe("xls sheet: each sheet reads its own substream once", () => {
     const ok = await Effect.runPromise(Xls.read(fromStream(stale)))
     const rows = await rowsOf(ok, 1)
     expect(Exit.isSuccess(rows) && Array.from(rows.value).flatMap((r) => r.cells.map(Cell.value))).toEqual([2])
+    // nor one past the stream, or too close to its end for a record header
+    const length = stale.length
+    // progress: one offset per iteration
+    for (const at of [length - 1, length - 3, length + 100]) {
+      const past = layout([sheet("A", [X.number(0, 0, 0, 1)]), { name: "Module1", dt: 6, records: [], at: () => at }, sheet("B", [X.number(0, 0, 0, 2)])])
+      const wb = await Effect.runPromise(Xls.read(fromStream(past)))
+      const last = await rowsOf(wb, 1)
+      expect(Exit.isSuccess(last) && Array.from(last.value).flatMap((r) => r.cells.map(Cell.value)), String(at)).toEqual([2])
+    }
   })
 
   it("many sheets cost at most the stream: total steps over all sheets' rows and details grow with its records", async () => {
@@ -1063,6 +1082,97 @@ describe("xls sheet: each sheet reads its own substream once", () => {
     const wb = await Effect.runPromise(Xls.read(X.xls(one([X.number(0, 0, 0, 1), ...filler(10 * BATCH_RECORDS)]))))
     const run = await countYields(() => Effect.runPromise(Stream.runCollect(Stream.take(Workbook.rows(wb, 0), 1))))
     expect(run.yields).toBeGreaterThanOrEqual(9)
+  })
+})
+
+describe("xls sheet: a sheet offset that is no substream start fails when that sheet is read", () => {
+  // A: cells 1 and 2 around an embedded chart substream; B: cell 3
+  const a = (): Sub => sheet("A", [X.number(0, 0, 0, 1), X.bof(0x0020), X.eof(), X.number(1, 0, 0, 2)])
+  /** A's record offsets, from its substream's offset: BOF (20 bytes), NUMBER (18), the chart's BOF. */
+  const A_NUMBER = 20
+  const A_CHART = 38
+  type At = NonNullable<Sub["at"]>
+  const b = (at?: At, dt = 0): Sub => ({ name: "B", dt, records: [X.bof(dt === 2 ? 0x0020 : 0x0010), X.number(0, 0, 0, 3), X.eof()], ...(at === undefined ? {} : { at }) })
+  /** Opens the stream, then reads each sheet's cell values (or its failure) and details (or failure). */
+  const readEach = async (stream: Uint8Array) => {
+    const wb = await Effect.runPromise(Xls.read(fromStream(stream)))
+    const out: Array<{ readonly rows: unknown; readonly details: unknown }> = []
+    // progress: one sheet per iteration
+    for (const info of wb.sheets) {
+      const rows = await rowsOf(wb, info.index)
+      const details = await detailsOf(wb, info.index)
+      out.push({
+        rows: Exit.isSuccess(rows) ? Array.from(rows.value).flatMap((r) => r.cells.map(Cell.value)) : failureOf(rows),
+        details: Exit.isSuccess(details) ? details.value : failureOf(details)
+      })
+    }
+    return out
+  }
+  const fine = { rows: [1, 2], details: { hiddenColumns: [], merges: [] } }
+  const broken = (reason: unknown, offset?: number) => {
+    const error = { _tag: "MalformedFile", format: "xls", part: 'sheet "B"', reason, ...(offset === undefined ? {} : { offset }) }
+    return { rows: expect.objectContaining(error), details: expect.objectContaining(error) }
+  }
+
+  it("inside the workbook globals (offset 0 too): the workbook opens, the other sheets read", async () => {
+    // progress: one offset per iteration
+    for (const at of [0, 4, -4]) {
+      let globalsEnd = 0
+      const stream = layout([a(), b((end) => {
+        globalsEnd = end
+        return at < 0 ? end + at : at
+      })])
+      const reason = `sheet "B" starts at ${at < 0 ? globalsEnd + at : at}, inside the workbook globals (which end at ${globalsEnd})`
+      expect(await readEach(stream), String(at)).toEqual([fine, broken(reason)])
+    }
+  })
+
+  it("another sheet's offset: the first in BOUNDSHEET order keeps the substream", async () => {
+    const shared = layout([a(), b((_, offsets) => offsets[0]!)])
+    expect(await readEach(shared)).toEqual([fine, broken(expect.stringMatching(/^sheets "A" and "B" both start at \d+$/))])
+    // A listed first with B's offset: A reads B's substream, B fails, A's own substream is read by none
+    const taken = layout([{ ...a(), at: (_, offsets) => offsets[1]! }, b()])
+    expect(await readEach(taken)).toEqual([{ rows: [3], details: fine.details }, broken(expect.stringMatching(/^sheets "A" and "B" both start at \d+$/))])
+  })
+
+  it("not at a BOF (a record inside another substream, or the middle of one): that sheet doesn't end the one before", async () => {
+    // progress: one offset per iteration
+    for (const into of [A_NUMBER, A_NUMBER + 6]) {
+      let offset = 0
+      const stream = layout([a(), b((_, offsets) => (offset = offsets[0]! + into))])
+      expect(await readEach(stream), String(into)).toEqual([fine, broken("the sheet doesn't start with a BOF", offset)])
+    }
+  })
+
+  it("past the end of the workbook stream, or too close to it for a record header", async () => {
+    const far = layout([a(), b(() => 1_000_000)])
+    expect(await readEach(far)).toEqual([fine, broken("sheet offset 1000000 is outside the workbook stream")])
+    const length = layout([a(), b()]).length
+    const near = layout([a(), b(() => length - 3)])
+    expect(near.length).toBe(length)
+    expect(await readEach(near)).toEqual([fine, broken(`sheet offset ${length - 3} is outside the workbook stream`)])
+    // a header's room left: B's EOF, no BOF
+    const last = layout([a(), b(() => length - 4)])
+    expect(await readEach(last)).toEqual([fine, broken("the sheet doesn't start with a BOF", length - 4)])
+  })
+
+  it("at an embedded substream's BOF: only a peek at the offset, so it counts as a start and ends the sheet around it", async () => {
+    // no stream-wide walk at open: B reads the embedded chart substream (no cells), and A, cut there, has no EOF
+    const stream = layout([a(), b((_, offsets) => offsets[0]! + A_CHART)])
+    const noEof = expect.objectContaining({ _tag: "MalformedFile", reason: "the sheet has no EOF" })
+    expect(await readEach(stream)).toEqual([{ rows: noEof, details: noEof }, { rows: [], details: fine.details }])
+  })
+
+  it("a chart sheet's bad offset is no failure: it holds no cells", async () => {
+    const empty = { rows: [], details: fine.details }
+    const cases: ReadonlyArray<At> = [
+      () => 0,
+      (_, offsets) => offsets[0]!,
+      (_, offsets) => offsets[0]! + A_NUMBER,
+      () => 1_000_000
+    ]
+    // progress: one case per iteration
+    for (const [k, at] of cases.entries()) expect(await readEach(layout([a(), b(at, 2)])), String(k)).toEqual([fine, empty])
   })
 })
 
