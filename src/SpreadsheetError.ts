@@ -60,7 +60,7 @@ export class UnsupportedFormat extends Schema.TaggedError<UnsupportedFormat>()("
  * - `"csv"`, `"xlsx"`, `"xlsb"` or `"xls"`: the format's own reader;
  * - `"zip"`: the zip container of an XLSX or XLSB package (its directory,
  *   an entry's data or its inflated bytes);
- * - `"xml"`: an XML part of an XLSX package that isn't well-formed XML;
+ * - `"xml"`: an XML part of an XLSX or XLSB package that isn't well-formed XML;
  * - `"cfb"`: the compound file holding an XLS workbook.
  *
  * @since 0.1.0
