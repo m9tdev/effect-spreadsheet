@@ -172,6 +172,53 @@ describe("xlsx: cells and rows", () => {
       .toEqual([[0, false, [[0, "Number", 1]]]])
   })
 
+  // [as written, as read]: an escape is `_x`, four hex digits (either case) and `_`, one UTF-16 code unit
+  // each, decoded once from left to right; anything else stays as written
+  const xstrings: ReadonlyArray<readonly [string, string]> = [
+    ["a_x0041_b", "aAb"],
+    ["_x00e9__x00E9_", "éé"],
+    ["_x0041__x0042_", "AB"],
+    ["__x0041_", "_A"],
+    ["_x005F_x0041_", "_x0041_"],
+    ["_x005F_x005F_", "_x005F_"],
+    ["_x005F__x0041_", "_A"],
+    ["_xD83D__xDE00_", "\u{1F600}"],
+    ["_xD83D_", "\uD83D"],
+    ["_x41_", "_x41_"],
+    ["_x004G_", "_x004G_"],
+    ["_X0041_", "_X0041_"],
+    ["_X0041__x0041_", "_X0041_A"],
+    ["_x0041", "_x0041"],
+    ["x0041_", "x0041_"],
+    ["_x00410_", "_x00410_"],
+    ["_x_x0041_", "_xA"],
+    ["_x", "_x"]
+  ]
+
+  it("_xHHHH_ in sheet names: valid escapes decoded once, escaped escapes and partial or invalid escapes as written", async () => {
+    // a digit in front keeps each name apart from the others
+    const { wb } = await readOk({ sheets: xstrings.map(([raw], k) => ({ name: `${k}${raw}` })) })
+    expect(wb.sheets.map((s) => s.name)).toEqual(xstrings.map(([, read], k) => `${k}${read}`))
+  })
+
+  it("_xHHHH_ in defined names and in their text: valid escapes decoded once, escaped escapes and partial or invalid escapes as written", async () => {
+    const { wb } = await readOk({
+      sheets: [{ name: "S" }],
+      definedNames: xstrings.map(([raw]) => `<definedName name="${raw}">S!$A$1&amp;"${raw}"</definedName>`).join("")
+    })
+    expect(wb.definedNames.map((n) => [n.name, n.formula])).toEqual(xstrings.map(([, read]) => [read, `S!$A$1&"${read}"`]))
+  })
+
+  it("_xHHHH_ in number format codes stays as written, escaped escapes included", async () => {
+    const codes = ["0.0_x0042_", "_x005F_x0041_ 0", "0_x41_", "0.00_)"]
+    const { sheets } = await readOk({
+      xfs: codes.map((_, k) => 164 + k),
+      numFmts: Object.fromEntries(codes.map((code, k) => [164 + k, code])),
+      sheets: [{ name: "S", data: `<row>${codes.map((_, k) => `<c s="${k}"><v>1</v></c>`).join("")}</row>` }]
+    })
+    expect(sheets[0]![0]!.cells.map((c) => c.numFmt)).toEqual(codes)
+  })
+
   it("number formats come only from <numFmts>, not from conditional formats (<dxfs>)", async () => {
     const { sheets } = await readOk({
       xfs: [0, 164],
