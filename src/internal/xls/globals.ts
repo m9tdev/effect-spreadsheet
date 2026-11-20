@@ -194,6 +194,10 @@ const nameFormula = (
 /** The part a sheet's errors name. */
 export const sheetPart = (name: string): string => `sheet ${JSON.stringify(name)}`
 
+/** A MalformedFile in the sheet `name`, at `offset` if given. */
+const sheetError = (name: string, reason: string, offset?: number) =>
+  new MalformedFile({ format: "xls", part: sheetPart(name), reason, ...(offset === undefined ? {} : { offset }) })
+
 /**
  * Each sheet's substream (see `SheetStart`). A substream starts at a BOF
  * record past the globals (which end at `globalsEnd`), seen by a peek at
@@ -215,27 +219,19 @@ const substreams = (
   const view = new DataView(stream.buffer, stream.byteOffset, stream.byteLength)
   const atBof = (offset: number) => offset + 4 <= stream.length && view.getUint16(offset, true) === BOF_BIFF5_8
   const owner = new Map<number, string>()
-  const broken = (sheet: Omit<SheetEntry, "start">): MalformedFile | undefined => {
-    const { name, offset } = sheet
-    const part = sheetPart(name)
-    if (offset + 4 > stream.length) return new MalformedFile({ format: "xls", part, reason: `sheet offset ${offset} is outside the workbook stream` })
+  const broken = (name: string, offset: number): MalformedFile | undefined => {
+    if (offset + 4 > stream.length) return sheetError(name, `sheet offset ${offset} is outside the workbook stream`)
     if (offset < globalsEnd) {
-      return new MalformedFile({
-        format: "xls",
-        part,
-        reason: `sheet ${JSON.stringify(name)} starts at ${offset}, inside the workbook globals (which end at ${globalsEnd})`
-      })
+      return sheetError(name, `sheet ${JSON.stringify(name)} starts at ${offset}, inside the workbook globals (which end at ${globalsEnd})`)
     }
-    if (!atBof(offset)) return new MalformedFile({ format: "xls", part, reason: "the sheet doesn't start with a BOF", offset })
+    if (!atBof(offset)) return sheetError(name, "the sheet doesn't start with a BOF", offset)
     const other = owner.get(offset)
-    if (other !== undefined) {
-      return new MalformedFile({ format: "xls", part, reason: `sheets ${JSON.stringify(other)} and ${JSON.stringify(name)} both start at ${offset}` })
-    }
+    if (other !== undefined) return sheetError(name, `sheets ${JSON.stringify(other)} and ${JSON.stringify(name)} both start at ${offset}`)
     owner.set(offset, name)
     return undefined
   }
   // progress: one sheet per iteration (at most maxSheets)
-  const errors = sheets.map(broken)
+  const errors = sheets.map((sheet) => broken(sheet.name, sheet.offset))
   const unique = new Set(owner.keys())
   // progress: one module per iteration (bounded by the BOUNDSHEET records read)
   for (const offset of modules) {
