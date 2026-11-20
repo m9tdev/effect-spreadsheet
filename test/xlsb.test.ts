@@ -434,6 +434,21 @@ describe("xlsb defined names", () => {
   ]
   const external = B.concat([B.record(0x168, [...B.u16(0), ...B.wide("rId1"), ...B.u32(0xFFFFFFFF)]), B.supTabs(["Ext0", "Rates"])])
 
+  it("names are UTF-16 text: _xHHHH_ (an XML escape only) stays as written in sheet names, defined names and their formula text", async () => {
+    const { wb } = await readOk({
+      sheets: [{ name: "A_x0042_C" }],
+      globals: [
+        B.record(0x161),
+        B.supSelf(),
+        B.externSheet([[0, 0, 0]]),
+        B.record(0x162),
+        B.name("N_x0042_", B.ref3d(0, 0, 0))
+      ]
+    })
+    expect(wb.sheets.map((s) => s.name)).toEqual(["A_x0042_C"])
+    expect(wb.definedNames.map((n) => [n.name, n.formula])).toEqual([["N_x0042_", "A_x0042_C!$A$1"]])
+  })
+
   it("single 3-D references and areas are written as Excel writes them in XLSX", async () => {
     const { wb } = await readOk({
       sheets,
