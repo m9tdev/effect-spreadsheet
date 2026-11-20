@@ -54,11 +54,20 @@ export class UnsupportedFormat extends Schema.TaggedError<UnsupportedFormat>()("
  * decoded text, except for invalid text encoding in XML, where it is the
  * byte offset into the part of the first invalid UTF-8 sequence.
  *
+ * `format` names the layer that found the damage, not always the workbook's
+ * format:
+ *
+ * - `"csv"`, `"xlsx"`, `"xlsb"` or `"xls"`: the format's own reader;
+ * - `"zip"`: the zip container of an XLSX or XLSB package (its directory,
+ *   an entry's data or its inflated bytes);
+ * - `"xml"`: an XML part of an XLSX or XLSB package that isn't well-formed XML;
+ * - `"cfb"`: the compound file holding an XLS workbook.
+ *
  * @since 0.1.0
  * @category errors
  */
 export class MalformedFile extends Schema.TaggedError<MalformedFile>()("MalformedFile", {
-  format: Schema.String,
+  format: Schema.Literals(["csv", "xlsx", "xlsb", "xls", "zip", "xml", "cfb"]),
   part: Schema.optionalKey(Schema.String),
   offset: Schema.optionalKey(Schema.Number),
   reason: Schema.String
@@ -90,12 +99,19 @@ export class LimitExceeded extends Schema.TaggedError<LimitExceeded>()("LimitExc
 
 /**
  * The file is password-protected or encrypted. Decryption is out of scope.
+ * `format` names what was found:
+ *
+ * - `"xls"`: an XLS workbook with a FILEPASS record (a password to open);
+ * - `"xlsx"`: an encrypted OOXML package, stored in a compound file as an
+ *   `EncryptedPackage` stream (an encrypted XLSB too: which kind of package
+ *   it holds can't be seen without decrypting it);
+ * - `"zip"`: a zip entry of an XLSX or XLSB package flagged as encrypted.
  *
  * @since 0.1.0
  * @category errors
  */
 export class Encrypted extends Schema.TaggedError<Encrypted>()("Encrypted", {
-  format: Schema.String
+  format: Schema.Literals(["xls", "xlsx", "zip"])
 }) {
   override get message(): string {
     return `Encrypted ${this.format} file`

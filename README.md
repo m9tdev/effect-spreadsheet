@@ -53,7 +53,11 @@ Formats are typed by what can happen to them. `workbook.format` is a `ReadableFo
 `ReadableFormat` or an `UnreadableFormat`, which names what was found (`"ods"`, `"cfb"`,
 `"zip"`, `"pdf"`, `"unknown"`, ...). `UnsupportedFormat.format` is an `UnreadableFormat`, a
 BIFF version that isn't read (`"biff2"`, `"biff3"`, `"biff4"`), or `"xls"` for an unknown BIFF
-version in an XLS workbook stream. A `switch` over any of them can be exhaustive.
+version in an XLS workbook stream. `MalformedFile.format` names the layer that found the
+damage: a reader's format (`"csv"`, `"xlsx"`, `"xlsb"`, `"xls"`) or the layer under it (`"zip"`,
+`"xml"`, `"cfb"`). `Encrypted.format` is `"xls"` (a password to open), `"xlsx"` (an encrypted
+OOXML package in a compound file, XLSB too) or `"zip"` (an encrypted zip entry). A `switch`
+over any of them can be exhaustive.
 
 Bad input and bad reader options are typed errors; bad limits are not. A delimiter that isn't
 one usable character, an unknown encoding label or a `toRecords` `header` other than
